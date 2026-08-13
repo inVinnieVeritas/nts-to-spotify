@@ -8,9 +8,9 @@
 	export let original: BasicTrack;
 	export let matches: undefined | Match[] = undefined;
 	export let selectedMatch: URI | null = null;
-	export let checked: boolean = false;
+	export let checked = false;
 
-	let expanded: boolean = false;
+	let expanded = false;
 
 	$: match = matches?.find((match) => match.uri === selectedMatch);
 	$: hasNoMatch = matches && matches.length === 0;

@@ -8,7 +8,7 @@
 	export let src: string | undefined;
 
 	let audio: HTMLAudioElement;
-	let paused: boolean = true;
+	let paused = true;
 
 	function stopOthers() {
 		if (current && current !== audio) current.pause();

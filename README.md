@@ -1,38 +1,35 @@
-# create-svelte
+# NTS to Spotify
 
-Everything you need to build a Svelte project, powered by [`create-svelte`](https://github.com/sveltejs/kit/tree/master/packages/create-svelte).
+Create a Spotify playlist from one NTS episode or an entire NTS show catalogue.
 
-## Creating a project
+The full-show importer reads the official paginated NTS catalogue and tracklist APIs, scans
+episodes progressively, and keeps uncertain Spotify matches unchecked for manual review. Before
+creating the playlist it removes exact duplicate Spotify track URIs while preserving alternate
+versions and remixes.
 
-If you're seeing this, you've probably already done this step. Congrats!
+## Local setup
 
-```bash
-# create a new project in the current directory
-npm create svelte@latest
-
-# create a new project in my-app
-npm create svelte@latest my-app
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+1. Create a Spotify app in the Spotify developer dashboard.
+2. Add `http://localhost:5173/login` as a redirect URI.
+3. Copy `.env.example` to `.env` and provide `SPOTIFY_CLIENT_ID` and
+   `SPOTIFY_CLIENT_SECRET`.
+4. Install dependencies and run the app:
 
 ```bash
+npm ci
 npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
 ```
 
-## Building
+Paste either a show URL such as `https://www.nts.live/shows/jim-o-rourke` or an individual
+episode URL into the search bar. A full catalogue scan can take several minutes because Spotify
+requests are deliberately rate-limited and uncertain matches require review.
 
-To create a production version of your app:
+## Checks
 
 ```bash
+npm run check
 npm run build
 ```
 
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://kit.svelte.dev/docs/adapters) for your target environment.
+Spotify OAuth requests public and private playlist modification scopes. Users who authenticated
+before those scopes were added need to log out and reconnect Spotify.

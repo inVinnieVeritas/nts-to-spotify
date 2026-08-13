@@ -10,7 +10,9 @@
 		<Logo />
 		<h1 class="font-title">NTS to Spotify</h1>
 
-		<p class="font-base">Create Spotify playlists from NTS episodes.</p>
+		<p class="font-base">
+			Create Spotify playlists from one NTS episode or a show's full catalogue.
+		</p>
 
 		<div class="disclaimer font-small-beast">
 			<h4 class="font-base">Disclaimer</h4>
@@ -26,7 +28,7 @@
 		</div>
 
 		<ol class="font-base">
-			<li>Paste the NTS episode URL into the top bar</li>
+			<li>Paste an NTS show or episode URL into the top bar</li>
 			<li>Preview and manage your tracklist</li>
 			<li>Login with Spotify to be able to import the playlist</li>
 		</ol>

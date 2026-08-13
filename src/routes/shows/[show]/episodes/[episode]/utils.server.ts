@@ -1,30 +1,4 @@
-import { env } from '$env/dynamic/private';
 import type { CheerioAPI } from 'cheerio';
-
-export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-export const getClientCredentials = async () => {
-	try {
-		const res = await fetch('https://accounts.spotify.com/api/token', {
-			method: 'POST',
-			body: new URLSearchParams({
-				grant_type: 'client_credentials'
-			}),
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded',
-				Authorization: `Basic ${Buffer.from(
-					`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
-				).toString('base64')}`
-			}
-		});
-
-		const data: { access_token: string } = await res.json();
-
-		return data.access_token;
-	} catch (error) {
-		return null;
-	}
-};
 
 export function getNTSData(cheerio: CheerioAPI) {
 	const title = cheerio('h1').first().text();

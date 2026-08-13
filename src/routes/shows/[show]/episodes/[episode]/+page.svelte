@@ -5,7 +5,7 @@
 
 	export let data: PageData;
 
-	type Track = {
+	type ReviewTrack = {
 		artist: string;
 		title: string;
 		matches: undefined | Match[];
@@ -13,13 +13,13 @@
 		checked: boolean;
 	};
 
-	let tracks: Track[] = data.tracks.map(({ artist, title, matches, retry }) => {
+	let tracks: ReviewTrack[] = data.tracks.map(({ artist, title, matches, confident }) => {
 		return {
 			artist,
 			title,
 			matches,
 			selectedMatch: matches.length > 0 ? matches[0].uri : null,
-			checked: matches.length > 0 && !retry
+			checked: matches.length > 0 && confident
 		};
 	});
 
@@ -45,7 +45,7 @@
 		</header>
 		{#if tracks.length > 0}
 			<div class="list">
-				{#each tracks as { artist, title, matches, selectedMatch, checked }, i}
+				{#each tracks as { artist, title, matches, selectedMatch, checked }}
 					<Track bind:checked bind:selectedMatch original={{ artist, title }} {matches} />
 				{/each}
 			</div>

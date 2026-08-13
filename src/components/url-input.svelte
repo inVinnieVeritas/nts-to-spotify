@@ -3,12 +3,13 @@
 	import { afterNavigate, goto } from '$app/navigation';
 	import Button from './button.svelte';
 	import Icon from './icon/icon.svelte';
-	import { ntsUrlToRouteUrl, routeParamsToNtsUrl } from '$lib/utils/nts';
+	import { ntsUrlToRouteUrl, routeParamsToNtsUrl, showParamToNtsUrl } from '$lib/utils/nts';
 
 	const getUrlFromParams = () => {
-		return $page.params.show && $page.params.episode
-			? routeParamsToNtsUrl($page.params.show, $page.params.episode)
-			: '';
+		if ($page.params.show && $page.params.episode) {
+			return routeParamsToNtsUrl($page.params.show, $page.params.episode);
+		}
+		return $page.params.show ? showParamToNtsUrl($page.params.show) : '';
 	};
 
 	let value = getUrlFromParams();
@@ -27,7 +28,7 @@
 <form on:submit|preventDefault={handleSubmit}>
 	<label>
 		<Icon icon="search" />
-		<input bind:value placeholder="Paste NTS episode URL" />
+		<input bind:value placeholder="Paste NTS show or episode URL" />
 	</label>
 	<Button variant="ghost" type="submit" icon="arrow-right" iconPosition="right">Go</Button>
 </form>
