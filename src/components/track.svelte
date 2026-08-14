@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { BasicTrack, Match, URI } from '$lib/types';
+	import { createEventDispatcher } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import Button from './button.svelte';
 	import Checkbox from './checkbox.svelte';
@@ -9,11 +10,17 @@
 	export let matches: undefined | Match[] = undefined;
 	export let selectedMatch: URI | null = null;
 	export let checked = false;
+	const dispatch = createEventDispatcher<{ reviewchange: void }>();
 
 	let expanded = false;
 
 	$: match = matches?.find((match) => match.uri === selectedMatch);
 	$: hasNoMatch = matches && matches.length === 0;
+
+	const selectMatch = (uri: URI) => {
+		selectedMatch = uri;
+		dispatch('reviewchange');
+	};
 </script>
 
 <div class="root">
@@ -41,7 +48,11 @@
 					icon="replace"
 				/>
 			{/if}
-			<Checkbox bind:checked on:change disabled={matches === undefined || hasNoMatch} />
+			<Checkbox
+				bind:checked
+				on:change={() => dispatch('reviewchange')}
+				disabled={matches === undefined || hasNoMatch}
+			/>
 		</div>
 	</div>
 	{#if expanded}
@@ -59,7 +70,7 @@
 						{#if selectedMatch === match.uri}
 							<Button disabled>Selected</Button>
 						{:else}
-							<Button variant="outline" on:click={() => (selectedMatch = match.uri)}>Select</Button>
+							<Button variant="outline" on:click={() => selectMatch(match.uri)}>Select</Button>
 						{/if}
 					</div>
 				</div>

@@ -2,17 +2,27 @@ import { env } from '$env/dynamic/private';
 import { error } from '@sveltejs/kit';
 import type { RequestEvent } from '@sveltejs/kit';
 import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from '$lib/constants';
+import { fetchWithTimeout } from './request';
+
+const SPOTIFY_TOKEN_TIMEOUT_MS = 15_000;
 
 export const getAccessToken = async (event: RequestEvent) => {
 	const refresh = event.cookies.get(REFRESH_TOKEN_KEY);
 
 	if (!refresh) return null;
 
-	return event.cookies.get(ACCESS_TOKEN_KEY) || (await refreshAccessToken(refresh, event));
+	return (
+		event.cookies.get(ACCESS_TOKEN_KEY) ||
+		(await refreshAccessToken(refresh, event, event.request.signal))
+	);
 };
 
-const refreshAccessToken = async (refreshToken: string, event: RequestEvent) => {
-	const data = await rotateAccessToken(refreshToken);
+const refreshAccessToken = async (
+	refreshToken: string,
+	event: RequestEvent,
+	signal?: AbortSignal
+) => {
+	const data = await rotateAccessToken(refreshToken, signal);
 
 	setCookies(event, data);
 
@@ -54,44 +64,62 @@ type RefreshTokenResponse = AccessTokenResponse & {
 };
 
 export const startUserSession = async (event: RequestEvent, code: string) => {
-	const res = await fetch('https://accounts.spotify.com/api/token', {
-		method: 'POST',
-		body: new URLSearchParams({
-			grant_type: 'authorization_code',
-			code,
-			redirect_uri: `${event.url.origin}/login`
-		}),
-		headers: {
-			'Content-Type': 'application/x-www-form-urlencoded',
-			Authorization: `Basic ${Buffer.from(
-				`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
-			).toString('base64')}`
-		}
-	});
-
-	if (!res.ok) throw error(401, 'Not authorized');
-
-	const data: RefreshTokenResponse = await res.json();
+	const data = await fetchWithTimeout(
+		fetch,
+		'https://accounts.spotify.com/api/token',
+		{
+			method: 'POST',
+			body: new URLSearchParams({
+				grant_type: 'authorization_code',
+				code,
+				redirect_uri: `${event.url.origin}/login`
+			}),
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+				Authorization: `Basic ${Buffer.from(
+					`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
+				).toString('base64')}`
+			}
+		},
+		SPOTIFY_TOKEN_TIMEOUT_MS,
+		async (res) => {
+			if (!res.ok) {
+				await res.body?.cancel();
+				throw error(401, 'Not authorized');
+			}
+			return (await res.json()) as RefreshTokenResponse;
+		},
+		event.request.signal
+	);
 
 	setCookies(event, data);
 };
 
-export const rotateAccessToken = async (refreshToken: string) => {
-	const res = await fetch('https://accounts.spotify.com/api/token', {
-		method: 'POST',
-		body: new URLSearchParams({
-			grant_type: 'refresh_token',
-			refresh_token: refreshToken
-		}),
-		headers: {
-			'Content-Type': 'application/x-www-form-urlencoded',
-			Authorization: `Basic ${Buffer.from(
-				`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
-			).toString('base64')}`
-		}
-	});
-
-	if (!res.ok) throw error(401, 'Not authorized');
-
-	return (await res.json()) as AccessTokenResponse;
+export const rotateAccessToken = async (refreshToken: string, signal?: AbortSignal) => {
+	return fetchWithTimeout(
+		fetch,
+		'https://accounts.spotify.com/api/token',
+		{
+			method: 'POST',
+			body: new URLSearchParams({
+				grant_type: 'refresh_token',
+				refresh_token: refreshToken
+			}),
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+				Authorization: `Basic ${Buffer.from(
+					`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
+				).toString('base64')}`
+			}
+		},
+		SPOTIFY_TOKEN_TIMEOUT_MS,
+		async (res) => {
+			if (!res.ok) {
+				await res.body?.cancel();
+				throw error(401, 'Not authorized');
+			}
+			return (await res.json()) as AccessTokenResponse;
+		},
+		signal
+	);
 };

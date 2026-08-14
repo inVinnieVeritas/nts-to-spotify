@@ -1,6 +1,7 @@
 import type { BasicTrack, NTSShowCatalog, NTSEpisodeSummary } from '$lib/types';
+import { fetchWithTimeout, type Fetcher } from './request';
 
-type Fetcher = typeof fetch;
+const NTS_TIMEOUT_MS = 20_000;
 
 type NTSMedia = {
 	picture_medium_large?: string;
@@ -34,10 +35,15 @@ type TracklistResponse = {
 const PAGE_SIZE = 12;
 const apiBase = 'https://www.nts.live/api/v2/shows';
 
-const ensureOk = async <T>(response: Response, message: string): Promise<T> => {
-	if (!response.ok) throw new Error(`${message} (${response.status})`);
-	return (await response.json()) as T;
-};
+const consumeJson =
+	<T>(message: string) =>
+	async (response: Response): Promise<T> => {
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new Error(`${message} (${response.status})`);
+		}
+		return (await response.json()) as T;
+	};
 
 const getCover = (media?: NTSMedia) =>
 	media?.picture_medium_large || media?.picture_large || media?.background_medium_large || '';
@@ -52,16 +58,26 @@ const mapEpisode = (episode: NTSEpisode): NTSEpisodeSummary => ({
 
 export const getNTSShowCatalog = async (
 	showAlias: string,
-	request: Fetcher = fetch
+	request: Fetcher = fetch,
+	signal?: AbortSignal
 ): Promise<NTSShowCatalog> => {
-	const [showResponse, firstPageResponse] = await Promise.all([
-		request(`${apiBase}/${showAlias}`),
-		request(`${apiBase}/${showAlias}/episodes?offset=0&limit=${PAGE_SIZE}`)
-	]);
-
 	const [show, firstPage] = await Promise.all([
-		ensureOk<ShowResponse>(showResponse, 'Unable to load NTS show'),
-		ensureOk<EpisodesResponse>(firstPageResponse, 'Unable to load NTS episodes')
+		fetchWithTimeout(
+			request,
+			`${apiBase}/${showAlias}`,
+			{},
+			NTS_TIMEOUT_MS,
+			consumeJson<ShowResponse>('Unable to load NTS show'),
+			signal
+		),
+		fetchWithTimeout(
+			request,
+			`${apiBase}/${showAlias}/episodes?offset=0&limit=${PAGE_SIZE}`,
+			{},
+			NTS_TIMEOUT_MS,
+			consumeJson<EpisodesResponse>('Unable to load NTS episodes'),
+			signal
+		)
 	]);
 
 	const remainingOffsets: number[] = [];
@@ -71,9 +87,13 @@ export const getNTSShowCatalog = async (
 
 	const remainingPages = await Promise.all(
 		remainingOffsets.map(async (offset) =>
-			ensureOk<EpisodesResponse>(
-				await request(`${apiBase}/${showAlias}/episodes?offset=${offset}&limit=${PAGE_SIZE}`),
-				'Unable to load NTS episodes'
+			fetchWithTimeout(
+				request,
+				`${apiBase}/${showAlias}/episodes?offset=${offset}&limit=${PAGE_SIZE}`,
+				{},
+				NTS_TIMEOUT_MS,
+				consumeJson<EpisodesResponse>('Unable to load NTS episodes'),
+				signal
 			)
 		)
 	);
@@ -95,10 +115,17 @@ export const getNTSShowCatalog = async (
 export const getNTSEpisodeTracklist = async (
 	showAlias: string,
 	episodeAlias: string,
-	request: Fetcher = fetch
+	request: Fetcher = fetch,
+	signal?: AbortSignal
 ): Promise<BasicTrack[]> => {
-	const response = await request(`${apiBase}/${showAlias}/episodes/${episodeAlias}/tracklist`);
-	const data = await ensureOk<TracklistResponse>(response, 'Unable to load NTS tracklist');
+	const data = await fetchWithTimeout(
+		request,
+		`${apiBase}/${showAlias}/episodes/${episodeAlias}/tracklist`,
+		{},
+		NTS_TIMEOUT_MS,
+		consumeJson<TracklistResponse>('Unable to load NTS tracklist'),
+		signal
+	);
 
 	return (data.results || [])
 		.map(({ artist, title }) => ({ artist: artist.trim(), title: title.trim() }))

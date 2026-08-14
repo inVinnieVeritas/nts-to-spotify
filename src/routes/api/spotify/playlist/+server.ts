@@ -1,6 +1,7 @@
 import { error, json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getAccessToken } from '$lib/utils/auth.server';
+import { uniqueSpotifyUris } from '$lib/utils/catalog-scan';
 
 export const POST: RequestHandler = async (event) => {
 	const {
@@ -27,6 +28,7 @@ export const POST: RequestHandler = async (event) => {
 	if (!tracks.every((track) => /^spotify:track:[A-Za-z0-9]+$/.test(track))) {
 		throw error(400, 'Invalid Spotify track URI');
 	}
+	const uniqueTracks = uniqueSpotifyUris(tracks);
 
 	const token = await getAccessToken(event);
 	if (!token) throw error(401, 'Login with Spotify first');
@@ -61,12 +63,12 @@ export const POST: RequestHandler = async (event) => {
 			external_urls?: { spotify?: string };
 		};
 
-		for (let index = 0; index < tracks.length; index += 100) {
+		for (let index = 0; index < uniqueTracks.length; index += 100) {
 			const addTracks = await event.fetch(
 				`https://api.spotify.com/v1/playlists/${created.id}/tracks`,
 				{
 					method: 'POST',
-					body: JSON.stringify({ uris: tracks.slice(index, index + 100) }),
+					body: JSON.stringify({ uris: uniqueTracks.slice(index, index + 100) }),
 					headers
 				}
 			);

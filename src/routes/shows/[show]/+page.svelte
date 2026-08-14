@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy, onMount } from 'svelte';
 	import {
 		Badge,
 		Button,
@@ -8,21 +9,34 @@
 		Panel,
 		Track
 	} from '$components';
-	import type { MatchedTrack, NTSEpisodeSummary, URI } from '$lib/types';
+	import type { MatchedTrack } from '$lib/types';
+	import { abortableDelay, createAbortScope, isAbortError } from '$lib/utils/abort';
+	import {
+		captureCatalogProgress,
+		formatCooldownDuration,
+		getCatalogSummaryCounts,
+		getResumableEpisodeIndexes,
+		isCatalogProgressCompatible,
+		reconcileEpisodes,
+		restoreCatalogRetryState,
+		runCatalogWorkers,
+		shouldApplyCatalogRestoration,
+		uniqueSpotifyUris,
+		type CatalogScanOutcome,
+		type EpisodeState
+	} from '$lib/utils/catalog-scan';
+	import {
+		createLatestSnapshotWriter,
+		loadCatalogProgress,
+		saveCatalogProgress
+	} from '$lib/utils/catalog-progress.client';
 	import type { PageData } from './$types';
 
 	export let data: PageData;
 
-	type ReviewTrack = MatchedTrack & {
-		selectedMatch: URI | null;
-		checked: boolean;
-	};
-
-	type EpisodeState = NTSEpisodeSummary & {
-		status: 'pending' | 'scanning' | 'done' | 'error';
-		tracks: ReviewTrack[];
-		error?: string;
-	};
+	const BROWSER_EPISODE_TIMEOUT_MS = 3 * 60 * 1000 + 15_000;
+	const MAX_AUTOMATIC_RATE_LIMITS = 3;
+	const LONG_RETRY_AFTER_SECONDS = 60 * 60;
 
 	const shortDate = (date: string) => {
 		const [year, month, day] = date.slice(0, 10).split('-');
@@ -37,95 +51,277 @@
 			timeZone: 'UTC'
 		}).format(new Date(date));
 
-	const firstEpisode = data.episodes[0];
-	const lastEpisode = data.episodes[data.episodes.length - 1];
-	const dateStamp =
-		firstEpisode && lastEpisode
-			? `${shortDate(lastEpisode.broadcast)}→${shortDate(firstEpisode.broadcast)}`
-			: '';
+	const showDefaults = (pageData: PageData) => {
+		const first = pageData.episodes[0];
+		const last = pageData.episodes[pageData.episodes.length - 1];
+		const stamp = first && last ? `${shortDate(last.broadcast)}→${shortDate(first.broadcast)}` : '';
+		return {
+			first,
+			last,
+			stamp,
+			title: `“${pageData.name.toLowerCase()}” ${stamp}`,
+			description:
+				first && last
+					? `“${pageData.name.toLowerCase()}” ${stamp} — A comprehensive archive of tracks played on ${
+							pageData.name
+					  } on NTS Radio, covering broadcasts from ${longDate(
+							first.broadcast
+					  )} through ${longDate(
+							last.broadcast
+					  )}. Some tracks unavailable on Spotify may be missing.`
+					: `Tracks played on ${pageData.name} on NTS Radio. Some tracks unavailable on Spotify may be missing.`
+		};
+	};
 
-	let playlistTitle = `“${data.name.toLowerCase()}” ${dateStamp}`;
-	let playlistDescription =
-		firstEpisode && lastEpisode
-			? `“${data.name.toLowerCase()}” ${dateStamp} — A comprehensive archive of tracks played on ${
-					data.name
-			  } on NTS Radio, covering broadcasts from ${longDate(
-					firstEpisode.broadcast
-			  )} through ${longDate(
-					lastEpisode.broadcast
-			  )}. Some tracks unavailable on Spotify may be missing.`
-			: `Tracks played on ${data.name} on NTS Radio. Some tracks unavailable on Spotify may be missing.`;
+	const initialDefaults = showDefaults(data);
+	let firstEpisode = initialDefaults.first;
+	let lastEpisode = initialDefaults.last;
+	let dateStamp = initialDefaults.stamp;
+	let playlistTitle = initialDefaults.title;
+	let playlistDescription = initialDefaults.description;
 	let publicPlaylist = false;
 	let scanning = false;
 	let scanMessage = '';
+	let restored = false;
+	let persistenceAvailable = true;
+	let cooldownUntil = 0;
+	let cooldownRemaining = 0;
+	let pausedByRateLimit = false;
+	let cancelRequested = false;
+	let automaticRateLimitCount = 0;
+	let scanController: AbortController | undefined;
+	let cooldownTimer: ReturnType<typeof setInterval> | undefined;
+	let mounted = false;
+	let destroyed = false;
+	let activeShowAlias = data.showAlias;
+	let showGeneration = 0;
+	const activeEpisodeControllers = new Map<number, AbortController>();
 
-	let episodes: EpisodeState[] = data.episodes.map((episode) => ({
-		...episode,
-		status: 'pending',
-		tracks: []
-	}));
+	let episodes: EpisodeState[] = reconcileEpisodes(data.episodes);
 
-	const scanEpisode = async (index: number) => {
+	const snapshotWriter = createLatestSnapshotWriter(
+		saveCatalogProgress,
+		(_cause, failedSnapshot) => {
+			if (failedSnapshot.showAlias !== activeShowAlias) return;
+			persistenceAvailable = false;
+			scanMessage = 'Progress could not be saved in this browser.';
+		}
+	);
+
+	const persistProgress = (waitForSave = false) => {
+		if (!restored || !persistenceAvailable) return Promise.resolve();
+		const snapshot = captureCatalogProgress(
+			activeShowAlias,
+			episodes,
+			{
+				title: playlistTitle,
+				description: playlistDescription,
+				public: publicPlaylist
+			},
+			{ cooldownUntil, pausedByRateLimit }
+		);
+		snapshotWriter.enqueue(snapshot);
+		return waitForSave ? snapshotWriter.flush() : Promise.resolve();
+	};
+
+	const captureAndPersistReview = () => void persistProgress();
+
+	const parseClientRetryAfter = (response: Response, payload: unknown) => {
+		const fromPayload =
+			payload && typeof payload === 'object' && 'retryAfterSeconds' in payload
+				? Number((payload as { retryAfterSeconds: unknown }).retryAfterSeconds)
+				: Number.NaN;
+		const fromHeader = Number(response.headers.get('Retry-After'));
+		const seconds = Number.isFinite(fromPayload) ? fromPayload : fromHeader;
+		return Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.ceil(seconds)) : 1;
+	};
+
+	const scanEpisode = async (
+		index: number,
+		parentSignal: AbortSignal,
+		generation: number,
+		showAlias: string
+	): Promise<CatalogScanOutcome> => {
+		if (generation !== showGeneration || showAlias !== activeShowAlias) {
+			return { type: 'cancelled' };
+		}
+
+		const scope = createAbortScope(parentSignal, BROWSER_EPISODE_TIMEOUT_MS);
+		activeEpisodeControllers.set(index, scope.controller);
+		const episodeAlias = episodes[index].episodeAlias;
 		episodes[index].status = 'scanning';
 		episodes[index].error = undefined;
 		episodes = episodes;
+		void persistProgress();
 
 		try {
 			const response = await fetch('/api/nts/matches', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					show: data.showAlias,
-					episode: episodes[index].episodeAlias
-				})
+					show: showAlias,
+					episode: episodeAlias
+				}),
+				signal: scope.signal
 			});
+			if (generation !== showGeneration || showAlias !== activeShowAlias) {
+				return { type: 'cancelled' };
+			}
+			if (response.status === 429) {
+				const payload = await response.json().catch(() => null);
+				const retryAfterSeconds = parseClientRetryAfter(response, payload);
+				cooldownUntil = Math.max(cooldownUntil, Date.now() + retryAfterSeconds * 1000);
+				cooldownRemaining = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
+				episodes[index].status = 'rate-limited';
+				episodes[index].error = 'Waiting for Spotify';
+				episodes = episodes;
+				void persistProgress();
+				return {
+					type: 'rate-limited',
+					retryAfterSeconds,
+					requiresManualResume: retryAfterSeconds > LONG_RETRY_AFTER_SECONDS
+				};
+			}
 			if (!response.ok) throw new Error(`Request failed (${response.status})`);
 
 			const result = (await response.json()) as { tracks: MatchedTrack[] };
+			if (generation !== showGeneration || showAlias !== activeShowAlias) {
+				return { type: 'cancelled' };
+			}
 			episodes[index].tracks = result.tracks.map((track) => ({
 				...track,
 				selectedMatch: track.matches[0]?.uri || null,
 				checked: track.confident
 			}));
 			episodes[index].status = 'done';
-		} catch (cause) {
-			console.error(cause);
-			episodes[index].status = 'error';
-			episodes[index].error = 'Could not scan this episode.';
-		} finally {
+			episodes[index].error = undefined;
 			episodes = episodes;
+			await persistProgress(true);
+			return { type: 'done' };
+		} catch (cause) {
+			if (generation !== showGeneration || showAlias !== activeShowAlias) {
+				return { type: 'cancelled' };
+			}
+			if (isAbortError(cause) && !scope.didTimeout()) {
+				episodes[index].status = 'pending';
+				episodes[index].error = undefined;
+				episodes = episodes;
+				void persistProgress();
+				return { type: 'cancelled' };
+			}
+			episodes[index].status = 'error';
+			episodes[index].error = scope.didTimeout()
+				? 'Episode scan timed out.'
+				: 'Could not scan this episode.';
+			episodes = episodes;
+			void persistProgress();
+			return { type: 'failed' };
+		} finally {
+			scope.cleanup();
+			if (activeEpisodeControllers.get(index) === scope.controller) {
+				activeEpisodeControllers.delete(index);
+			}
 		}
 	};
 
-	const scanCatalog = async () => {
-		const queue = episodes
-			.map((episode, index) => ({ episode, index }))
-			.filter(({ episode }) => episode.status === 'pending' || episode.status === 'error')
-			.map(({ index }) => index);
+	const abortActiveEpisodes = () => {
+		for (const controller of activeEpisodeControllers.values()) controller.abort();
+	};
+
+	const waitForCooldown = async (signal: AbortSignal) => {
+		while (cooldownUntil > Date.now()) {
+			cooldownRemaining = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
+			await abortableDelay(Math.min(1000, cooldownUntil - Date.now()), signal);
+		}
+		cooldownRemaining = 0;
+	};
+
+	const updateCooldownRemaining = () => {
+		const cooldownWasActive = cooldownRemaining > 0;
+		cooldownRemaining =
+			cooldownUntil > Date.now() ? Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000)) : 0;
+		if (cooldownWasActive && cooldownRemaining === 0 && pausedByRateLimit) {
+			scanMessage = 'Scan paused. Resume is now available.';
+		}
+	};
+
+	const scanCatalog = async (requestedIndexes?: number[]) => {
+		if (scanning || !restored) return;
+		updateCooldownRemaining();
+		if (cooldownRemaining > 0) {
+			scanMessage = `Spotify rate limit: ${formatCooldownDuration(cooldownRemaining)} remaining.`;
+			return;
+		}
+		const queue = (requestedIndexes || getResumableEpisodeIndexes(episodes)).filter(
+			(index) => episodes[index]?.status !== 'done'
+		);
 		if (queue.length === 0) return;
 
 		scanning = true;
+		cancelRequested = false;
+		pausedByRateLimit = false;
+		automaticRateLimitCount = 0;
 		scanMessage = '';
-		let cursor = 0;
-		const worker = async () => {
-			while (cursor < queue.length) {
-				const index = queue[cursor++];
-				await scanEpisode(index);
-			}
-		};
+		const currentScanController = new AbortController();
+		scanController = currentScanController;
+		const currentGeneration = showGeneration;
+		const currentShowAlias = activeShowAlias;
+		await runCatalogWorkers({
+			indexes: queue,
+			concurrency: 2,
+			signal: currentScanController.signal,
+			waitUntilReady: waitForCooldown,
+			scanEpisode: (index, signal) =>
+				scanEpisode(index, signal, currentGeneration, currentShowAlias),
+			onRateLimit: (_index, outcome) => {
+				automaticRateLimitCount += 1;
+				abortActiveEpisodes();
 
-		await Promise.all(Array.from({ length: Math.min(2, queue.length) }, worker));
+				if (outcome.requiresManualResume || automaticRateLimitCount >= MAX_AUTOMATIC_RATE_LIMITS) {
+					pausedByRateLimit = true;
+					void persistProgress();
+					currentScanController.abort();
+				}
+			}
+		}).catch(() => undefined);
+		if (currentGeneration !== showGeneration || currentShowAlias !== activeShowAlias) return;
+		for (const episode of episodes) {
+			if (episode.status === 'scanning' || episode.status === 'rate-limited') {
+				episode.status = 'pending';
+				episode.error = undefined;
+			}
+		}
+		episodes = episodes;
 		scanning = false;
-		scanMessage = episodes.some(({ status }) => status === 'error')
-			? 'Scan finished with some errors. Use Retry failed episodes.'
-			: 'Catalogue scan complete. Review unchecked and unmatched tracks before importing.';
+		updateCooldownRemaining();
+		if (cancelRequested) scanMessage = 'Scan cancelled. Completed episodes were saved.';
+		else if (pausedByRateLimit)
+			scanMessage =
+				cooldownRemaining > 0
+					? 'Scan paused. Resume will become available when the cooldown ends.'
+					: 'Scan paused. Resume is now available.';
+		else if (episodes.some(({ status }) => status === 'error'))
+			scanMessage = 'Scan finished with some errors. Retry failed episodes when ready.';
+		else
+			scanMessage =
+				'Catalogue scan complete. Review unchecked and unmatched tracks before importing.';
+		await persistProgress(true);
+	};
+
+	const cancelScan = () => {
+		if (!scanning) return;
+		cancelRequested = true;
+		scanController?.abort();
+		abortActiveEpisodes();
 	};
 
 	let rawSelectedTracks: string[] = [];
 	let selectedTracks: string[] = [];
 	let duplicateCount = 0;
+	let summaryCounts = { scanned: 0, pending: 0, failed: 0 };
 	let completedCount = 0;
 	let failedCount = 0;
+	let pendingCount = 0;
 	let uncertainCount = 0;
 	let progressLabel = '';
 	$: rawSelectedTracks = episodes.flatMap((episode) =>
@@ -133,25 +329,124 @@
 			.filter((track) => track.checked && track.selectedMatch)
 			.map((track) => track.selectedMatch as string)
 	);
-	$: selectedTracks = Array.from(new Set(rawSelectedTracks));
+	$: selectedTracks = uniqueSpotifyUris(rawSelectedTracks);
 	$: duplicateCount = rawSelectedTracks.length - selectedTracks.length;
-	$: completedCount = episodes.filter(({ status }) => status === 'done').length;
-	$: failedCount = episodes.filter(({ status }) => status === 'error').length;
+	$: summaryCounts = getCatalogSummaryCounts(episodes);
+	$: completedCount = summaryCounts.scanned;
+	$: failedCount = summaryCounts.failed;
+	$: pendingCount = summaryCounts.pending;
 	$: uncertainCount = episodes.reduce(
 		(total, episode) => total + episode.tracks.filter(({ confident }) => !confident).length,
 		0
 	);
 	$: scanComplete = completedCount === episodes.length;
-	$: progressLabel = `${completedCount}/${episodes.length} episodes scanned${
-		failedCount ? ` · ${failedCount} failed` : ''
-	}`;
+	$: progressLabel = `${completedCount} scanned · ${pendingCount} pending · ${failedCount} failed`;
 
 	const episodeStatus = (episode: EpisodeState) => {
 		if (episode.status === 'pending') return 'Waiting';
 		if (episode.status === 'scanning') return 'Scanning…';
 		if (episode.status === 'done') return `${episode.tracks.length} tracks`;
+		if (episode.status === 'rate-limited')
+			return cooldownRemaining > 0
+				? `Spotify cooldown: ${formatCooldownDuration(cooldownRemaining)} remaining`
+				: 'Spotify rate limited';
 		return episode.error || 'Could not scan this episode.';
 	};
+
+	const initializeShow = async (pageData: PageData) => {
+		scanController?.abort();
+		abortActiveEpisodes();
+		activeEpisodeControllers.clear();
+		showGeneration += 1;
+		const generation = showGeneration;
+		const showAlias = pageData.showAlias;
+		activeShowAlias = showAlias;
+		const defaults = showDefaults(pageData);
+		firstEpisode = defaults.first;
+		lastEpisode = defaults.last;
+		dateStamp = defaults.stamp;
+		playlistTitle = defaults.title;
+		playlistDescription = defaults.description;
+		publicPlaylist = false;
+		episodes = reconcileEpisodes(pageData.episodes);
+		scanning = false;
+		scanController = undefined;
+		scanMessage = '';
+		restored = false;
+		persistenceAvailable = true;
+		cooldownUntil = 0;
+		cooldownRemaining = 0;
+		pausedByRateLimit = false;
+		cancelRequested = false;
+		automaticRateLimitCount = 0;
+
+		try {
+			const saved = await loadCatalogProgress(showAlias);
+			if (
+				destroyed ||
+				!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
+			) {
+				return;
+			}
+			episodes = reconcileEpisodes(pageData.episodes, saved);
+			if (isCatalogProgressCompatible(saved)) {
+				playlistTitle = saved.playlist.title;
+				playlistDescription = saved.playlist.description;
+				publicPlaylist = saved.playlist.public;
+			}
+			const retry = restoreCatalogRetryState(saved);
+			cooldownUntil = retry.cooldownUntil;
+			pausedByRateLimit = retry.pausedByRateLimit;
+			updateCooldownRemaining();
+			if (pausedByRateLimit && cooldownRemaining > 0) {
+				scanMessage = 'Scan paused. Resume will become available when the cooldown ends.';
+			} else if (
+				episodes.some(({ status }) => status === 'done') &&
+				episodes.some(({ status }) => status !== 'done')
+			) {
+				scanMessage = 'Saved progress restored. Click Resume scan to continue.';
+			}
+		} catch {
+			if (
+				destroyed ||
+				!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
+			) {
+				return;
+			}
+			persistenceAvailable = false;
+			scanMessage = 'Progress cannot be saved in this browser.';
+		} finally {
+			if (
+				!destroyed &&
+				shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
+			) {
+				restored = true;
+			}
+		}
+	};
+
+	onMount(() => {
+		mounted = true;
+		void initializeShow(data);
+		cooldownTimer = setInterval(updateCooldownRemaining, 1000);
+	});
+
+	$: if (mounted && data.showAlias !== activeShowAlias) void initializeShow(data);
+
+	onDestroy(() => {
+		destroyed = true;
+		showGeneration += 1;
+		if (cooldownTimer) clearInterval(cooldownTimer);
+		for (const episode of episodes) {
+			if (episode.status === 'scanning' || episode.status === 'rate-limited') {
+				episode.status = 'pending';
+				episode.error = undefined;
+			}
+		}
+		scanController?.abort();
+		abortActiveEpisodes();
+		void persistProgress();
+	});
 </script>
 
 <Panel padded={false}>
@@ -174,27 +469,51 @@
 				</div>
 			{:else}
 				<div class="scan-controls">
-					<Button on:click={scanCatalog} loading={scanning} disabled={scanning || scanComplete}>
-						{completedCount === 0 ? 'Scan full catalogue' : 'Retry failed episodes'}
+					<Button
+						on:click={() => scanCatalog()}
+						loading={scanning}
+						disabled={!restored || scanning || scanComplete || cooldownRemaining > 0}
+					>
+						{completedCount === 0 ? 'Scan full catalogue' : 'Resume scan'}
 					</Button>
+					{#if scanning}
+						<Button variant="outline" on:click={cancelScan}>Cancel scan</Button>
+					{/if}
 					<p class="font-small-beast">{progressLabel}</p>
 				</div>
+				{#if cooldownRemaining > 0}
+					<p class="font-base">
+						Spotify rate limit: {formatCooldownDuration(cooldownRemaining)} remaining.
+					</p>
+				{/if}
 			{/if}
 			{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
+			{#if !persistenceAvailable}
+				<p class="font-small-beast">Progress persistence is unavailable.</p>
+			{/if}
 		</header>
 
 		{#if completedCount > 0}
 			<section class="settings">
 				<label class="font-small-beast">
 					Playlist name
-					<input bind:value={playlistTitle} maxlength="100" />
+					<input bind:value={playlistTitle} on:input={captureAndPersistReview} maxlength="100" />
 				</label>
 				<label class="font-small-beast">
 					Description
-					<textarea bind:value={playlistDescription} maxlength="300" rows="4" />
+					<textarea
+						bind:value={playlistDescription}
+						on:input={captureAndPersistReview}
+						maxlength="300"
+						rows="4"
+					/>
 				</label>
 				<label class="visibility font-base">
-					<input type="checkbox" bind:checked={publicPlaylist} />
+					<input
+						type="checkbox"
+						bind:checked={publicPlaylist}
+						on:change={captureAndPersistReview}
+					/>
 					Make playlist public
 				</label>
 				<p class="font-small-beast">
@@ -219,7 +538,7 @@
 
 					{#if episode.status === 'error' && !scanning}
 						<div class="retry">
-							<Button size="sm" variant="outline" on:click={() => scanEpisode(episodeIndex)}
+							<Button size="sm" variant="outline" on:click={() => scanCatalog([episodeIndex])}
 								>Retry</Button
 							>
 						</div>
@@ -233,6 +552,7 @@
 								<Track
 									bind:checked={track.checked}
 									bind:selectedMatch={track.selectedMatch}
+									on:reviewchange={captureAndPersistReview}
 									original={{ artist: track.artist, title: track.title }}
 									matches={track.matches}
 								/>
