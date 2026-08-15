@@ -13,17 +13,21 @@
 	import { abortableDelay, createAbortScope, isAbortError } from '$lib/utils/abort';
 	import {
 		captureCatalogProgress,
+		createGeneratedPlaylistText,
 		formatCooldownDuration,
+		getCatalogExportUris,
 		getCatalogSummaryCounts,
 		getResumableEpisodeIndexes,
 		isCatalogProgressCompatible,
 		reconcileEpisodes,
+		restoreCatalogPlaylistOrder,
 		restoreCatalogRetryState,
 		runCatalogWorkers,
 		shouldApplyCatalogRestoration,
-		uniqueSpotifyUris,
+		updateGeneratedPlaylistText,
 		type CatalogScanOutcome,
-		type EpisodeState
+		type EpisodeState,
+		type PlaylistOrder
 	} from '$lib/utils/catalog-scan';
 	import {
 		createLatestSnapshotWriter,
@@ -43,33 +47,16 @@
 		return `${day}.${month}.${year.slice(2)}`;
 	};
 
-	const longDate = (date: string) =>
-		new Intl.DateTimeFormat('en-GB', {
-			day: 'numeric',
-			month: 'long',
-			year: 'numeric',
-			timeZone: 'UTC'
-		}).format(new Date(date));
-
-	const showDefaults = (pageData: PageData) => {
+	const showDefaults = (pageData: PageData, order: PlaylistOrder = 'latest-first') => {
 		const first = pageData.episodes[0];
 		const last = pageData.episodes[pageData.episodes.length - 1];
-		const stamp = first && last ? `${shortDate(last.broadcast)}→${shortDate(first.broadcast)}` : '';
+		const generated = createGeneratedPlaylistText(pageData.name, pageData.episodes, order);
 		return {
 			first,
 			last,
-			stamp,
-			title: `“${pageData.name.toLowerCase()}” ${stamp}`,
-			description:
-				first && last
-					? `“${pageData.name.toLowerCase()}” ${stamp} — A comprehensive archive of tracks played on ${
-							pageData.name
-					  } on NTS Radio, covering broadcasts from ${longDate(
-							first.broadcast
-					  )} through ${longDate(
-							last.broadcast
-					  )}. Some tracks unavailable on Spotify may be missing.`
-					: `Tracks played on ${pageData.name} on NTS Radio. Some tracks unavailable on Spotify may be missing.`
+			stamp: generated.dateStamp,
+			title: generated.title,
+			description: generated.description
 		};
 	};
 
@@ -80,6 +67,7 @@
 	let playlistTitle = initialDefaults.title;
 	let playlistDescription = initialDefaults.description;
 	let publicPlaylist = false;
+	let playlistOrder: PlaylistOrder = 'latest-first';
 	let scanning = false;
 	let scanMessage = '';
 	let restored = false;
@@ -116,7 +104,8 @@
 			{
 				title: playlistTitle,
 				description: playlistDescription,
-				public: publicPlaylist
+				public: publicPlaylist,
+				order: playlistOrder
 			},
 			{ cooldownUntil, pausedByRateLimit }
 		);
@@ -125,6 +114,24 @@
 	};
 
 	const captureAndPersistReview = () => void persistProgress();
+	const changePlaylistOrder = (event: Event) => {
+		const nextOrder: PlaylistOrder =
+			(event.currentTarget as HTMLSelectElement).value === 'oldest-first'
+				? 'oldest-first'
+				: 'latest-first';
+		const previousGenerated = createGeneratedPlaylistText(data.name, data.episodes, playlistOrder);
+		const nextGenerated = createGeneratedPlaylistText(data.name, data.episodes, nextOrder);
+		const updatedText = updateGeneratedPlaylistText(
+			{ title: playlistTitle, description: playlistDescription },
+			previousGenerated,
+			nextGenerated
+		);
+		playlistOrder = nextOrder;
+		dateStamp = nextGenerated.dateStamp;
+		playlistTitle = updatedText.title;
+		playlistDescription = updatedText.description;
+		captureAndPersistReview();
+	};
 
 	const parseClientRetryAfter = (response: Response, payload: unknown) => {
 		const fromPayload =
@@ -329,7 +336,7 @@
 			.filter((track) => track.checked && track.selectedMatch)
 			.map((track) => track.selectedMatch as string)
 	);
-	$: selectedTracks = uniqueSpotifyUris(rawSelectedTracks);
+	$: selectedTracks = getCatalogExportUris(episodes, playlistOrder);
 	$: duplicateCount = rawSelectedTracks.length - selectedTracks.length;
 	$: summaryCounts = getCatalogSummaryCounts(episodes);
 	$: completedCount = summaryCounts.scanned;
@@ -368,6 +375,7 @@
 		playlistTitle = defaults.title;
 		playlistDescription = defaults.description;
 		publicPlaylist = false;
+		playlistOrder = 'latest-first';
 		episodes = reconcileEpisodes(pageData.episodes);
 		scanning = false;
 		scanController = undefined;
@@ -390,6 +398,12 @@
 			}
 			episodes = reconcileEpisodes(pageData.episodes, saved);
 			if (isCatalogProgressCompatible(saved)) {
+				playlistOrder = restoreCatalogPlaylistOrder(saved);
+				dateStamp = createGeneratedPlaylistText(
+					pageData.name,
+					pageData.episodes,
+					playlistOrder
+				).dateStamp;
 				playlistTitle = saved.playlist.title;
 				playlistDescription = saved.playlist.description;
 				publicPlaylist = saved.playlist.public;
@@ -508,6 +522,13 @@
 						rows="4"
 					/>
 				</label>
+				<label class="font-small-beast">
+					PLAYLIST ORDER
+					<select value={playlistOrder} on:change={changePlaylistOrder}>
+						<option value="latest-first">Latest episodes first</option>
+						<option value="oldest-first">Oldest episodes first</option>
+					</select>
+				</label>
 				<label class="visibility font-base">
 					<input
 						type="checkbox"
@@ -615,13 +636,18 @@
 	}
 
 	.settings textarea,
-	.settings label:not(.visibility) input {
+	.settings label:not(.visibility) input,
+	.settings select {
 		font: inherit;
 		color: inherit;
 		background: var(--color-background);
 		border: 1px solid var(--color-foreground);
 		padding: 10px;
 		resize: vertical;
+	}
+
+	.settings select {
+		text-transform: none;
 	}
 
 	.episodes {

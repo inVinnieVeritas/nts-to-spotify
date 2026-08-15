@@ -5,14 +5,18 @@ import {
 	CATALOG_PROGRESS_SCHEMA_VERSION,
 	SPOTIFY_MATCHER_VERSION,
 	captureCatalogProgress,
+	createGeneratedPlaylistText,
 	formatCooldownDuration,
+	getCatalogExportUris,
 	getCatalogSummaryCounts,
 	getResumableEpisodeIndexes,
 	reconcileEpisodes,
+	restoreCatalogPlaylistOrder,
 	restoreCatalogRetryState,
 	runCatalogWorkers,
 	shouldApplyCatalogRestoration,
 	uniqueSpotifyUris,
+	updateGeneratedPlaylistText,
 	type CatalogProgress,
 	type EpisodeState
 } from './catalog-scan';
@@ -91,6 +95,17 @@ describe('catalogue progress restoration', () => {
 		});
 	});
 
+	it('restores a saved playlist order choice', () => {
+		const progress = savedProgress([]);
+		progress.playlist.order = 'oldest-first';
+
+		expect(restoreCatalogPlaylistOrder(progress)).toBe('oldest-first');
+	});
+
+	it('defaults legacy saved records without an order to latest-first', () => {
+		expect(restoreCatalogPlaylistOrder(savedProgress([]))).toBe('latest-first');
+	});
+
 	it('captures the latest review state without retaining mutable references', () => {
 		const catalogEpisode: EpisodeState = {
 			...episode('episode', '2026-01-01'),
@@ -100,12 +115,18 @@ describe('catalogue progress restoration', () => {
 		const snapshot = captureCatalogProgress(
 			'show',
 			[catalogEpisode],
-			{ title: 'Title', description: 'Description', public: false },
+			{
+				title: 'Title',
+				description: 'Description',
+				public: false,
+				order: 'oldest-first'
+			},
 			{ cooldownUntil: 0, pausedByRateLimit: false }
 		);
 
 		catalogEpisode.tracks[0].checked = false;
 		expect(snapshot.episodes.episode.tracks[0].checked).toBe(true);
+		expect(snapshot.playlist.order).toBe('oldest-first');
 	});
 
 	it('resumes only episodes that are not completed', () => {
@@ -222,5 +243,174 @@ describe('exact Spotify URI deduplication', () => {
 				'spotify:track:a'
 			])
 		).toEqual(['spotify:track:B', 'spotify:track:A', 'spotify:track:a']);
+	});
+});
+
+describe('generated playlist text chronology', () => {
+	const showEpisodes = [
+		episode('middle', '2024-05-03'),
+		episode('newest', '2026-08-06'),
+		episode('oldest', '2022-01-20')
+	];
+	const latest = createGeneratedPlaylistText('Test Show', showEpisodes, 'latest-first');
+	const oldest = createGeneratedPlaylistText('Test Show', showEpisodes, 'oldest-first');
+
+	it('updates generated name and description immediately in both directions', () => {
+		expect(latest.dateStamp).toBe('06.08.26→20.01.22');
+		expect(latest.title).toBe('“test show” 06.08.26→20.01.22');
+		expect(latest.description).toContain('“test show” 06.08.26→20.01.22');
+		expect(latest.description).toContain(
+			'covering broadcasts from 20 January 2022 through 6 August 2026'
+		);
+		expect(oldest.dateStamp).toBe('20.01.22→06.08.26');
+		expect(oldest.title).toBe('“test show” 20.01.22→06.08.26');
+		expect(oldest.description).toContain('“test show” 20.01.22→06.08.26');
+		expect(oldest.description).toContain(
+			'covering broadcasts from 20 January 2022 through 6 August 2026'
+		);
+
+		const switchedToOldest = updateGeneratedPlaylistText(latest, latest, oldest);
+		expect(switchedToOldest).toEqual({ title: oldest.title, description: oldest.description });
+		expect(updateGeneratedPlaylistText(switchedToOldest, oldest, latest)).toEqual({
+			title: latest.title,
+			description: latest.description
+		});
+	});
+
+	it('preserves a custom name while updating a generated description', () => {
+		expect(
+			updateGeneratedPlaylistText(
+				{ title: 'My custom playlist', description: latest.description },
+				latest,
+				oldest
+			)
+		).toEqual({ title: 'My custom playlist', description: oldest.description });
+	});
+
+	it('preserves a custom description while updating a generated name', () => {
+		expect(
+			updateGeneratedPlaylistText(
+				{ title: latest.title, description: 'My custom description' },
+				latest,
+				oldest
+			)
+		).toEqual({ title: oldest.title, description: 'My custom description' });
+	});
+
+	it('captures the resulting order, name, and description for persistence', () => {
+		const updated = updateGeneratedPlaylistText(latest, latest, oldest);
+		const snapshot = captureCatalogProgress(
+			'show',
+			[],
+			{ ...updated, public: false, order: 'oldest-first' },
+			{ cooldownUntil: 0, pausedByRateLimit: false }
+		);
+
+		expect(snapshot.playlist).toEqual({
+			title: oldest.title,
+			description: oldest.description,
+			public: false,
+			order: 'oldest-first'
+		});
+	});
+});
+
+describe('catalogue export ordering', () => {
+	const selectedTrack = (uri: string, title: string) => ({
+		...reviewTrack,
+		title,
+		selectedMatch: uri,
+		matches: [{ ...reviewTrack.matches[0], uri, title }]
+	});
+	const completedEpisode = (
+		episodeAlias: string,
+		broadcast: string,
+		tracks: ReturnType<typeof selectedTrack>[]
+	): EpisodeState => ({
+		...episode(episodeAlias, broadcast),
+		status: 'done',
+		tracks
+	});
+
+	it('exports episodes newest to oldest even when supplied out of order', () => {
+		const episodes = [
+			completedEpisode('middle', '2026-02-01', [selectedTrack('spotify:track:middle', 'Middle')]),
+			completedEpisode('oldest', '2026-01-01', [selectedTrack('spotify:track:oldest', 'Oldest')]),
+			completedEpisode('newest', '2026-03-01', [selectedTrack('spotify:track:newest', 'Newest')])
+		];
+
+		expect(getCatalogExportUris(episodes)).toEqual([
+			'spotify:track:newest',
+			'spotify:track:middle',
+			'spotify:track:oldest'
+		]);
+	});
+
+	it('exports episodes oldest to newest when selected', () => {
+		const episodes = [
+			completedEpisode('middle', '2026-02-01', [selectedTrack('spotify:track:middle', 'Middle')]),
+			completedEpisode('newest', '2026-03-01', [selectedTrack('spotify:track:newest', 'Newest')]),
+			completedEpisode('oldest', '2026-01-01', [selectedTrack('spotify:track:oldest', 'Oldest')])
+		];
+
+		expect(getCatalogExportUris(episodes, 'oldest-first')).toEqual([
+			'spotify:track:oldest',
+			'spotify:track:middle',
+			'spotify:track:newest'
+		]);
+	});
+
+	it('preserves original track order within each episode', () => {
+		const episodes = [
+			completedEpisode('episode', '2026-03-01', [
+				selectedTrack('spotify:track:first', 'First'),
+				selectedTrack('spotify:track:second', 'Second'),
+				selectedTrack('spotify:track:third', 'Third')
+			])
+		];
+
+		expect(getCatalogExportUris(episodes)).toEqual([
+			'spotify:track:first',
+			'spotify:track:second',
+			'spotify:track:third'
+		]);
+	});
+
+	it('retains the newest episode occurrence of an exact duplicate URI', () => {
+		const episodes = [
+			completedEpisode('oldest', '2026-01-01', [
+				selectedTrack('spotify:track:duplicate', 'Older duplicate'),
+				selectedTrack('spotify:track:older-tail', 'Older tail')
+			]),
+			completedEpisode('newest', '2026-03-01', [
+				selectedTrack('spotify:track:newer-head', 'Newer head'),
+				selectedTrack('spotify:track:duplicate', 'Newer duplicate')
+			])
+		];
+
+		expect(getCatalogExportUris(episodes)).toEqual([
+			'spotify:track:newer-head',
+			'spotify:track:duplicate',
+			'spotify:track:older-tail'
+		]);
+	});
+
+	it('retains the oldest episode occurrence of an exact duplicate URI', () => {
+		const episodes = [
+			completedEpisode('newest', '2026-03-01', [
+				selectedTrack('spotify:track:duplicate', 'Newer duplicate'),
+				selectedTrack('spotify:track:newer-tail', 'Newer tail')
+			]),
+			completedEpisode('oldest', '2026-01-01', [
+				selectedTrack('spotify:track:older-head', 'Older head'),
+				selectedTrack('spotify:track:duplicate', 'Older duplicate')
+			])
+		];
+
+		expect(getCatalogExportUris(episodes, 'oldest-first')).toEqual([
+			'spotify:track:older-head',
+			'spotify:track:duplicate',
+			'spotify:track:newer-tail'
+		]);
 	});
 });

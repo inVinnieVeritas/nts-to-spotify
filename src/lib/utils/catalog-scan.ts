@@ -24,10 +24,19 @@ export type EpisodeState = NTSEpisodeSummary & {
 	error?: string;
 };
 
+export type PlaylistOrder = 'latest-first' | 'oldest-first';
+
+export type GeneratedPlaylistText = {
+	title: string;
+	description: string;
+	dateStamp: string;
+};
+
 export type PlaylistDraft = {
 	title: string;
 	description: string;
 	public: boolean;
+	order?: PlaylistOrder;
 };
 
 export type CatalogRetryState = {
@@ -100,6 +109,73 @@ export const restoreCatalogRetryState = (
 	};
 };
 
+export const restoreCatalogPlaylistOrder = (progress?: CatalogProgress | null): PlaylistOrder =>
+	isCatalogProgressCompatible(progress) && progress.playlist.order === 'oldest-first'
+		? 'oldest-first'
+		: 'latest-first';
+
+const shortPlaylistDate = (date: string) => {
+	const [year, month, day] = date.slice(0, 10).split('-');
+	return `${day}.${month}.${year.slice(2)}`;
+};
+
+const longPlaylistDate = (date: string) =>
+	new Intl.DateTimeFormat('en-GB', {
+		day: 'numeric',
+		month: 'long',
+		year: 'numeric',
+		timeZone: 'UTC'
+	}).format(new Date(date));
+
+export const createGeneratedPlaylistText = (
+	showName: string,
+	episodes: Array<Pick<NTSEpisodeSummary, 'broadcast'>>,
+	order: PlaylistOrder
+): GeneratedPlaylistText => {
+	const orderedEpisodes = [...episodes].sort((left, right) =>
+		order === 'oldest-first'
+			? Date.parse(left.broadcast) - Date.parse(right.broadcast)
+			: Date.parse(right.broadcast) - Date.parse(left.broadcast)
+	);
+	const first = orderedEpisodes[0];
+	const last = orderedEpisodes[orderedEpisodes.length - 1];
+	const chronologicalEpisodes = [...episodes].sort(
+		(left, right) => Date.parse(left.broadcast) - Date.parse(right.broadcast)
+	);
+	const oldest = chronologicalEpisodes[0];
+	const newest = chronologicalEpisodes[chronologicalEpisodes.length - 1];
+	const dateStamp =
+		first && last
+			? `${shortPlaylistDate(first.broadcast)}→${shortPlaylistDate(last.broadcast)}`
+			: '';
+	const normalizedName = showName.toLowerCase();
+
+	return {
+		title: `“${normalizedName}” ${dateStamp}`,
+		description:
+			first && last && oldest && newest
+				? `“${normalizedName}” ${dateStamp} — A comprehensive archive of tracks played on ${showName} on NTS Radio, covering broadcasts from ${longPlaylistDate(
+						oldest.broadcast
+				  )} through ${longPlaylistDate(
+						newest.broadcast
+				  )}. Some tracks unavailable on Spotify may be missing.`
+				: `Tracks played on ${showName} on NTS Radio. Some tracks unavailable on Spotify may be missing.`,
+		dateStamp
+	};
+};
+
+export const updateGeneratedPlaylistText = (
+	current: Pick<GeneratedPlaylistText, 'title' | 'description'>,
+	previousGenerated: GeneratedPlaylistText,
+	nextGenerated: GeneratedPlaylistText
+) => ({
+	title: current.title === previousGenerated.title ? nextGenerated.title : current.title,
+	description:
+		current.description === previousGenerated.description
+			? nextGenerated.description
+			: current.description
+});
+
 export const shouldApplyCatalogRestoration = (
 	requestedAlias: string,
 	requestedGeneration: number,
@@ -163,6 +239,24 @@ export const formatCooldownDuration = (seconds: number) => {
 	parts.push(`${remainingSeconds}s`);
 	return parts.join(' ');
 };
+
+export const getCatalogExportUris = (
+	episodes: EpisodeState[],
+	order: PlaylistOrder = 'latest-first'
+) =>
+	uniqueSpotifyUris(
+		[...episodes]
+			.sort((left, right) =>
+				order === 'oldest-first'
+					? Date.parse(left.broadcast) - Date.parse(right.broadcast)
+					: Date.parse(right.broadcast) - Date.parse(left.broadcast)
+			)
+			.flatMap((episode) =>
+				episode.tracks
+					.filter((track) => track.checked && track.selectedMatch)
+					.map((track) => track.selectedMatch as string)
+			)
+	);
 
 export const runCatalogWorkers = async ({
 	indexes,
