@@ -524,10 +524,19 @@
 				</label>
 				<label class="font-small-beast">
 					PLAYLIST ORDER
-					<select value={playlistOrder} on:change={changePlaylistOrder}>
+					<select
+						value={playlistOrder}
+						on:change={changePlaylistOrder}
+						aria-describedby="playlist-order-help"
+					>
 						<option value="latest-first">Latest episodes first</option>
 						<option value="oldest-first">Oldest episodes first</option>
 					</select>
+					<span id="playlist-order-help" class="playlist-order-help font-tiny">
+						<strong>This choice controls the track order in the Spotify playlist.</strong> Tracks within
+						each episode keep their original order. The catalogue below remains oldest to newest for
+						review.
+					</span>
 				</label>
 				<label class="visibility font-base">
 					<input
@@ -647,6 +656,13 @@
 	}
 
 	.settings select {
+		text-transform: none;
+	}
+
+	.playlist-order-help {
+		color: var(--color-foreground);
+		line-height: 1.5;
+		margin-top: 4px;
 		text-transform: none;
 	}
 
