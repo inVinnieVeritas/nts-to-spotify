@@ -12,7 +12,20 @@
 	import type { MatchedTrack } from '$lib/types';
 	import { abortableDelay, createAbortScope, isAbortError } from '$lib/utils/abort';
 	import {
+		catalogBackupFilename,
+		downloadCatalogProgressFile,
+		downloadLatestCatalogProgress,
+		readCatalogBackupFile,
+		takeSelectedCatalogBackupFile
+	} from '$lib/utils/catalog-backup.client';
+	import {
+		CatalogBackupValidationError,
+		prepareCatalogBackupRestore,
+		restoreCatalogProgressIfConfirmed
+	} from '$lib/utils/catalog-backup';
+	import {
 		captureCatalogProgress,
+		createCatalogResetState,
 		createGeneratedPlaylistText,
 		formatCooldownDuration,
 		getCatalogExportUris,
@@ -31,6 +44,7 @@
 	} from '$lib/utils/catalog-scan';
 	import {
 		createLatestSnapshotWriter,
+		deleteCatalogProgress,
 		loadCatalogProgress,
 		saveCatalogProgress
 	} from '$lib/utils/catalog-progress.client';
@@ -81,6 +95,12 @@
 	let cooldownTimer: ReturnType<typeof setInterval> | undefined;
 	let mounted = false;
 	let destroyed = false;
+	let skipDestroyPersistence = false;
+	let progressTransferBusy = false;
+	let progressReplacementAlias: string | undefined;
+	let progressTransferMessage = '';
+	let progressTransferError = '';
+	let progressFileInput: HTMLInputElement;
 	let activeShowAlias = data.showAlias;
 	let showGeneration = 0;
 	const activeEpisodeControllers = new Map<number, AbortController>();
@@ -96,9 +116,8 @@
 		}
 	);
 
-	const persistProgress = (waitForSave = false) => {
-		if (!restored || !persistenceAvailable) return Promise.resolve();
-		const snapshot = captureCatalogProgress(
+	const currentProgressSnapshot = () =>
+		captureCatalogProgress(
 			activeShowAlias,
 			episodes,
 			{
@@ -109,6 +128,13 @@
 			},
 			{ cooldownUntil, pausedByRateLimit }
 		);
+
+	const persistProgress = (waitForSave = false) => {
+		if (!restored || !persistenceAvailable || progressReplacementAlias === activeShowAlias) {
+			return Promise.resolve();
+		}
+		skipDestroyPersistence = false;
+		const snapshot = currentProgressSnapshot();
 		snapshotWriter.enqueue(snapshot);
 		return waitForSave ? snapshotWriter.flush() : Promise.resolve();
 	};
@@ -253,7 +279,7 @@
 	};
 
 	const scanCatalog = async (requestedIndexes?: number[]) => {
-		if (scanning || !restored) return;
+		if (scanning || !restored || progressTransferBusy) return;
 		updateCooldownRemaining();
 		if (cooldownRemaining > 0) {
 			scanMessage = `Spotify rate limit: ${formatCooldownDuration(cooldownRemaining)} remaining.`;
@@ -322,6 +348,201 @@
 		abortActiveEpisodes();
 	};
 
+	const clearProgressTransferMessage = () => {
+		progressTransferMessage = '';
+		progressTransferError = '';
+	};
+
+	const downloadProgress = async () => {
+		if (!restored || progressTransferBusy) return;
+		clearProgressTransferMessage();
+		progressTransferBusy = true;
+		try {
+			await downloadLatestCatalogProgress({
+				flush: snapshotWriter.flush,
+				capture: currentProgressSnapshot,
+				enqueue: (snapshot) => {
+					if (persistenceAvailable) snapshotWriter.enqueue(snapshot);
+				},
+				download: (snapshot) =>
+					downloadCatalogProgressFile(snapshot, catalogBackupFilename(snapshot.showAlias))
+			});
+			progressTransferMessage = 'Progress backup downloaded.';
+		} catch {
+			progressTransferError = 'The progress backup could not be downloaded.';
+		} finally {
+			progressTransferBusy = false;
+		}
+	};
+
+	const chooseProgressBackup = () => {
+		if (progressTransferBusy || scanning) return;
+		progressFileInput?.click();
+	};
+
+	const restoreProgress = async (event: Event) => {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = takeSelectedCatalogBackupFile(input);
+		if (!file || progressTransferBusy || scanning) return;
+		clearProgressTransferMessage();
+
+		progressTransferBusy = true;
+		const importAlias = activeShowAlias;
+		const importGeneration = showGeneration;
+		const importCatalog = data.episodes;
+		let replacementStarted = false;
+		let replacementSucceeded = false;
+		try {
+			const prepared = prepareCatalogBackupRestore(
+				await readCatalogBackupFile(file),
+				importAlias,
+				importCatalog
+			);
+			if (
+				destroyed ||
+				!shouldApplyCatalogRestoration(
+					importAlias,
+					importGeneration,
+					activeShowAlias,
+					showGeneration
+				)
+			) {
+				return;
+			}
+			replacementSucceeded = await restoreCatalogProgressIfConfirmed(prepared, {
+				confirm: () =>
+					window.confirm(
+						'Restore this backup and replace the saved progress for the current show?'
+					),
+				beforePersist: () => {
+					progressReplacementAlias = importAlias;
+					replacementStarted = true;
+					snapshotWriter.discardPending();
+				},
+				persist: saveCatalogProgress,
+				apply: (restoredProgress) => {
+					if (
+						destroyed ||
+						!shouldApplyCatalogRestoration(
+							importAlias,
+							importGeneration,
+							activeShowAlias,
+							showGeneration
+						)
+					) {
+						return;
+					}
+					episodes = restoredProgress.episodes;
+					playlistOrder = restoredProgress.playlistOrder;
+					playlistTitle = restoredProgress.progress.playlist.title;
+					playlistDescription = restoredProgress.progress.playlist.description;
+					publicPlaylist = restoredProgress.progress.playlist.public;
+					dateStamp = createGeneratedPlaylistText(
+						data.name,
+						data.episodes,
+						playlistOrder
+					).dateStamp;
+					cooldownUntil = restoredProgress.retry.cooldownUntil;
+					pausedByRateLimit = restoredProgress.retry.pausedByRateLimit;
+					updateCooldownRemaining();
+					persistenceAvailable = true;
+					skipDestroyPersistence = false;
+					scanMessage =
+						pausedByRateLimit && cooldownRemaining > 0
+							? 'Scan paused. Resume will become available when the cooldown ends.'
+							: '';
+					progressTransferMessage = 'Progress restored from backup.';
+				}
+			});
+		} catch (cause) {
+			if (
+				shouldApplyCatalogRestoration(
+					importAlias,
+					importGeneration,
+					activeShowAlias,
+					showGeneration
+				)
+			) {
+				progressTransferError =
+					cause instanceof CatalogBackupValidationError
+						? cause.message
+						: 'The backup could not be saved. Existing progress was not changed.';
+			}
+		} finally {
+			if (progressReplacementAlias === importAlias) progressReplacementAlias = undefined;
+			progressTransferBusy = false;
+			if (
+				replacementStarted &&
+				!replacementSucceeded &&
+				shouldApplyCatalogRestoration(
+					importAlias,
+					importGeneration,
+					activeShowAlias,
+					showGeneration
+				)
+			) {
+				void persistProgress();
+			}
+		}
+	};
+
+	const resetSavedProgress = async () => {
+		if (!restored || progressTransferBusy || scanning) return;
+		clearProgressTransferMessage();
+		if (!window.confirm('Reset all saved catalogue progress for this show?')) return;
+		progressTransferBusy = true;
+		const resetAlias = activeShowAlias;
+		progressReplacementAlias = resetAlias;
+		snapshotWriter.discardPending();
+		const resetGeneration = showGeneration;
+		let resetSucceeded = false;
+		try {
+			await deleteCatalogProgress(resetAlias);
+			resetSucceeded = true;
+			if (
+				destroyed ||
+				!shouldApplyCatalogRestoration(resetAlias, resetGeneration, activeShowAlias, showGeneration)
+			) {
+				return;
+			}
+			const defaults = showDefaults(data);
+			const resetState = createCatalogResetState(data.episodes, {
+				title: defaults.title,
+				description: defaults.description
+			});
+			episodes = resetState.episodes;
+			playlistOrder = resetState.playlistOrder;
+			playlistTitle = resetState.playlist.title;
+			playlistDescription = resetState.playlist.description;
+			publicPlaylist = resetState.playlist.public;
+			dateStamp = defaults.stamp;
+			cooldownUntil = resetState.retry.cooldownUntil;
+			cooldownRemaining = 0;
+			pausedByRateLimit = resetState.retry.pausedByRateLimit;
+			automaticRateLimitCount = 0;
+			scanMessage = '';
+			persistenceAvailable = true;
+			skipDestroyPersistence = true;
+			progressTransferMessage = 'Saved progress reset for this show.';
+		} catch {
+			if (
+				shouldApplyCatalogRestoration(resetAlias, resetGeneration, activeShowAlias, showGeneration)
+			) {
+				progressTransferError =
+					'Saved progress could not be reset. Existing progress was not changed.';
+			}
+		} finally {
+			if (progressReplacementAlias === resetAlias) progressReplacementAlias = undefined;
+			progressTransferBusy = false;
+			if (
+				!resetSucceeded &&
+				shouldApplyCatalogRestoration(resetAlias, resetGeneration, activeShowAlias, showGeneration)
+			) {
+				void persistProgress();
+			}
+		}
+	};
+
 	let rawSelectedTracks: string[] = [];
 	let selectedTracks: string[] = [];
 	let duplicateCount = 0;
@@ -368,6 +589,8 @@
 		const generation = showGeneration;
 		const showAlias = pageData.showAlias;
 		activeShowAlias = showAlias;
+		skipDestroyPersistence = false;
+		clearProgressTransferMessage();
 		const defaults = showDefaults(pageData);
 		firstEpisode = defaults.first;
 		lastEpisode = defaults.last;
@@ -459,7 +682,7 @@
 		}
 		scanController?.abort();
 		abortActiveEpisodes();
-		void persistProgress();
+		if (!skipDestroyPersistence) void persistProgress();
 	});
 </script>
 
@@ -486,7 +709,11 @@
 					<Button
 						on:click={() => scanCatalog()}
 						loading={scanning}
-						disabled={!restored || scanning || scanComplete || cooldownRemaining > 0}
+						disabled={!restored ||
+							scanning ||
+							progressTransferBusy ||
+							scanComplete ||
+							cooldownRemaining > 0}
 					>
 						{completedCount === 0 ? 'Scan full catalogue' : 'Resume scan'}
 					</Button>
@@ -507,7 +734,7 @@
 			{/if}
 		</header>
 
-		{#if completedCount > 0}
+		{#if restored}
 			<section class="settings">
 				<label class="font-small-beast">
 					Playlist name
@@ -546,6 +773,47 @@
 					/>
 					Make playlist public
 				</label>
+				<div class="progress-actions" aria-label="Catalogue progress backup controls">
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						disabled={progressTransferBusy}
+						on:click={downloadProgress}>Download progress</Button
+					>
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						disabled={progressTransferBusy || scanning}
+						on:click={chooseProgressBackup}>Restore progress</Button
+					>
+					<input
+						bind:this={progressFileInput}
+						type="file"
+						accept=".json,application/json"
+						aria-label="Choose catalogue progress backup JSON file"
+						on:change={restoreProgress}
+						hidden
+					/>
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						disabled={progressTransferBusy || scanning}
+						on:click={resetSavedProgress}>Reset saved progress</Button
+					>
+				</div>
+				{#if progressTransferMessage}
+					<p class="progress-transfer-message font-small-beast" role="status">
+						{progressTransferMessage}
+					</p>
+				{/if}
+				{#if progressTransferError}
+					<p class="progress-transfer-message font-small-beast" role="alert">
+						{progressTransferError}
+					</p>
+				{/if}
 				<p class="font-small-beast">
 					{uncertainCount} tracks need review · {duplicateCount} exact duplicate{duplicateCount ===
 					1
@@ -624,7 +892,8 @@
 	.summary,
 	.scan-controls,
 	.login-note,
-	.visibility {
+	.visibility,
+	.progress-actions {
 		display: flex;
 		align-items: center;
 		gap: 12px;
@@ -664,6 +933,10 @@
 		line-height: 1.5;
 		margin-top: 4px;
 		text-transform: none;
+	}
+
+	.progress-transfer-message {
+		margin: 0;
 	}
 
 	.episodes {

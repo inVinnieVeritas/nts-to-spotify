@@ -5,6 +5,7 @@ import {
 	CATALOG_PROGRESS_SCHEMA_VERSION,
 	SPOTIFY_MATCHER_VERSION,
 	captureCatalogProgress,
+	createCatalogResetState,
 	createGeneratedPlaylistText,
 	formatCooldownDuration,
 	getCatalogExportUris,
@@ -137,6 +138,28 @@ describe('catalogue progress restoration', () => {
 		];
 
 		expect(getResumableEpisodeIndexes(catalog)).toEqual([1, 2]);
+	});
+
+	it('creates a fresh visible reset state without carrying review or cooldown data', () => {
+		const state = createCatalogResetState(
+			[episode('older', '2026-01-01'), episode('newer', '2026-02-01')],
+			{ title: 'Fresh title', description: 'Fresh description' }
+		);
+
+		expect(state.episodes).toEqual([
+			expect.objectContaining({ episodeAlias: 'older', status: 'pending', tracks: [] }),
+			expect.objectContaining({ episodeAlias: 'newer', status: 'pending', tracks: [] })
+		]);
+		expect(state).toMatchObject({
+			playlistOrder: 'latest-first',
+			playlist: {
+				title: 'Fresh title',
+				description: 'Fresh description',
+				public: false,
+				order: 'latest-first'
+			},
+			retry: { cooldownUntil: 0, pausedByRateLimit: false }
+		});
 	});
 });
 

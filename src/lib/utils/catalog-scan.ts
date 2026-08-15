@@ -114,6 +114,16 @@ export const restoreCatalogPlaylistOrder = (progress?: CatalogProgress | null): 
 		? 'oldest-first'
 		: 'latest-first';
 
+export const createCatalogResetState = (
+	catalog: NTSEpisodeSummary[],
+	playlist: Pick<PlaylistDraft, 'title' | 'description'>
+) => ({
+	episodes: reconcileEpisodes(catalog),
+	playlistOrder: 'latest-first' as const,
+	retry: { cooldownUntil: 0, pausedByRateLimit: false },
+	playlist: { ...playlist, public: false, order: 'latest-first' as const }
+});
+
 const shortPlaylistDate = (date: string) => {
 	const [year, month, day] = date.slice(0, 10).split('-');
 	return `${day}.${month}.${year.slice(2)}`;

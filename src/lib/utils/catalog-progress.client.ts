@@ -10,6 +10,25 @@ type DatabaseOptions = {
 	timeoutMs?: number;
 };
 
+const operationQueues = new Map<string, Promise<void>>();
+
+export const coordinateCatalogProgressOperation = <T>(
+	showAlias: string,
+	operation: () => Promise<T>
+) => {
+	const previous = operationQueues.get(showAlias) || Promise.resolve();
+	const result = previous.catch(() => undefined).then(operation);
+	const settled = result.then(
+		() => undefined,
+		() => undefined
+	);
+	operationQueues.set(showAlias, settled);
+	void settled.finally(() => {
+		if (operationQueues.get(showAlias) === settled) operationQueues.delete(showAlias);
+	});
+	return result;
+};
+
 export class CatalogPersistenceTimeoutError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -51,7 +70,10 @@ const openDatabase = ({
 		};
 	});
 
-export const loadCatalogProgress = async (showAlias: string, options: DatabaseOptions = {}) => {
+const loadCatalogProgressUncoordinated = async (
+	showAlias: string,
+	options: DatabaseOptions = {}
+) => {
 	const database = await openDatabase(options);
 	try {
 		return await new Promise<CatalogProgress | null>((resolve, reject) => {
@@ -93,7 +115,12 @@ export const loadCatalogProgress = async (showAlias: string, options: DatabaseOp
 	}
 };
 
-export const saveCatalogProgress = async (
+export const loadCatalogProgress = (showAlias: string, options: DatabaseOptions = {}) =>
+	coordinateCatalogProgressOperation(showAlias, () =>
+		loadCatalogProgressUncoordinated(showAlias, options)
+	);
+
+const saveCatalogProgressUncoordinated = async (
 	progress: CatalogProgress,
 	options: DatabaseOptions = {}
 ) => {
@@ -133,6 +160,56 @@ export const saveCatalogProgress = async (
 	}
 };
 
+export const saveCatalogProgress = (progress: CatalogProgress, options: DatabaseOptions = {}) =>
+	coordinateCatalogProgressOperation(progress.showAlias, () =>
+		saveCatalogProgressUncoordinated(progress, options)
+	);
+
+const deleteCatalogProgressUncoordinated = async (
+	showAlias: string,
+	options: DatabaseOptions = {}
+) => {
+	const database = await openDatabase(options);
+	try {
+		await new Promise<void>((resolve, reject) => {
+			const transaction = database.transaction(STORE_NAME, 'readwrite');
+			let settled = false;
+			const timeout = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				try {
+					transaction.abort();
+				} catch {
+					// The transaction may already be inactive.
+				}
+				reject(new CatalogPersistenceTimeoutError('Deleting catalogue progress timed out'));
+			}, options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+			const fail = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				reject(transaction.error);
+			};
+			transaction.onerror = fail;
+			transaction.onabort = fail;
+			transaction.oncomplete = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				resolve();
+			};
+			transaction.objectStore(STORE_NAME).delete(showAlias);
+		});
+	} finally {
+		database.close();
+	}
+};
+
+export const deleteCatalogProgress = (showAlias: string, options: DatabaseOptions = {}) =>
+	coordinateCatalogProgressOperation(showAlias, () =>
+		deleteCatalogProgressUncoordinated(showAlias, options)
+	);
+
 export const createLatestSnapshotWriter = <T>(
 	write: (snapshot: T) => Promise<void>,
 	onError: (cause: unknown, snapshot: T) => void
@@ -161,6 +238,9 @@ export const createLatestSnapshotWriter = <T>(
 					if (pending !== undefined) this.enqueue(pending);
 				});
 			}
+		},
+		discardPending() {
+			pending = undefined;
 		},
 		flush: () => running || Promise.resolve()
 	};
