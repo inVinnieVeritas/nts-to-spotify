@@ -7,6 +7,13 @@
 		parseSpotifyPlaylistId,
 		spotifyPlaylistUrl
 	} from '$lib/utils/catalog-scan';
+	import {
+		createPlaylistPreviewInputSignature,
+		dismissPlaylistPreview,
+		parseSpotifyPlaylistPreview,
+		runExclusivePlaylistAction,
+		type ClientSpotifyPlaylistPreview
+	} from '$lib/utils/playlist-preview.client';
 	import LoginWithSpotify from './login-with-spotify.svelte';
 
 	export let disabled = false;
@@ -25,6 +32,7 @@
 		tracks: string[];
 		public?: boolean;
 		linkedPlaylistId?: string;
+		previewKey?: string;
 	};
 
 	const me = $page.data.user;
@@ -33,15 +41,32 @@
 	let failure = '';
 	let responsePlaylistId: string | undefined;
 	let recoveryValue = '';
+	let preview: ClientSpotifyPlaylistPreview | undefined;
+	const primaryActionGate = { active: false };
 	$: linkedPlaylistId = isSpotifyPlaylistId(data.linkedPlaylistId)
 		? data.linkedPlaylistId
 		: catalogueMode
 		? undefined
 		: responsePlaylistId;
 	$: playlistUrl = linkedPlaylistId ? spotifyPlaylistUrl(linkedPlaylistId) : '';
+	$: inputSignature = createPlaylistPreviewInputSignature({
+		playlistId: linkedPlaylistId,
+		title: data.title,
+		description: data.description,
+		public: data.public ?? true,
+		tracks: data.tracks,
+		previewKey: data.previewKey
+	});
+	$: if (preview && preview.inputSignature !== inputSignature) {
+		preview = undefined;
+		message = '';
+		failure = '';
+	}
 	$: buttonLabel = catalogueMode
 		? linkedPlaylistId
-			? 'Update Spotify playlist'
+			? preview && !preview.synchronized
+				? 'Apply Spotify update'
+				: 'Preview Spotify update'
 			: creationPending
 			? 'Creation outcome pending'
 			: 'Create Spotify playlist'
@@ -58,6 +83,9 @@
 		}
 		if (error === 'playlist_inaccessible') {
 			return 'The linked Spotify playlist is inaccessible. Check your Spotify account or forget the link.';
+		}
+		if (error === 'playlist_changed_since_preview') {
+			return 'Spotify playlist changed. Preview it again.';
 		}
 		if (error === 'spotify_authentication') {
 			return (payload as Record<string, unknown>).incomplete === true
@@ -96,22 +124,63 @@
 		return (await clearCatalogueCreationPending?.()) === true;
 	};
 
-	const handleClick = async () => {
+	const playlistPayload = () => ({
+		name: data.title,
+		description: data.description,
+		tracks: data.tracks,
+		public: data.public ?? true
+	});
+
+	const previewPlaylist = async () => {
+		if (!me || working || !linkedPlaylistId) return;
+		const requestedSignature = inputSignature;
+		working = true;
+		failure = '';
+		message = 'Previewing Spotify update…';
+		try {
+			const response = await fetch('/api/spotify/playlist', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					operation: 'preview',
+					playlistId: linkedPlaylistId,
+					...playlistPayload()
+				})
+			});
+			const result = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+			if (!response.ok) {
+				failure =
+					result?.error === 'spotify_unavailable'
+						? 'Preview failed. Try again.'
+						: failureMessage(result);
+				message = '';
+				return;
+			}
+			const parsed = parseSpotifyPlaylistPreview(result, linkedPlaylistId, requestedSignature);
+			if (!parsed || inputSignature !== requestedSignature) {
+				failure = parsed ? '' : 'Spotify returned an invalid preview. Try again.';
+				message = '';
+				return;
+			}
+			preview = parsed;
+			message = '';
+		} catch {
+			failure = 'Preview failed. Try again.';
+			message = '';
+		} finally {
+			working = false;
+		}
+	};
+
+	const synchronizePlaylist = async () => {
 		if (!me || working) return;
 		const creatingNew = catalogueMode && !linkedPlaylistId;
 		if (creatingNew && creationPending) return;
-		if (
-			linkedPlaylistId &&
-			!window.confirm(
-				'Replace the linked Spotify playlist contents with the current selected tracks? Manual changes made directly in Spotify will be removed.'
-			)
-		) {
-			return;
-		}
+		if (linkedPlaylistId && (!preview || preview.synchronized)) return;
 
 		working = true;
 		failure = '';
-		message = '';
+		message = linkedPlaylistId ? 'Applying Spotify update…' : '';
 		if (creatingNew && (await prepareCatalogueCreation?.()) !== true) {
 			failure = 'Progress could not be saved, so no Spotify playlist was created.';
 			working = false;
@@ -123,15 +192,20 @@
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					name: data.title,
-					description: data.description,
-					tracks: data.tracks,
-					public: data.public ?? true,
-					...(linkedPlaylistId ? { playlistId: linkedPlaylistId } : {})
+					...playlistPayload(),
+					...(linkedPlaylistId && preview
+						? {
+								operation: 'apply',
+								playlistId: linkedPlaylistId,
+								previewFingerprint: preview.previewFingerprint
+						  }
+						: {})
 				})
 			});
 			const result = (await response.json().catch(() => null)) as Record<string, unknown> | null;
 			if (!response.ok) {
+				if (result?.error === 'playlist_changed_since_preview') preview = undefined;
+				if (result?.incomplete === true) preview = undefined;
 				if (result?.incomplete === true && isSpotifyPlaylistId(result.playlistId)) {
 					const saved = await persistReturnedLink(result.playlistId);
 					failure = saved
@@ -186,13 +260,29 @@
 				result.mode === 'created'
 					? `Spotify playlist created with ${result.trackCount} unique tracks.`
 					: `Spotify playlist updated with ${result.trackCount} unique tracks.`;
+			preview = undefined;
 		} catch {
 			failure = creatingNew
 				? 'Spotify may have created the playlist, but the connection ended before it was confirmed. Check Spotify before continuing.'
 				: 'Spotify playlist synchronization failed. Please try again.';
 		} finally {
+			if (failure) message = '';
 			working = false;
 		}
+	};
+
+	const handleClick = () =>
+		runExclusivePlaylistAction(primaryActionGate, () =>
+			linkedPlaylistId && (!preview || preview.synchronized)
+				? previewPlaylist()
+				: synchronizePlaylist()
+		);
+
+	const dismissPreview = () => {
+		const dismissed = dismissPlaylistPreview({ preview, message, failure });
+		preview = dismissed.preview;
+		message = dismissed.message;
+		failure = dismissed.failure;
 	};
 
 	const recoverPlaylist = async () => {
@@ -323,6 +413,38 @@
 				>
 			{/if}
 		{/if}
+		{#if preview}
+			<div class="update-preview" aria-label="Spotify playlist update preview">
+				{#if preview.synchronized}
+					<p class="font-small-beast">Spotify playlist is already synchronized.</p>
+				{:else}
+					<p class="font-small-beast">
+						<strong>{preview.addedCount}</strong> tracks will be added ·
+						<strong>{preview.removedCount}</strong> tracks will be removed ·
+						<strong>{preview.retainedCount}</strong> tracks will remain
+					</p>
+					<ul class="font-small-beast">
+						<li>Playlist order {preview.orderChanged ? 'will change' : 'is unchanged'}</li>
+						<li>Title {preview.titleChanged ? 'will change' : 'is unchanged'}</li>
+						<li>Description {preview.descriptionChanged ? 'will change' : 'is unchanged'}</li>
+						<li>
+							Public/private visibility {preview.visibilityChanged ? 'will change' : 'is unchanged'}
+						</li>
+					</ul>
+					<p class="font-small-beast update-warning">
+						Updating replaces the linked Spotify playlist contents. Manual changes made directly in
+						Spotify will be removed.
+					</p>
+				{/if}
+				<Button
+					type="button"
+					size="sm"
+					variant="outline"
+					disabled={working}
+					on:click={dismissPreview}>Dismiss preview</Button
+				>
+			</div>
+		{/if}
 		{#if me?.id}
 			<Button
 				as="button"
@@ -354,6 +476,8 @@
 		bottom: 0;
 		left: 0;
 		width: 100%;
+		max-height: 70vh;
+		overflow-y: auto;
 		background-color: var(--color-background);
 
 		& > p {
@@ -380,5 +504,37 @@
 
 	.creation-recovery input {
 		min-width: 220px;
+	}
+
+	.update-preview {
+		max-width: 520px;
+		border: 1px solid currentColor;
+		padding: 8px;
+		line-height: 1.4;
+
+		& p {
+			padding: 0;
+		}
+
+		& ul {
+			margin: 4px 0;
+			padding-left: 20px;
+		}
+	}
+
+	.update-warning {
+		margin-top: 6px;
+	}
+
+	@media (max-width: 700px) {
+		footer {
+			align-items: flex-start;
+			flex-direction: column;
+		}
+
+		.playlist-actions {
+			width: 100%;
+			justify-content: flex-start;
+		}
 	}
 </style>

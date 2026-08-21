@@ -15,12 +15,18 @@ import {
 	throwIfAborted
 } from '$lib/utils/abort';
 import { fetchWithTimeout } from '$lib/utils/request';
+import {
+	compareSpotifyPlaylist,
+	canonicalSpotifyTrackUri,
+	fingerprintSpotifyPlaylistPreview,
+	isSpotifyPlaylistFingerprint,
+	spotifyPlaylistItemTrackUri
+} from '$lib/utils/playlist-preview.server';
 
 const SPOTIFY_PLAYLIST_TIMEOUT_MS = 20_000;
 const SPOTIFY_PLAYLIST_ROUTE_TIMEOUT_MS = 5 * 60 * 1000;
 export const SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 export const SPOTIFY_PLAYLIST_MAX_TRACKS = 10_000;
-const SPOTIFY_TRACK_URI = /^spotify:track:[A-Za-z0-9]{22}$/;
 
 type PlaylistSyncRequest = {
 	operation: 'sync';
@@ -31,8 +37,23 @@ type PlaylistSyncRequest = {
 	playlistId?: string;
 };
 
+type PlaylistPreviewRequest = Omit<PlaylistSyncRequest, 'operation' | 'playlistId'> & {
+	operation: 'preview';
+	playlistId: string;
+};
+
+type PlaylistApplyRequest = Omit<PlaylistSyncRequest, 'operation' | 'playlistId'> & {
+	operation: 'apply';
+	playlistId: string;
+	previewFingerprint: string;
+};
+
 type PlaylistVerifyRequest = { operation: 'verify'; playlistId: string };
-type PlaylistRequest = PlaylistSyncRequest | PlaylistVerifyRequest;
+type PlaylistRequest =
+	| PlaylistSyncRequest
+	| PlaylistPreviewRequest
+	| PlaylistApplyRequest
+	| PlaylistVerifyRequest;
 
 type SpotifyPlaylistFailureCategory =
 	| 'authentication'
@@ -44,7 +65,8 @@ type SpotifyPlaylistFailureCategory =
 	| 'upstream'
 	| 'invalid-response'
 	| 'network'
-	| 'timeout';
+	| 'timeout'
+	| 'stale-preview';
 
 class SpotifyPlaylistFailure extends Error {
 	constructor(
@@ -146,6 +168,14 @@ const parseRequest = async (request: Request, signal: AbortSignal): Promise<Play
 		}
 		return { operation: 'verify', playlistId: value.playlistId };
 	}
+	if (
+		value.operation !== undefined &&
+		value.operation !== 'sync' &&
+		value.operation !== 'preview' &&
+		value.operation !== 'apply'
+	) {
+		throw new SpotifyPlaylistFailure('request-rejected');
+	}
 
 	const name = typeof value.name === 'string' ? value.name.trim() : '';
 	const description = value.description;
@@ -160,20 +190,42 @@ const parseRequest = async (request: Request, signal: AbortSignal): Promise<Play
 		typeof isPublic !== 'boolean' ||
 		!Array.isArray(tracks) ||
 		tracks.length > SPOTIFY_PLAYLIST_MAX_TRACKS ||
-		!tracks.every((track) => typeof track === 'string' && SPOTIFY_TRACK_URI.test(track)) ||
+		!tracks.every((track) => canonicalSpotifyTrackUri(track) !== null) ||
 		(playlistId !== undefined && !isSpotifyPlaylistId(playlistId))
 	) {
 		throw new SpotifyPlaylistFailure('request-rejected');
 	}
 
-	return {
-		operation: 'sync',
+	const common = {
 		name,
 		description,
 		tracks: uniqueSpotifyUris(tracks as string[]),
-		public: isPublic,
-		...(playlistId ? { playlistId } : {})
+		public: isPublic
 	};
+	if (value.operation === 'preview') {
+		if (!isSpotifyPlaylistId(playlistId)) {
+			throw new SpotifyPlaylistFailure('request-rejected');
+		}
+		return { operation: 'preview', playlistId, ...common };
+	}
+	if (value.operation === 'apply') {
+		if (
+			!isSpotifyPlaylistId(playlistId) ||
+			!isSpotifyPlaylistFingerprint(value.previewFingerprint)
+		) {
+			throw new SpotifyPlaylistFailure('request-rejected');
+		}
+		return {
+			operation: 'apply',
+			playlistId,
+			previewFingerprint: value.previewFingerprint,
+			...common
+		};
+	}
+	if (playlistId !== undefined) {
+		throw new SpotifyPlaylistFailure('request-rejected');
+	}
+	return { operation: 'sync', ...common };
 };
 
 const requestSpotify = async (
@@ -284,6 +336,9 @@ const safeErrorResponse = (
 	if (failure.category === 'inaccessible') {
 		return json({ error: 'playlist_inaccessible' }, { status: 403 });
 	}
+	if (failure.category === 'stale-preview') {
+		return json({ error: 'playlist_changed_since_preview' }, { status: 409 });
+	}
 	if (failure.category === 'request-rejected' && !mutationStarted) {
 		return json({ error: 'invalid_request' }, { status: 400 });
 	}
@@ -327,6 +382,98 @@ const verifyOwnership = async (
 	if (playlistValue.owner.id !== userId) throw new SpotifyPlaylistFailure('ownership');
 };
 
+const readPlaylistMetadata = async (
+	event: Parameters<RequestHandler>[0],
+	headers: Record<string, string>,
+	userId: string,
+	playlistId: string,
+	signal: AbortSignal
+) => {
+	const playlistValue = await requestSpotify(
+		event.fetch,
+		`https://api.spotify.com/v1/playlists/${playlistId}?fields=id,owner(id),snapshot_id,name,description,public`,
+		{ headers },
+		signal,
+		{ json: true, notFound: true, inaccessible: true }
+	);
+	if (
+		!isRecord(playlistValue) ||
+		playlistValue.id !== playlistId ||
+		!isRecord(playlistValue.owner) ||
+		typeof playlistValue.owner.id !== 'string' ||
+		typeof playlistValue.snapshot_id !== 'string' ||
+		playlistValue.snapshot_id.length === 0 ||
+		playlistValue.snapshot_id.length > 500 ||
+		typeof playlistValue.name !== 'string' ||
+		playlistValue.name.length > 100 ||
+		typeof playlistValue.description !== 'string' ||
+		playlistValue.description.length > 300 ||
+		typeof playlistValue.public !== 'boolean'
+	) {
+		throw new SpotifyPlaylistFailure('invalid-response');
+	}
+	if (playlistValue.owner.id !== userId) throw new SpotifyPlaylistFailure('ownership');
+	return {
+		playlistId,
+		snapshotId: playlistValue.snapshot_id,
+		name: playlistValue.name,
+		description: playlistValue.description,
+		public: playlistValue.public
+	};
+};
+
+const readPlaylistItems = async (
+	event: Parameters<RequestHandler>[0],
+	headers: Record<string, string>,
+	playlistId: string,
+	signal: AbortSignal
+) => {
+	const items: (string | null)[] = [];
+	let expectedTotal: number | undefined;
+	for (let offset = 0, page = 0; page < 100; page += 1) {
+		const pageValue = await requestSpotify(
+			event.fetch,
+			`https://api.spotify.com/v1/playlists/${playlistId}/items?fields=items(is_local,item(type,uri,is_local)),total&limit=100&offset=${offset}`,
+			{ headers },
+			signal,
+			{ json: true, notFound: true, inaccessible: true }
+		);
+		if (
+			!isRecord(pageValue) ||
+			!Number.isSafeInteger(pageValue.total) ||
+			(pageValue.total as number) < 0 ||
+			(pageValue.total as number) > SPOTIFY_PLAYLIST_MAX_TRACKS ||
+			!Array.isArray(pageValue.items) ||
+			pageValue.items.length > 100
+		) {
+			throw new SpotifyPlaylistFailure('invalid-response');
+		}
+		const total = pageValue.total as number;
+		if (expectedTotal === undefined) expectedTotal = total;
+		if (total !== expectedTotal || items.length + pageValue.items.length > total) {
+			throw new SpotifyPlaylistFailure('invalid-response');
+		}
+		for (const item of pageValue.items) items.push(spotifyPlaylistItemTrackUri(item));
+		if (items.length === total) return items;
+		if (pageValue.items.length === 0) throw new SpotifyPlaylistFailure('invalid-response');
+		offset = items.length;
+	}
+	throw new SpotifyPlaylistFailure('invalid-response');
+};
+
+const readOwnedPlaylistState = async (
+	event: Parameters<RequestHandler>[0],
+	headers: Record<string, string>,
+	userId: string,
+	playlistId: string,
+	signal: AbortSignal
+) => {
+	await verifyOwnership(event, headers, userId, playlistId, signal);
+	const metadata = await readPlaylistMetadata(event, headers, userId, playlistId, signal);
+	const items = await readPlaylistItems(event, headers, playlistId, signal);
+	return { ...metadata, items };
+};
+
 const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signal: AbortSignal) => {
 	let payload: PlaylistRequest;
 	try {
@@ -356,7 +503,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 	let mutationStarted = false;
 	let creationDispatched = false;
 	let linkedPlaylistId = payload.playlistId;
-	let mode: 'created' | 'updated' = payload.playlistId ? 'updated' : 'created';
+	let mode: 'created' | 'updated' = payload.operation === 'apply' ? 'updated' : 'created';
 
 	try {
 		const profileValue = await requestSpotify(
@@ -379,9 +526,35 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 				mode: 'verified'
 			});
 		}
+		if (payload.operation === 'preview') {
+			const current = await readOwnedPlaylistState(
+				event,
+				headers,
+				userId,
+				payload.playlistId,
+				signal
+			);
+			const preview = compareSpotifyPlaylist(current, payload);
+			return json({
+				playlistId: payload.playlistId,
+				mode: 'preview',
+				previewFingerprint: fingerprintSpotifyPlaylistPreview(current, payload),
+				...preview
+			});
+		}
 
 		if (linkedPlaylistId) {
-			await verifyOwnership(event, headers, userId, linkedPlaylistId, signal);
+			if (payload.operation !== 'apply') throw new SpotifyPlaylistFailure('request-rejected');
+			const current = await readOwnedPlaylistState(
+				event,
+				headers,
+				userId,
+				linkedPlaylistId,
+				signal
+			);
+			if (fingerprintSpotifyPlaylistPreview(current, payload) !== payload.previewFingerprint) {
+				throw new SpotifyPlaylistFailure('stale-preview');
+			}
 			mutationStarted = true;
 			await requestSpotify(
 				event.fetch,
