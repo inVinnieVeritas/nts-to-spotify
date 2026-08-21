@@ -1,4 +1,5 @@
 import { catalogBackupFilename, downloadCatalogProgressFile } from './catalog-backup.client';
+import type { NTSShowCatalog } from '$lib/types';
 import {
 	getCatalogSummaryCounts,
 	restoreCatalogCreationPending,
@@ -7,6 +8,11 @@ import {
 	uniqueSpotifyUris,
 	type CatalogProgress
 } from './catalog-scan';
+import { parseNTSShowCatalog, reconcileSavedCatalogWithNTS } from './catalog-update';
+import { updateCatalogProgress } from './catalog-progress.client';
+import { fetchWithTimeout, type Fetcher } from './request';
+
+const CATALOGUE_CHECK_TIMEOUT_MS = 35_000;
 
 export type SavedCatalogCard = {
 	record: CatalogProgress;
@@ -106,4 +112,95 @@ export const deleteSavedCatalogProgressIfConfirmed = async (
 	}
 	await remove(card.showAlias);
 	return true;
+};
+
+export type SavedCatalogUpdateCheckOutcome =
+	| { type: 'up-to-date'; progress: CatalogProgress }
+	| { type: 'updated'; progress: CatalogProgress; addedCount: number }
+	| { type: 'check-failed' }
+	| { type: 'save-failed' }
+	| { type: 'already-checking' };
+
+export const applySavedCatalogUpdateOutcome = (
+	cards: SavedCatalogCard[],
+	outcome: SavedCatalogUpdateCheckOutcome
+) => {
+	if (outcome.type !== 'updated') return cards;
+	const updatedCard = createSavedCatalogCard(outcome.progress);
+	return [
+		...cards.filter(({ showAlias }) => showAlias !== updatedCard.showAlias),
+		updatedCard
+	].sort((left, right) => right.updatedAt - left.updatedAt);
+};
+
+export const fetchSavedCatalogCurrentNTS = async (
+	showAlias: string,
+	request: Fetcher = fetch
+): Promise<NTSShowCatalog> =>
+	fetchWithTimeout(
+		request,
+		'/api/nts/catalogue',
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ showAlias })
+		},
+		CATALOGUE_CHECK_TIMEOUT_MS,
+		async (response) => {
+			if (!response.ok) {
+				await response.body?.cancel();
+				throw new Error('NTS catalogue check failed');
+			}
+			const body = (await response.json()) as { catalog?: unknown };
+			return parseNTSShowCatalog(body.catalog, showAlias);
+		}
+	);
+
+type CatalogUpdateCheckerDependencies = {
+	loadCurrentCatalog?: (showAlias: string) => Promise<NTSShowCatalog>;
+	updateProgress?: (
+		showAlias: string,
+		update: (current: CatalogProgress) => CatalogProgress
+	) => Promise<CatalogProgress>;
+};
+
+export const createSavedCatalogUpdateChecker = ({
+	loadCurrentCatalog = fetchSavedCatalogCurrentNTS,
+	updateProgress = updateCatalogProgress
+}: CatalogUpdateCheckerDependencies = {}) => {
+	const activeChecks = new Set<string>();
+
+	return {
+		isChecking: (showAlias: string) => activeChecks.has(showAlias),
+		check: async (showAlias: string): Promise<SavedCatalogUpdateCheckOutcome> => {
+			if (activeChecks.has(showAlias)) return { type: 'already-checking' };
+			activeChecks.add(showAlias);
+			try {
+				let catalog: NTSShowCatalog;
+				try {
+					catalog = await loadCurrentCatalog(showAlias);
+				} catch {
+					return { type: 'check-failed' };
+				}
+
+				let addedCount = 0;
+				let preparedAddition = false;
+				try {
+					const progress = await updateProgress(showAlias, (current) => {
+						const reconciled = reconcileSavedCatalogWithNTS(current, catalog);
+						addedCount = reconciled.addedCount;
+						preparedAddition = addedCount > 0;
+						return reconciled.progress;
+					});
+					return addedCount > 0
+						? { type: 'updated', progress, addedCount }
+						: { type: 'up-to-date', progress };
+				} catch {
+					return { type: preparedAddition ? 'save-failed' : 'check-failed' };
+				}
+			} finally {
+				activeChecks.delete(showAlias);
+			}
+		}
+	};
 };
