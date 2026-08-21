@@ -4,6 +4,7 @@ import { isAbortError } from './abort';
 export const CATALOG_PROGRESS_SCHEMA_VERSION = 2;
 export const SPOTIFY_MATCHER_VERSION = 1;
 const LEGACY_CATALOG_PROGRESS_SCHEMA_VERSION = 1;
+const SPOTIFY_PLAYLIST_ID = /^[A-Za-z0-9]{22}$/;
 
 export type ReviewTrack = MatchedTrack & {
 	selectedMatch: URI | null;
@@ -62,6 +63,13 @@ export type PlaylistDraft = {
 	description: string;
 	public: boolean;
 	order?: PlaylistOrder;
+	linkedPlaylistId?: string;
+	creationPending?: boolean;
+};
+
+export type CatalogPlaylistLinkState = {
+	linkedPlaylistId?: string;
+	creationPending: boolean;
 };
 
 export type CatalogRetryState = {
@@ -139,6 +147,63 @@ export const restoreCatalogPlaylistOrder = (progress?: CatalogProgress | null): 
 		? 'oldest-first'
 		: 'latest-first';
 
+export const isSpotifyPlaylistId = (value: unknown): value is string =>
+	typeof value === 'string' && SPOTIFY_PLAYLIST_ID.test(value);
+
+export const spotifyPlaylistUrl = (playlistId: string) =>
+	`https://open.spotify.com/playlist/${playlistId}`;
+
+export const parseSpotifyPlaylistId = (value: unknown) => {
+	if (typeof value !== 'string') return undefined;
+	const candidate = value.trim();
+	if (isSpotifyPlaylistId(candidate)) return candidate;
+	try {
+		const url = new URL(candidate);
+		if (
+			url.protocol !== 'https:' ||
+			url.hostname !== 'open.spotify.com' ||
+			url.username ||
+			url.password ||
+			url.search ||
+			url.hash
+		) {
+			return undefined;
+		}
+		const match = /^\/playlist\/([A-Za-z0-9]{22})\/?$/.exec(url.pathname);
+		return match?.[1];
+	} catch {
+		return undefined;
+	}
+};
+
+export const restoreCatalogLinkedPlaylistId = (progress?: CatalogProgress | null) =>
+	isCatalogProgressCompatible(progress) && isSpotifyPlaylistId(progress.playlist.linkedPlaylistId)
+		? progress.playlist.linkedPlaylistId
+		: undefined;
+
+export const restoreCatalogCreationPending = (progress?: CatalogProgress | null) =>
+	isCatalogProgressCompatible(progress) &&
+	progress.playlist.creationPending === true &&
+	!restoreCatalogLinkedPlaylistId(progress);
+
+export const canCreateCatalogSpotifyPlaylist = (state: CatalogPlaylistLinkState) =>
+	!state.linkedPlaylistId && !state.creationPending;
+
+export const applyDurableCatalogPlaylistLinkTransition = async (
+	next: CatalogPlaylistLinkState,
+	failure: CatalogPlaylistLinkState,
+	apply: (state: CatalogPlaylistLinkState) => void,
+	persist: () => Promise<boolean>,
+	isActive: () => boolean = () => true
+) => {
+	apply(next);
+	const persisted = await persist();
+	if (!isActive()) return false;
+	if (persisted) return true;
+	apply(failure);
+	return false;
+};
+
 export const createCatalogResetState = (
 	catalog: NTSEpisodeSummary[],
 	playlist: Pick<PlaylistDraft, 'title' | 'description'>
@@ -165,6 +230,35 @@ const longPlaylistDate = (date: string) =>
 export const createGeneratedPlaylistText = (
 	showName: string,
 	episodes: Array<Pick<NTSEpisodeSummary, 'broadcast'>>,
+	_order: PlaylistOrder
+): GeneratedPlaylistText => {
+	const chronologicalEpisodes = [...episodes].sort(
+		(left, right) => Date.parse(left.broadcast) - Date.parse(right.broadcast)
+	);
+	const oldest = chronologicalEpisodes[0];
+	const newest = chronologicalEpisodes[chronologicalEpisodes.length - 1];
+	const dateStamp =
+		newest && oldest
+			? `${shortPlaylistDate(newest.broadcast)}→${shortPlaylistDate(oldest.broadcast)}`
+			: '';
+
+	return {
+		title: `${showName.toUpperCase()} — NTS FULL ARCHIVE · ${dateStamp}`,
+		description:
+			oldest && newest
+				? `A comprehensive archive of tracks played on ${showName} on NTS Radio, covering broadcasts from ${longPlaylistDate(
+						oldest.broadcast
+				  )} through ${longPlaylistDate(
+						newest.broadcast
+				  )}. Some tracks unavailable on Spotify may be missing.`
+				: `Tracks played on ${showName} on NTS Radio. Some tracks unavailable on Spotify may be missing.`,
+		dateStamp
+	};
+};
+
+export const createLegacyGeneratedPlaylistText = (
+	showName: string,
+	episodes: Array<Pick<NTSEpisodeSummary, 'broadcast'>>,
 	order: PlaylistOrder
 ): GeneratedPlaylistText => {
 	const orderedEpisodes = [...episodes].sort((left, right) =>
@@ -184,7 +278,6 @@ export const createGeneratedPlaylistText = (
 			? `${shortPlaylistDate(first.broadcast)}→${shortPlaylistDate(last.broadcast)}`
 			: '';
 	const normalizedName = showName.toLowerCase();
-
 	return {
 		title: `“${normalizedName}” ${dateStamp}`,
 		description:
@@ -210,6 +303,29 @@ export const updateGeneratedPlaylistText = (
 			? nextGenerated.description
 			: current.description
 });
+
+export const updateGeneratedPlaylistTextForCatalog = (
+	current: Pick<GeneratedPlaylistText, 'title' | 'description'>,
+	showName: string,
+	previousEpisodes: Array<Pick<NTSEpisodeSummary, 'broadcast'>>,
+	currentEpisodes: Array<Pick<NTSEpisodeSummary, 'broadcast'>>,
+	order: PlaylistOrder
+) => {
+	const previousGenerated = createGeneratedPlaylistText(showName, previousEpisodes, order);
+	const previousLegacy = createLegacyGeneratedPlaylistText(showName, previousEpisodes, order);
+	const nextGenerated = createGeneratedPlaylistText(showName, currentEpisodes, order);
+	return {
+		title:
+			current.title === previousGenerated.title || current.title === previousLegacy.title
+				? nextGenerated.title
+				: current.title,
+		description:
+			current.description === previousGenerated.description ||
+			current.description === previousLegacy.description
+				? nextGenerated.description
+				: current.description
+	};
+};
 
 export const shouldApplyCatalogRestoration = (
 	requestedAlias: string,

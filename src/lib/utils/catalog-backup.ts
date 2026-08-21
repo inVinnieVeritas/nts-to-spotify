@@ -4,7 +4,9 @@ import {
 	SPOTIFY_MATCHER_VERSION,
 	isCatalogProgressCompatible,
 	reconcileEpisodes,
+	restoreCatalogCreationPending,
 	restoreCatalogPlaylistOrder,
+	restoreCatalogLinkedPlaylistId,
 	restoreCatalogRetryState,
 	type CatalogProgress,
 	type EpisodeState,
@@ -24,6 +26,7 @@ export const CATALOG_BACKUP_MAX_COOLDOWN_MS = 366 * 24 * 60 * 60 * 1000;
 const CATALOG_BACKUP_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const CATALOG_BACKUP_EARLIEST_TIMESTAMP = Date.UTC(2020, 0, 1);
 const SPOTIFY_TRACK_URI = /^spotify:track:([A-Za-z0-9]{22})$/;
+const SPOTIFY_PLAYLIST_ID = /^[A-Za-z0-9]{22}$/;
 const STRICT_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
@@ -278,13 +281,31 @@ const validateEpisode = (value: unknown, label: string): EpisodeState => {
 
 const validatePlaylist = (value: unknown): PlaylistDraft => {
 	const playlist = asRecord(value, 'progress.playlist');
-	assertAllowedKeys(playlist, ['title', 'description', 'public', 'order'], 'progress.playlist');
+	assertAllowedKeys(
+		playlist,
+		['title', 'description', 'public', 'order', 'linkedPlaylistId', 'creationPending'],
+		'progress.playlist'
+	);
 	if (
 		playlist.order !== undefined &&
 		playlist.order !== 'latest-first' &&
 		playlist.order !== 'oldest-first'
 	) {
 		invalid('progress.playlist.order is invalid.');
+	}
+	const linkedPlaylistId = optionalString(
+		playlist.linkedPlaylistId,
+		'progress.playlist.linkedPlaylistId',
+		22
+	);
+	if (linkedPlaylistId !== undefined && !SPOTIFY_PLAYLIST_ID.test(linkedPlaylistId)) {
+		invalid('progress.playlist.linkedPlaylistId is invalid.');
+	}
+	if (playlist.creationPending !== undefined && typeof playlist.creationPending !== 'boolean') {
+		invalid('progress.playlist.creationPending is invalid.');
+	}
+	if (linkedPlaylistId && playlist.creationPending === true) {
+		invalid('progress.playlist creation state is inconsistent.');
 	}
 	return {
 		title: boundedString(playlist.title, 'progress.playlist.title', 100),
@@ -293,7 +314,9 @@ const validatePlaylist = (value: unknown): PlaylistDraft => {
 				? playlist.description
 				: invalid('progress.playlist.description must be a valid string.'),
 		public: requiredBoolean(playlist.public, 'progress.playlist.public'),
-		...(playlist.order ? { order: playlist.order as PlaylistOrder } : {})
+		...(playlist.order ? { order: playlist.order as PlaylistOrder } : {}),
+		...(linkedPlaylistId ? { linkedPlaylistId } : {}),
+		...(playlist.creationPending === true ? { creationPending: true } : {})
 	};
 };
 
@@ -392,7 +415,11 @@ const copyProgress = (progress: CatalogProgress): CatalogProgress => ({
 		title: progress.playlist.title,
 		description: progress.playlist.description,
 		public: progress.playlist.public,
-		...(progress.playlist.order ? { order: progress.playlist.order } : {})
+		...(progress.playlist.order ? { order: progress.playlist.order } : {}),
+		...(restoreCatalogLinkedPlaylistId(progress)
+			? { linkedPlaylistId: restoreCatalogLinkedPlaylistId(progress) }
+			: {}),
+		...(restoreCatalogCreationPending(progress) ? { creationPending: true } : {})
 	},
 	...(progress.retry
 		? {

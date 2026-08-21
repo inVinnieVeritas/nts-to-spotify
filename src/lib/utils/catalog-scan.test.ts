@@ -2,11 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import type { NTSEpisodeSummary } from '$lib/types';
 import { abortableDelay } from './abort';
 import {
+	applyDurableCatalogPlaylistLinkTransition,
+	canCreateCatalogSpotifyPlaylist,
 	CATALOG_PROGRESS_SCHEMA_VERSION,
 	SPOTIFY_MATCHER_VERSION,
 	captureCatalogProgress,
 	createCatalogResetState,
 	createGeneratedPlaylistText,
+	createLegacyGeneratedPlaylistText,
 	formatCooldownDuration,
 	formatSpotifyCooldownMessage,
 	getCatalogEpisodeReviewTracks,
@@ -17,8 +20,11 @@ import {
 	isSystemicSpotifyResponseFailure,
 	parseCatalogRetryAfter,
 	parseCatalogSpotifyRateLimitReason,
+	parseSpotifyPlaylistId,
 	parseSpotifySessionMetrics,
 	reconcileEpisodes,
+	restoreCatalogCreationPending,
+	restoreCatalogLinkedPlaylistId,
 	restoreCatalogPlaylistOrder,
 	restoreCatalogRetryState,
 	runCatalogWorkers,
@@ -27,7 +33,9 @@ import {
 	shouldReturnEpisodeToPending,
 	uniqueSpotifyUris,
 	updateGeneratedPlaylistText,
+	updateGeneratedPlaylistTextForCatalog,
 	type CatalogProgress,
+	type CatalogPlaylistLinkState,
 	type CatalogReviewFilter,
 	type EpisodeState
 } from './catalog-scan';
@@ -56,6 +64,7 @@ const reviewTrack = {
 	selectedMatch: 'spotify:track:manual',
 	checked: true
 };
+const PLAYLIST_ID = 'ABCDEFGHIJKLMNOPQRSTUV';
 
 const savedProgress = (episodes: EpisodeState[]): CatalogProgress => ({
 	schemaVersion: CATALOG_PROGRESS_SCHEMA_VERSION,
@@ -82,6 +91,17 @@ describe('catalogue progress restoration', () => {
 			tracks: [{ checked: true, selectedMatch: 'spotify:track:manual' }]
 		});
 		expect(restored[1]).toMatchObject({ status: 'pending', tracks: [] });
+	});
+
+	it('preserves completed episodes while adding a newly published episode as pending', () => {
+		const older = episode('older', '2026-01-01');
+		const newer = episode('newer', '2026-02-01');
+		const progress = savedProgress([{ ...older, status: 'done', tracks: [reviewTrack] }]);
+
+		expect(reconcileEpisodes([older, newer], progress)).toEqual([
+			expect.objectContaining({ episodeAlias: 'older', status: 'done', tracks: [reviewTrack] }),
+			expect.objectContaining({ episodeAlias: 'newer', status: 'pending', tracks: [] })
+		]);
 	});
 
 	it('rejects a stale restoration after the active show alias changes', () => {
@@ -117,6 +137,115 @@ describe('catalogue progress restoration', () => {
 		expect(restoreCatalogPlaylistOrder(savedProgress([]))).toBe('latest-first');
 	});
 
+	it('restores only canonical linked playlist IDs and isolates shows', () => {
+		const first = savedProgress([]);
+		first.showAlias = 'show-a';
+		first.playlist.linkedPlaylistId = PLAYLIST_ID;
+		const second = savedProgress([]);
+		second.showAlias = 'show-b';
+		second.playlist.linkedPlaylistId = 'invalid';
+
+		expect(restoreCatalogLinkedPlaylistId(first)).toBe(PLAYLIST_ID);
+		expect(restoreCatalogLinkedPlaylistId(second)).toBeUndefined();
+		expect(restoreCatalogLinkedPlaylistId(null)).toBeUndefined();
+	});
+
+	it('accepts only canonical playlist IDs and canonical Spotify playlist URLs', () => {
+		expect(parseSpotifyPlaylistId(PLAYLIST_ID)).toBe(PLAYLIST_ID);
+		expect(parseSpotifyPlaylistId(`https://open.spotify.com/playlist/${PLAYLIST_ID}`)).toBe(
+			PLAYLIST_ID
+		);
+		expect(parseSpotifyPlaylistId(`https://open.spotify.com/playlist/${PLAYLIST_ID}/`)).toBe(
+			PLAYLIST_ID
+		);
+		for (const invalid of [
+			`http://open.spotify.com/playlist/${PLAYLIST_ID}`,
+			`https://example.test/playlist/${PLAYLIST_ID}`,
+			`https://open.spotify.com/playlist/${PLAYLIST_ID}?si=tracking`,
+			`https://user:password@open.spotify.com/playlist/${PLAYLIST_ID}`,
+			'not-a-playlist'
+		]) {
+			expect(parseSpotifyPlaylistId(invalid)).toBeUndefined();
+		}
+	});
+
+	it('restores pending creation only when no durable playlist link exists', () => {
+		const pending = savedProgress([]);
+		pending.playlist.creationPending = true;
+		expect(restoreCatalogCreationPending(pending)).toBe(true);
+
+		pending.playlist.linkedPlaylistId = PLAYLIST_ID;
+		expect(restoreCatalogCreationPending(pending)).toBe(false);
+		expect(restoreCatalogCreationPending(savedProgress([]))).toBe(false);
+	});
+
+	it('applies durable creation/link transitions and blocks creation after a failed link save', async () => {
+		let state: CatalogPlaylistLinkState = { creationPending: false };
+		const apply = (next: CatalogPlaylistLinkState) => (state = next);
+		const saves: CatalogPlaylistLinkState[] = [];
+
+		expect(
+			await applyDurableCatalogPlaylistLinkTransition(
+				{ creationPending: true },
+				{ creationPending: false },
+				apply,
+				async () => {
+					saves.push({ ...state });
+					return true;
+				}
+			)
+		).toBe(true);
+		expect(saves).toEqual([{ creationPending: true }]);
+
+		expect(
+			await applyDurableCatalogPlaylistLinkTransition(
+				{ linkedPlaylistId: PLAYLIST_ID, creationPending: false },
+				{ linkedPlaylistId: PLAYLIST_ID, creationPending: true },
+				apply,
+				async () => false
+			)
+		).toBe(false);
+		expect(state).toEqual({ linkedPlaylistId: PLAYLIST_ID, creationPending: true });
+		expect(canCreateCatalogSpotifyPlaylist(state)).toBe(false);
+		expect(canCreateCatalogSpotifyPlaylist({ creationPending: true })).toBe(false);
+		expect(canCreateCatalogSpotifyPlaylist({ creationPending: false })).toBe(true);
+	});
+
+	it('does not visibly forget a link when durable removal fails', async () => {
+		let state: CatalogPlaylistLinkState = {
+			linkedPlaylistId: PLAYLIST_ID,
+			creationPending: false
+		};
+		const persisted = await applyDurableCatalogPlaylistLinkTransition(
+			{ creationPending: false },
+			state,
+			(next) => (state = next),
+			async () => false
+		);
+
+		expect(persisted).toBe(false);
+		expect(state).toEqual({ linkedPlaylistId: PLAYLIST_ID, creationPending: false });
+	});
+
+	it('does not let a stale durable transition roll back a replacement show', async () => {
+		let active = true;
+		let state: CatalogPlaylistLinkState = { creationPending: false };
+		const pending = applyDurableCatalogPlaylistLinkTransition(
+			{ creationPending: true },
+			{ creationPending: false },
+			(next) => (state = next),
+			async () => {
+				active = false;
+				state = { linkedPlaylistId: PLAYLIST_ID, creationPending: false };
+				return false;
+			},
+			() => active
+		);
+
+		expect(await pending).toBe(false);
+		expect(state).toEqual({ linkedPlaylistId: PLAYLIST_ID, creationPending: false });
+	});
+
 	it('captures the latest review state without retaining mutable references', () => {
 		const catalogEpisode: EpisodeState = {
 			...episode('episode', '2026-01-01'),
@@ -130,7 +259,8 @@ describe('catalogue progress restoration', () => {
 				title: 'Title',
 				description: 'Description',
 				public: false,
-				order: 'oldest-first'
+				order: 'oldest-first',
+				linkedPlaylistId: PLAYLIST_ID
 			},
 			{ cooldownUntil: 0, pausedByRateLimit: false }
 		);
@@ -138,6 +268,7 @@ describe('catalogue progress restoration', () => {
 		catalogEpisode.tracks[0].checked = false;
 		expect(snapshot.episodes.episode.tracks[0].checked).toBe(true);
 		expect(snapshot.playlist.order).toBe('oldest-first');
+		expect(snapshot.playlist.linkedPlaylistId).toBe(PLAYLIST_ID);
 	});
 
 	it('resumes only episodes that are not completed', () => {
@@ -170,6 +301,8 @@ describe('catalogue progress restoration', () => {
 			},
 			retry: { cooldownUntil: 0, pausedByRateLimit: false }
 		});
+		expect(state.playlist).not.toHaveProperty('linkedPlaylistId');
+		expect(state.playlist).not.toHaveProperty('creationPending');
 	});
 });
 
@@ -524,25 +657,38 @@ describe('generated playlist text chronology', () => {
 	const latest = createGeneratedPlaylistText('Test Show', showEpisodes, 'latest-first');
 	const oldest = createGeneratedPlaylistText('Test Show', showEpisodes, 'oldest-first');
 
-	it('updates generated name and description immediately in both directions', () => {
+	it('uses an uppercase archive title and latest-to-oldest dates for both track orders', () => {
 		expect(latest.dateStamp).toBe('06.08.26→20.01.22');
-		expect(latest.title).toBe('“test show” 06.08.26→20.01.22');
-		expect(latest.description).toContain('“test show” 06.08.26→20.01.22');
-		expect(latest.description).toContain(
-			'covering broadcasts from 20 January 2022 through 6 August 2026'
+		expect(latest.title).toBe('TEST SHOW — NTS FULL ARCHIVE · 06.08.26→20.01.22');
+		expect(latest.description).toBe(
+			'A comprehensive archive of tracks played on Test Show on NTS Radio, covering broadcasts from 20 January 2022 through 6 August 2026. Some tracks unavailable on Spotify may be missing.'
 		);
-		expect(oldest.dateStamp).toBe('20.01.22→06.08.26');
-		expect(oldest.title).toBe('“test show” 20.01.22→06.08.26');
-		expect(oldest.description).toContain('“test show” 20.01.22→06.08.26');
-		expect(oldest.description).toContain(
-			'covering broadcasts from 20 January 2022 through 6 August 2026'
-		);
+		expect(oldest).toEqual(latest);
 
 		const switchedToOldest = updateGeneratedPlaylistText(latest, latest, oldest);
 		expect(switchedToOldest).toEqual({ title: oldest.title, description: oldest.description });
 		expect(updateGeneratedPlaylistText(switchedToOldest, oldest, latest)).toEqual({
 			title: latest.title,
 			description: latest.description
+		});
+	});
+
+	it('extends the exact generated Jim O’Rourke metadata for a future episode', () => {
+		const previousEpisodes = [episode('oldest', '2022-01-20'), episode('newest', '2026-08-06')];
+		const currentEpisodes = [...previousEpisodes, episode('future', '2026-09-03')];
+		const previous = createGeneratedPlaylistText("Jim O'Rourke", previousEpisodes, 'oldest-first');
+		const updated = updateGeneratedPlaylistTextForCatalog(
+			previous,
+			"Jim O'Rourke",
+			previousEpisodes,
+			currentEpisodes,
+			'oldest-first'
+		);
+
+		expect(updated).toEqual({
+			title: "JIM O'ROURKE — NTS FULL ARCHIVE · 03.09.26→20.01.22",
+			description:
+				"A comprehensive archive of tracks played on Jim O'Rourke on NTS Radio, covering broadcasts from 20 January 2022 through 3 September 2026. Some tracks unavailable on Spotify may be missing."
 		});
 	});
 
@@ -581,6 +727,76 @@ describe('generated playlist text chronology', () => {
 			public: false,
 			order: 'oldest-first'
 		});
+	});
+
+	it('extends generated date ranges without overwriting independently customized text', () => {
+		const previousEpisodes = [episode('oldest', '2022-01-20'), episode('middle', '2024-05-03')];
+		const currentEpisodes = [...previousEpisodes, episode('newest', '2026-08-06')];
+		const previous = createGeneratedPlaylistText('Test Show', previousEpisodes, 'latest-first');
+		const current = createGeneratedPlaylistText('Test Show', currentEpisodes, 'latest-first');
+
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				previous,
+				'Test Show',
+				previousEpisodes,
+				currentEpisodes,
+				'latest-first'
+			)
+		).toEqual({ title: current.title, description: current.description });
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				{ title: 'Custom title', description: previous.description },
+				'Test Show',
+				previousEpisodes,
+				currentEpisodes,
+				'latest-first'
+			)
+		).toEqual({ title: 'Custom title', description: current.description });
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				{ title: previous.title, description: 'Custom description' },
+				'Test Show',
+				previousEpisodes,
+				currentEpisodes,
+				'latest-first'
+			)
+		).toEqual({ title: current.title, description: 'Custom description' });
+	});
+
+	it('migrates exact legacy fields independently while preserving customized fields', () => {
+		const previousEpisodes = [episode('oldest', '2022-01-20'), episode('middle', '2024-05-03')];
+		const currentEpisodes = [...previousEpisodes, episode('newest', '2026-08-06')];
+		const legacy = createLegacyGeneratedPlaylistText('Test Show', previousEpisodes, 'oldest-first');
+		const current = createGeneratedPlaylistText('Test Show', currentEpisodes, 'oldest-first');
+
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				legacy,
+				'Test Show',
+				previousEpisodes,
+				currentEpisodes,
+				'oldest-first'
+			)
+		).toEqual({ title: current.title, description: current.description });
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				{ title: 'Custom title', description: legacy.description },
+				'Test Show',
+				previousEpisodes,
+				currentEpisodes,
+				'oldest-first'
+			)
+		).toEqual({ title: 'Custom title', description: current.description });
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				{ title: legacy.title, description: 'Custom description' },
+				'Test Show',
+				previousEpisodes,
+				currentEpisodes,
+				'oldest-first'
+			)
+		).toEqual({ title: current.title, description: 'Custom description' });
 	});
 });
 

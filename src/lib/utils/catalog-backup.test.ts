@@ -26,6 +26,7 @@ const TRACK_ID = '0123456789ABCDEFGHIJKL';
 const OTHER_TRACK_ID = 'ZYXWVUTSRQPONMLKJIHGFE';
 const TRACK_URI = `spotify:track:${TRACK_ID}`;
 const OTHER_TRACK_URI = `spotify:track:${OTHER_TRACK_ID}`;
+const PLAYLIST_ID = 'ABCDEFGHIJKLMNOPQRSTUV';
 
 const catalog: NTSEpisodeSummary[] = [
 	{
@@ -78,7 +79,8 @@ const makeProgress = (): CatalogProgress =>
 			title: 'Saved playlist',
 			description: 'Saved description',
 			public: true,
-			order: 'oldest-first'
+			order: 'oldest-first',
+			linkedPlaylistId: PLAYLIST_ID
 		},
 		{ cooldownUntil: EXPORTED_AT_MS + 8 * 60 * 60 * 1000, pausedByRateLimit: true }
 	);
@@ -104,6 +106,48 @@ describe('catalogue progress backup', () => {
 			showAlias: 'show',
 			progress
 		});
+	});
+
+	it('accepts legacy backups without linkage state and rejects invalid linked IDs', () => {
+		const legacy = JSON.parse(jsonEnvelope()) as {
+			progress: { playlist: { linkedPlaylistId?: string; creationPending?: boolean } };
+		};
+		delete legacy.progress.playlist.linkedPlaylistId;
+		delete legacy.progress.playlist.creationPending;
+		expect(parseCatalogBackup(JSON.stringify(legacy), 'show').progress.playlist).not.toHaveProperty(
+			'linkedPlaylistId'
+		);
+
+		const invalid = JSON.parse(jsonEnvelope()) as typeof legacy;
+		invalid.progress.playlist.linkedPlaylistId = 'not-a-playlist-id';
+		expect(() => parseCatalogBackup(JSON.stringify(invalid), 'show')).toThrow(
+			'linkedPlaylistId is invalid'
+		);
+	});
+
+	it('round trips a pending first-creation state without changing backup versions', () => {
+		const progress = makeProgress();
+		progress.updatedAt = EXPORTED_AT_MS;
+		delete progress.playlist.linkedPlaylistId;
+		progress.playlist.creationPending = true;
+
+		const parsed = parseCatalogBackup(
+			serializeCatalogBackup(progress, new Date(EXPORTED_AT)),
+			'show'
+		);
+		expect(parsed.progress.playlist.creationPending).toBe(true);
+		expect(parsed.version).toBe(CATALOG_BACKUP_VERSION);
+		expect(parsed.progress.schemaVersion).toBe(CATALOG_PROGRESS_SCHEMA_VERSION);
+	});
+
+	it('rejects inconsistent linked and pending creation state', () => {
+		const inconsistent = JSON.parse(jsonEnvelope()) as {
+			progress: { playlist: { creationPending?: boolean } };
+		};
+		inconsistent.progress.playlist.creationPending = true;
+		expect(() => parseCatalogBackup(JSON.stringify(inconsistent), 'show')).toThrow(
+			'creation state is inconsistent'
+		);
 	});
 
 	it('exports the latest manual choices rather than an older snapshot', () => {
@@ -350,7 +394,8 @@ describe('catalogue progress restoration', () => {
 			title: 'Saved playlist',
 			description: 'Saved description',
 			public: true,
-			order: 'oldest-first'
+			order: 'oldest-first',
+			linkedPlaylistId: PLAYLIST_ID
 		});
 	});
 

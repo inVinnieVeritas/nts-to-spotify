@@ -24,6 +24,8 @@
 		restoreCatalogProgressIfConfirmed
 	} from '$lib/utils/catalog-backup';
 	import {
+		applyDurableCatalogPlaylistLinkTransition,
+		canCreateCatalogSpotifyPlaylist,
 		captureCatalogProgress,
 		createCatalogResetState,
 		createGeneratedPlaylistText,
@@ -35,21 +37,26 @@
 		getCatalogSummaryCounts,
 		getResumableEpisodeIndexes,
 		isCatalogProgressCompatible,
+		isSpotifyPlaylistId,
 		isSystemicSpotifyResponseFailure,
 		parseCatalogRetryAfter,
 		parseCatalogSpotifyRateLimitReason,
 		parseSpotifySessionMetrics,
 		reconcileEpisodes,
+		restoreCatalogCreationPending,
 		restoreCatalogPlaylistOrder,
+		restoreCatalogLinkedPlaylistId,
 		restoreCatalogRetryState,
 		runCatalogWorkers,
 		shouldApplyCatalogRestoration,
 		shouldShowCatalogEpisodeForReview,
 		shouldReturnEpisodeToPending,
 		updateGeneratedPlaylistText,
+		updateGeneratedPlaylistTextForCatalog,
 		type CatalogReviewFilter,
 		type CatalogScanOutcome,
 		type CatalogSpotifyRateLimitReason,
+		type CatalogPlaylistLinkState,
 		type EpisodeState,
 		type PlaylistOrder,
 		type SpotifySessionMetrics
@@ -101,6 +108,8 @@
 	let playlistDescription = initialDefaults.description;
 	let publicPlaylist = false;
 	let playlistOrder: PlaylistOrder = 'latest-first';
+	let linkedPlaylistId: string | undefined;
+	let playlistCreationPending = false;
 	let scanning = false;
 	let scanMessage = '';
 	let restored = false;
@@ -146,7 +155,9 @@
 				title: playlistTitle,
 				description: playlistDescription,
 				public: publicPlaylist,
-				order: playlistOrder
+				order: playlistOrder,
+				...(linkedPlaylistId ? { linkedPlaylistId } : {}),
+				...(!linkedPlaylistId && playlistCreationPending ? { creationPending: true } : {})
 			},
 			{ cooldownUntil, pausedByRateLimit }
 		);
@@ -165,6 +176,78 @@
 	const captureAndPersistTrackReview = () => {
 		episodes = episodes;
 		captureAndPersistReview();
+	};
+	const persistPlaylistStateDurably = async () => {
+		if (!restored || !persistenceAvailable || progressReplacementAlias === activeShowAlias) {
+			return false;
+		}
+		const alias = activeShowAlias;
+		const generation = showGeneration;
+		await snapshotWriter.flush();
+		if (
+			!persistenceAvailable ||
+			!shouldApplyCatalogRestoration(alias, generation, activeShowAlias, showGeneration)
+		) {
+			return false;
+		}
+		try {
+			await saveCatalogProgress(currentProgressSnapshot());
+			return shouldApplyCatalogRestoration(alias, generation, activeShowAlias, showGeneration);
+		} catch {
+			if (shouldApplyCatalogRestoration(alias, generation, activeShowAlias, showGeneration)) {
+				persistenceAvailable = false;
+				scanMessage = 'Progress could not be saved in this browser.';
+			}
+			return false;
+		}
+	};
+	const applyPlaylistLinkState = (state: CatalogPlaylistLinkState) => {
+		linkedPlaylistId = state.linkedPlaylistId;
+		playlistCreationPending = state.creationPending;
+	};
+	const durablePlaylistTransition = (
+		next: CatalogPlaylistLinkState,
+		failure: CatalogPlaylistLinkState
+	) => {
+		const alias = activeShowAlias;
+		const generation = showGeneration;
+		return applyDurableCatalogPlaylistLinkTransition(
+			next,
+			failure,
+			applyPlaylistLinkState,
+			persistPlaylistStateDurably,
+			() => shouldApplyCatalogRestoration(alias, generation, activeShowAlias, showGeneration)
+		);
+	};
+	const preparePlaylistCreation = async () => {
+		if (
+			!canCreateCatalogSpotifyPlaylist({
+				linkedPlaylistId,
+				creationPending: playlistCreationPending
+			})
+		) {
+			return false;
+		}
+		return durablePlaylistTransition({ creationPending: true }, { creationPending: false });
+	};
+	const persistLinkedPlaylist = async (playlistId: string) => {
+		if (!isSpotifyPlaylistId(playlistId)) return false;
+		return durablePlaylistTransition(
+			{ linkedPlaylistId: playlistId, creationPending: false },
+			{ linkedPlaylistId: playlistId, creationPending: true }
+		);
+	};
+	const clearPlaylistCreationPending = async () => {
+		return durablePlaylistTransition(
+			{ creationPending: false },
+			{ creationPending: playlistCreationPending }
+		);
+	};
+	const forgetPlaylist = async () => {
+		return durablePlaylistTransition(
+			{ creationPending: false },
+			{ linkedPlaylistId, creationPending: playlistCreationPending }
+		);
 	};
 	const changePlaylistOrder = (event: Event) => {
 		const nextOrder: PlaylistOrder =
@@ -504,6 +587,8 @@
 					playlistTitle = restoredProgress.progress.playlist.title;
 					playlistDescription = restoredProgress.progress.playlist.description;
 					publicPlaylist = restoredProgress.progress.playlist.public;
+					linkedPlaylistId = restoreCatalogLinkedPlaylistId(restoredProgress.progress);
+					playlistCreationPending = restoreCatalogCreationPending(restoredProgress.progress);
 					dateStamp = createGeneratedPlaylistText(
 						data.name,
 						data.episodes,
@@ -582,6 +667,8 @@
 			playlistTitle = resetState.playlist.title;
 			playlistDescription = resetState.playlist.description;
 			publicPlaylist = resetState.playlist.public;
+			linkedPlaylistId = undefined;
+			playlistCreationPending = false;
 			dateStamp = defaults.stamp;
 			cooldownUntil = resetState.retry.cooldownUntil;
 			cooldownRemaining = 0;
@@ -671,6 +758,8 @@
 		playlistDescription = defaults.description;
 		publicPlaylist = false;
 		playlistOrder = 'latest-first';
+		linkedPlaylistId = undefined;
+		playlistCreationPending = false;
 		reviewFilter = 'all';
 		episodes = reconcileEpisodes(pageData.episodes);
 		scanning = false;
@@ -684,6 +773,7 @@
 		pausedByRateLimit = false;
 		cancelRequested = false;
 		automaticRateLimitCount = 0;
+		let generatedMetadataChanged = false;
 
 		try {
 			const saved = await loadCatalogProgress(showAlias);
@@ -696,14 +786,27 @@
 			episodes = reconcileEpisodes(pageData.episodes, saved);
 			if (isCatalogProgressCompatible(saved)) {
 				playlistOrder = restoreCatalogPlaylistOrder(saved);
-				dateStamp = createGeneratedPlaylistText(
+				const currentGenerated = createGeneratedPlaylistText(
 					pageData.name,
 					pageData.episodes,
 					playlistOrder
-				).dateStamp;
-				playlistTitle = saved.playlist.title;
-				playlistDescription = saved.playlist.description;
+				);
+				const restoredText = updateGeneratedPlaylistTextForCatalog(
+					saved.playlist,
+					pageData.name,
+					Object.values(saved.episodes),
+					pageData.episodes,
+					playlistOrder
+				);
+				dateStamp = currentGenerated.dateStamp;
+				playlistTitle = restoredText.title;
+				playlistDescription = restoredText.description;
+				generatedMetadataChanged =
+					restoredText.title !== saved.playlist.title ||
+					restoredText.description !== saved.playlist.description;
 				publicPlaylist = saved.playlist.public;
+				linkedPlaylistId = restoreCatalogLinkedPlaylistId(saved);
+				playlistCreationPending = restoreCatalogCreationPending(saved);
 			}
 			const retry = restoreCatalogRetryState(saved);
 			cooldownUntil = retry.cooldownUntil;
@@ -733,6 +836,7 @@
 				shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
 			) {
 				restored = true;
+				if (generatedMetadataChanged) void persistProgress();
 			}
 		}
 	};
@@ -990,14 +1094,21 @@
 	</article>
 
 	<ImportToSpotify
+		catalogueMode
 		disabled={!scanComplete || scanning}
+		creationPending={playlistCreationPending}
+		prepareCatalogueCreation={preparePlaylistCreation}
+		persistCatalogueLink={persistLinkedPlaylist}
+		clearCatalogueCreationPending={clearPlaylistCreationPending}
+		forgetCatalogueLink={forgetPlaylist}
 		data={{
 			title: playlistTitle,
 			description: playlistDescription,
 			date: dateStamp,
 			cover: data.cover,
 			tracks: selectedTracks,
-			public: publicPlaylist
+			public: publicPlaylist,
+			linkedPlaylistId
 		}}
 	/>
 </Panel>
