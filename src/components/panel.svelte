@@ -1,5 +1,5 @@
 <script lang="ts">
-	export let padded: boolean = true;
+	export let padded = true;
 </script>
 
 <div>

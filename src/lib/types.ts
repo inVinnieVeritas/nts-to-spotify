@@ -47,7 +47,7 @@ type SpotifyArtist = {
 	uri: string;
 };
 
-type SpotifyTrack = {
+export type SpotifyTrack = {
 	album: SpotifyAlbum;
 	artists: SpotifyArtist[];
 	available_markets: string[];
@@ -98,4 +98,26 @@ export type Match = {
 	cover?: string;
 	preview?: string;
 	href: string;
+};
+
+export type MatchedTrack = BasicTrack & {
+	matches: Match[];
+	confident: boolean;
+	fallback: boolean;
+};
+
+export type NTSEpisodeSummary = {
+	episodeAlias: string;
+	name: string;
+	broadcast: string;
+	cover: string;
+	genres: string[];
+};
+
+export type NTSShowCatalog = {
+	showAlias: string;
+	name: string;
+	description: string;
+	cover: string;
+	episodes: NTSEpisodeSummary[];
 };

@@ -1,8 +1,78 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { Button, Divider, LoginWithSpotify, Logo, Panel } from '$components';
+	import { onMount } from 'svelte';
+	import {
+		createSavedCatalogCards,
+		deleteSavedCatalogProgressIfConfirmed,
+		downloadSavedCatalogProgress,
+		type SavedCatalogCard
+	} from '$lib/utils/catalog-dashboard.client';
+	import { deleteCatalogProgress, listCatalogProgress } from '$lib/utils/catalog-progress.client';
 
 	const me = $page.data.user;
+	let savedCatalogues: SavedCatalogCard[] = [];
+	let savedCataloguesLoading = true;
+	let savedCataloguesWarning = '';
+	let savedCataloguesError = '';
+	let deletingAlias: string | undefined;
+
+	const formatSavedAt = (timestamp: number) =>
+		new Intl.DateTimeFormat(undefined, {
+			dateStyle: 'medium',
+			timeStyle: 'short'
+		}).format(new Date(timestamp));
+
+	const loadSavedCatalogues = async () => {
+		savedCataloguesLoading = true;
+		savedCataloguesError = '';
+		savedCataloguesWarning = '';
+		try {
+			const result = await listCatalogProgress();
+			savedCatalogues = createSavedCatalogCards(result.records);
+			if (result.skippedCount > 0) {
+				savedCataloguesWarning = 'Some saved catalogue records could not be displayed.';
+			}
+		} catch {
+			savedCatalogues = [];
+			savedCataloguesError = 'Saved catalogues are unavailable in this browser.';
+		} finally {
+			savedCataloguesLoading = false;
+		}
+	};
+
+	const downloadBackup = (card: SavedCatalogCard) => {
+		savedCataloguesError = '';
+		try {
+			downloadSavedCatalogProgress(card.record);
+		} catch {
+			savedCataloguesError = 'The catalogue backup could not be downloaded.';
+		}
+	};
+
+	const deleteLocalProgress = async (card: SavedCatalogCard) => {
+		if (deletingAlias) return;
+		savedCataloguesError = '';
+		deletingAlias = card.showAlias;
+		try {
+			const deleted = await deleteSavedCatalogProgressIfConfirmed(card, {
+				confirm: (message) => window.confirm(message),
+				remove: deleteCatalogProgress
+			});
+			if (deleted) {
+				savedCatalogues = savedCatalogues.filter(({ showAlias }) => showAlias !== card.showAlias);
+			}
+		} catch {
+			savedCataloguesError =
+				'Local catalogue progress could not be deleted. The saved record was kept.';
+		} finally {
+			deletingAlias = undefined;
+		}
+	};
+
+	onMount(() => {
+		void loadSavedCatalogues();
+	});
 </script>
 
 <Panel>
@@ -10,7 +80,9 @@
 		<Logo />
 		<h1 class="font-title">NTS to Spotify</h1>
 
-		<p class="font-base">Create Spotify playlists from NTS episodes.</p>
+		<p class="font-base">
+			Create Spotify playlists from one NTS episode or a show's full catalogue.
+		</p>
 
 		<div class="disclaimer font-small-beast">
 			<h4 class="font-base">Disclaimer</h4>
@@ -26,7 +98,7 @@
 		</div>
 
 		<ol class="font-base">
-			<li>Paste the NTS episode URL into the top bar</li>
+			<li>Paste an NTS show or episode URL into the top bar</li>
 			<li>Preview and manage your tracklist</li>
 			<li>Login with Spotify to be able to import the playlist</li>
 		</ol>
@@ -40,6 +112,83 @@
 		{#if !me}
 			<LoginWithSpotify />
 		{/if}
+
+		<Divider />
+
+		<section class="saved-catalogues" aria-labelledby="saved-catalogues-heading">
+			<h2 id="saved-catalogues-heading" class="font-title">SAVED CATALOGUES</h2>
+			{#if savedCataloguesLoading}
+				<p class="font-base" role="status">Loading saved catalogues…</p>
+			{:else}
+				{#if savedCataloguesWarning}
+					<p class="catalogue-warning font-base" role="status">{savedCataloguesWarning}</p>
+				{/if}
+				{#if savedCataloguesError}
+					<p class="catalogue-warning font-base" role="alert">{savedCataloguesError}</p>
+				{/if}
+				{#if savedCatalogues.length === 0 && !savedCataloguesError}
+					<p class="font-base">
+						No full-catalogue progress is saved in this browser yet. Open an NTS show and start a
+						catalogue scan to create one.
+					</p>
+				{:else if savedCatalogues.length > 0}
+					<div class="catalogue-grid">
+						{#each savedCatalogues as catalogue (catalogue.showAlias)}
+							<article class="catalogue-card">
+								<h3 class="font-title">{catalogue.showName}</h3>
+								<p class="font-base">
+									{catalogue.scanned} scanned · {catalogue.pending} pending · {catalogue.failed}
+									failed
+								</p>
+								<p class="font-base">
+									{catalogue.uniqueSelectedTracks} unique selected tracks · {catalogue.duplicateTracks}
+									duplicates removed
+								</p>
+								<p class="font-small-beast">Last saved {formatSavedAt(catalogue.updatedAt)}</p>
+								<p class="font-base">
+									{catalogue.linkedPlaylistUrl
+										? 'Spotify playlist linked'
+										: 'No Spotify playlist linked'}
+								</p>
+								{#if catalogue.creationPending}
+									<p class="catalogue-warning font-base" role="status">
+										Playlist creation outcome pending. Check Spotify before creating another
+										playlist.
+									</p>
+								{/if}
+								<div class="catalogue-actions">
+									<Button
+										as="a"
+										variant="outline"
+										href={`/shows/${encodeURIComponent(catalogue.showAlias)}`}
+										>Open catalogue</Button
+									>
+									{#if catalogue.linkedPlaylistUrl}
+										<Button
+											as="a"
+											variant="outline"
+											href={catalogue.linkedPlaylistUrl}
+											target="_blank"
+											rel="noopener noreferrer">Open Spotify</Button
+										>
+									{/if}
+									<Button type="button" variant="outline" on:click={() => downloadBackup(catalogue)}
+										>Download backup</Button
+									>
+									<Button
+										type="button"
+										variant="outline"
+										disabled={Boolean(deletingAlias)}
+										loading={deletingAlias === catalogue.showAlias}
+										on:click={() => deleteLocalProgress(catalogue)}>Delete local progress</Button
+									>
+								</div>
+							</article>
+						{/each}
+					</div>
+				{/if}
+			{/if}
+		</section>
 
 		<Divider />
 
@@ -113,5 +262,43 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.saved-catalogues {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		width: 100%;
+	}
+
+	.catalogue-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+		gap: 16px;
+	}
+
+	.catalogue-card {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 10px;
+		border: 1px solid var(--color-foreground);
+		padding: 16px;
+		background: var(--color-background);
+	}
+
+	.catalogue-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		margin-top: 4px;
+	}
+
+	.catalogue-warning {
+		border: 1px solid var(--color-foreground);
+		padding: 8px;
+		background-color: lightgoldenrodyellow;
 	}
 </style>

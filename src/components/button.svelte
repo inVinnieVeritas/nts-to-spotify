@@ -6,8 +6,8 @@
 	export let size: 'md' | 'sm' = 'md';
 	export let icon: Icon['$$prop_def']['icon'] | undefined = undefined;
 	export let iconPosition: 'left' | 'right' | undefined = undefined;
-	export let disabled: boolean = false;
-	export let loading: boolean = false;
+	export let disabled = false;
+	export let loading = false;
 </script>
 
 <svelte:element

@@ -5,8 +5,8 @@
 
 	export let artist: string;
 	export let title: string;
-	export let loading: boolean = false;
-	export let disabled: boolean = false;
+	export let loading = false;
+	export let disabled = false;
 	export let preview: string | undefined = undefined;
 	export let cover: Cover['$$prop_def']['src'] = { type: 'nts' };
 	export let href: string | undefined;
