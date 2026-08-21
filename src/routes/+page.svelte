@@ -97,17 +97,61 @@
 			</p>
 		</div>
 
-		<ol class="font-base">
-			<li>Paste an NTS show or episode URL into the top bar</li>
-			<li>Preview and manage your tracklist</li>
-			<li>Login with Spotify to be able to import the playlist</li>
-		</ol>
+		<section class="quick-guide" aria-labelledby="quick-guide-heading">
+			<h2 id="quick-guide-heading" class="font-title">Quick guide</h2>
+			<ol class="font-base">
+				<li>Paste an NTS show or episode URL into the top bar.</li>
+				<li>For a full show, scan the catalogue and resume later if Spotify pauses it.</li>
+				<li>
+					Review suggested matches. Checked tracks are included; the dash means excluded; the arrows
+					show alternatives.
+				</li>
+				<li>Create a Spotify playlist once. Future episodes update that same linked playlist.</li>
+				<li>Download a progress backup after important reviews or updates.</li>
+			</ol>
+		</section>
 
-		<p class="font-base">
-			<a href="/shows/the-breakfast-show-flo/episodes/the-breakfast-show-flo-30th-november-2022"
-				>See example</a
-			>
-		</p>
+		<section class="faq" aria-labelledby="faq-heading">
+			<h2 id="faq-heading" class="font-title">FAQ</h2>
+			<details>
+				<summary class="font-base">Where is my progress saved?</summary>
+				<p class="font-base">
+					Catalogue progress is stored in this browser. Downloaded JSON backups let you restore it
+					after clearing browser data or moving to another browser or computer.
+				</p>
+			</details>
+			<details>
+				<summary class="font-base">What happens when a new episode appears?</summary>
+				<p class="font-base">
+					Open the saved catalogue again. Existing episodes remain complete and the new episode
+					appears as pending. Scan and review it, then update the linked Spotify playlist.
+				</p>
+			</details>
+			<details>
+				<summary class="font-base">Why are some matches missing or wrong?</summary>
+				<p class="font-base">
+					Some NTS tracklists are incomplete, some releases are unavailable on Spotify, and
+					title-only fallback searches can be inaccurate. Review uncertain and fallback results
+					before importing them.
+				</p>
+			</details>
+			<details>
+				<summary class="font-base">What happens if Spotify limits requests?</summary>
+				<p class="font-base">
+					The scan pauses and saves completed work. Resume after the displayed cooldown instead of
+					restarting the catalogue.
+				</p>
+			</details>
+			<details>
+				<summary class="font-base"
+					>Does opening the Saved Catalogues dashboard use Spotify quota?</summary
+				>
+				<p class="font-base">
+					No. The dashboard reads only this browser’s saved data. Spotify and NTS are contacted only
+					when the relevant catalogue or playlist action requires it.
+				</p>
+			</details>
+		</section>
 
 		{#if !me}
 			<LoginWithSpotify />
@@ -199,23 +243,31 @@
 					as="a"
 					variant="outline"
 					icon="coffee"
-					href="https://ko-fi.com/pdrbrnd"
+					href="https://ko-fi.com/invinnieveritas"
 					target="_blank"
 					rel="noopener noreferrer"
 				>
-					<span class="coffee">Buy me a coffee</span>
+					<span class="coffee">Buy me a beer</span>
 				</Button>
 				<Button
 					as="a"
 					variant="outline"
 					icon="github"
-					href="https://github.com/pdrbrnd/nts-to-spotify"
+					href="https://github.com/inVinnieVeritas/nts-to-spotify"
 					target="_blank"
 					rel="noopener noreferrer"
 				>
 					<span>View on GitHub</span>
 				</Button>
 			</div>
+			<p class="attribution font-base">
+				Built on the original NTS to Spotify project by
+				<a
+					href="https://github.com/pdrbrnd/nts-to-spotify"
+					target="_blank"
+					rel="noopener noreferrer">pdrbrnd</a
+				>.
+			</p>
 		</div>
 	</div>
 </Panel>
@@ -230,8 +282,45 @@
 
 	ol {
 		list-style-type: decimal;
-
 		margin-left: 16px;
+	}
+
+	.quick-guide,
+	.faq {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		width: 100%;
+	}
+
+	.quick-guide ol {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.faq details {
+		border: 1px solid var(--color-foreground);
+		padding: 8px;
+		background-color: var(--color-background);
+	}
+
+	.faq details[open] {
+		background-color: lightgoldenrodyellow;
+	}
+
+	.faq summary {
+		cursor: pointer;
+		font-weight: var(--font-weight-medium);
+	}
+
+	.faq summary:focus {
+		outline: 2px solid var(--color-foreground);
+		outline-offset: 3px;
+	}
+
+	.faq p {
+		margin-top: 8px;
 	}
 
 	.support {
@@ -263,6 +352,10 @@
 		align-items: center;
 		gap: 8px;
 		flex-wrap: wrap;
+	}
+
+	.attribution {
+		margin-top: 8px;
 	}
 
 	.saved-catalogues {
