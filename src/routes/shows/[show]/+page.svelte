@@ -24,6 +24,10 @@
 		restoreCatalogProgressIfConfirmed
 	} from '$lib/utils/catalog-backup';
 	import {
+		downloadCatalogReviewCsv,
+		getCatalogReviewTrackCount
+	} from '$lib/utils/catalog-review-csv.client';
+	import {
 		applyDurableCatalogPlaylistLinkTransition,
 		canCreateCatalogSpotifyPlaylist,
 		captureCatalogProgress,
@@ -712,7 +716,7 @@
 	let completedCount = 0;
 	let failedCount = 0;
 	let pendingCount = 0;
-	let uncertainCount = 0;
+	let reviewTrackCount = 0;
 	let reviewFilterCounts = getCatalogReviewFilterCounts(episodes);
 	let activeReviewCount = 0;
 	let progressLabel = '';
@@ -733,11 +737,8 @@
 	$: completedCount = summaryCounts.scanned;
 	$: failedCount = summaryCounts.failed;
 	$: pendingCount = summaryCounts.pending;
-	$: uncertainCount = episodes.reduce(
-		(total, episode) => total + episode.tracks.filter(({ confident }) => !confident).length,
-		0
-	);
 	$: reviewFilterCounts = getCatalogReviewFilterCounts(episodes);
+	$: reviewTrackCount = getCatalogReviewTrackCount(episodes);
 	$: activeReviewCount = reviewFilterCounts[reviewFilter];
 	$: scanComplete = completedCount === episodes.length;
 	$: progressLabel = `${completedCount} scanned · ${pendingCount} pending · ${failedCount} failed`;
@@ -752,6 +753,9 @@
 				: 'Spotify rate limited';
 		return episode.error || 'Could not scan this episode.';
 	};
+
+	const downloadReviewCsv = () =>
+		downloadCatalogReviewCsv(activeShowName, activeShowAlias, episodes);
 
 	const initializeShow = async (pageData: PageData) => {
 		scanController?.abort();
@@ -1021,7 +1025,7 @@
 					</p>
 				{/if}
 				<p class="font-small-beast">
-					{uncertainCount} tracks need review · {duplicateCount} exact duplicate{duplicateCount ===
+					{reviewTrackCount} tracks need review · {duplicateCount} exact duplicate{duplicateCount ===
 					1
 						? ''
 						: 's'} removed
@@ -1044,6 +1048,15 @@
 							{filter.label} ({reviewFilterCounts[filter.value]})
 						</Button>
 					{/each}
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						disabled={reviewTrackCount === 0}
+						on:click={downloadReviewCsv}
+					>
+						Download review CSV ({reviewTrackCount})
+					</Button>
 				</div>
 				<p class="font-small-beast">
 					Primary results used artist and title. Fallback results used title only and need more
