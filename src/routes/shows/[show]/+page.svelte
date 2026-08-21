@@ -28,19 +28,27 @@
 		createCatalogResetState,
 		createGeneratedPlaylistText,
 		formatCooldownDuration,
+		formatSpotifyCooldownMessage,
 		getCatalogExportUris,
 		getCatalogSummaryCounts,
 		getResumableEpisodeIndexes,
 		isCatalogProgressCompatible,
+		isSystemicSpotifyResponseFailure,
+		parseCatalogRetryAfter,
+		parseCatalogSpotifyRateLimitReason,
+		parseSpotifySessionMetrics,
 		reconcileEpisodes,
 		restoreCatalogPlaylistOrder,
 		restoreCatalogRetryState,
 		runCatalogWorkers,
 		shouldApplyCatalogRestoration,
+		shouldReturnEpisodeToPending,
 		updateGeneratedPlaylistText,
 		type CatalogScanOutcome,
+		type CatalogSpotifyRateLimitReason,
 		type EpisodeState,
-		type PlaylistOrder
+		type PlaylistOrder,
+		type SpotifySessionMetrics
 	} from '$lib/utils/catalog-scan';
 	import {
 		createLatestSnapshotWriter,
@@ -88,7 +96,9 @@
 	let persistenceAvailable = true;
 	let cooldownUntil = 0;
 	let cooldownRemaining = 0;
+	let cooldownReason: CatalogSpotifyRateLimitReason = 'rate-limited';
 	let pausedByRateLimit = false;
+	let spotifySessionMetrics: SpotifySessionMetrics | null = null;
 	let cancelRequested = false;
 	let automaticRateLimitCount = 0;
 	let scanController: AbortController | undefined;
@@ -159,14 +169,9 @@
 		captureAndPersistReview();
 	};
 
-	const parseClientRetryAfter = (response: Response, payload: unknown) => {
-		const fromPayload =
-			payload && typeof payload === 'object' && 'retryAfterSeconds' in payload
-				? Number((payload as { retryAfterSeconds: unknown }).retryAfterSeconds)
-				: Number.NaN;
-		const fromHeader = Number(response.headers.get('Retry-After'));
-		const seconds = Number.isFinite(fromPayload) ? fromPayload : fromHeader;
-		return Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.ceil(seconds)) : 1;
+	const updateSpotifySessionMetrics = (payload: unknown) => {
+		const parsed = parseSpotifySessionMetrics(payload);
+		if (parsed) spotifySessionMetrics = parsed;
 	};
 
 	const scanEpisode = async (
@@ -202,8 +207,20 @@
 			}
 			if (response.status === 429) {
 				const payload = await response.json().catch(() => null);
-				const retryAfterSeconds = parseClientRetryAfter(response, payload);
-				cooldownUntil = Math.max(cooldownUntil, Date.now() + retryAfterSeconds * 1000);
+				updateSpotifySessionMetrics(payload);
+				const retryNow = Date.now();
+				const retryAfterSeconds = parseCatalogRetryAfter(
+					payload,
+					response.headers.get('Retry-After'),
+					retryNow
+				);
+				const reason = parseCatalogSpotifyRateLimitReason(
+					payload && typeof payload === 'object' && 'reason' in payload
+						? (payload as { reason: unknown }).reason
+						: undefined
+				);
+				cooldownUntil = Math.max(cooldownUntil, retryNow + retryAfterSeconds * 1000);
+				cooldownReason = reason;
 				cooldownRemaining = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
 				episodes[index].status = 'rate-limited';
 				episodes[index].error = 'Waiting for Spotify';
@@ -212,12 +229,28 @@
 				return {
 					type: 'rate-limited',
 					retryAfterSeconds,
-					requiresManualResume: retryAfterSeconds > LONG_RETRY_AFTER_SECONDS
+					requiresManualResume: retryAfterSeconds > LONG_RETRY_AFTER_SECONDS,
+					reason
 				};
+			}
+			if (response.status === 502 || response.status === 503) {
+				const payload = await response.json().catch(() => null);
+				updateSpotifySessionMetrics(payload);
+				if (isSystemicSpotifyResponseFailure(payload)) {
+					episodes[index].status = 'pending';
+					episodes[index].error = undefined;
+					episodes = episodes;
+					void persistProgress();
+					return { type: 'systemic-spotify-failure' };
+				}
 			}
 			if (!response.ok) throw new Error(`Request failed (${response.status})`);
 
-			const result = (await response.json()) as { tracks: MatchedTrack[] };
+			const result = (await response.json()) as {
+				tracks: MatchedTrack[];
+				spotifySessionMetrics?: unknown;
+			};
+			updateSpotifySessionMetrics(result);
 			if (generation !== showGeneration || showAlias !== activeShowAlias) {
 				return { type: 'cancelled' };
 			}
@@ -282,7 +315,7 @@
 		if (scanning || !restored || progressTransferBusy) return;
 		updateCooldownRemaining();
 		if (cooldownRemaining > 0) {
-			scanMessage = `Spotify rate limit: ${formatCooldownDuration(cooldownRemaining)} remaining.`;
+			scanMessage = formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining);
 			return;
 		}
 		const queue = (requestedIndexes || getResumableEpisodeIndexes(episodes)).filter(
@@ -299,6 +332,8 @@
 		scanController = currentScanController;
 		const currentGeneration = showGeneration;
 		const currentShowAlias = activeShowAlias;
+		let systemicSpotifyFailure = false;
+		const systemicallyAffectedIndexes = new Set<number>();
 		await runCatalogWorkers({
 			indexes: queue,
 			concurrency: 2,
@@ -315,11 +350,25 @@
 					void persistProgress();
 					currentScanController.abort();
 				}
+			},
+			onSystemicSpotifyFailure: (index) => {
+				systemicSpotifyFailure = true;
+				systemicallyAffectedIndexes.add(index);
+				for (const activeIndex of activeEpisodeControllers.keys()) {
+					systemicallyAffectedIndexes.add(activeIndex);
+				}
+				abortActiveEpisodes();
+				currentScanController.abort();
 			}
 		}).catch(() => undefined);
 		if (currentGeneration !== showGeneration || currentShowAlias !== activeShowAlias) return;
-		for (const episode of episodes) {
-			if (episode.status === 'scanning' || episode.status === 'rate-limited') {
+		for (const [index, episode] of episodes.entries()) {
+			if (
+				shouldReturnEpisodeToPending(
+					episode.status,
+					systemicSpotifyFailure && systemicallyAffectedIndexes.has(index)
+				)
+			) {
 				episode.status = 'pending';
 				episode.error = undefined;
 			}
@@ -328,6 +377,8 @@
 		scanning = false;
 		updateCooldownRemaining();
 		if (cancelRequested) scanMessage = 'Scan cancelled. Completed episodes were saved.';
+		else if (systemicSpotifyFailure)
+			scanMessage = 'Spotify search is unavailable. Scan paused; pending episodes can be retried.';
 		else if (pausedByRateLimit)
 			scanMessage =
 				cooldownRemaining > 0
@@ -518,6 +569,7 @@
 			dateStamp = defaults.stamp;
 			cooldownUntil = resetState.retry.cooldownUntil;
 			cooldownRemaining = 0;
+			cooldownReason = 'rate-limited';
 			pausedByRateLimit = resetState.retry.pausedByRateLimit;
 			automaticRateLimitCount = 0;
 			scanMessage = '';
@@ -607,6 +659,7 @@
 		persistenceAvailable = true;
 		cooldownUntil = 0;
 		cooldownRemaining = 0;
+		cooldownReason = 'rate-limited';
 		pausedByRateLimit = false;
 		cancelRequested = false;
 		automaticRateLimitCount = 0;
@@ -633,6 +686,7 @@
 			}
 			const retry = restoreCatalogRetryState(saved);
 			cooldownUntil = retry.cooldownUntil;
+			cooldownReason = 'rate-limited';
 			pausedByRateLimit = retry.pausedByRateLimit;
 			updateCooldownRemaining();
 			if (pausedByRateLimit && cooldownRemaining > 0) {
@@ -722,10 +776,22 @@
 					{/if}
 					<p class="font-small-beast">{progressLabel}</p>
 				</div>
+				{#if spotifySessionMetrics}
+					<p class="font-small-beast">
+						This server session: {spotifySessionMetrics.searchRequests} Spotify searches · {spotifySessionMetrics.cacheHits}
+						cached/coalesced results
+					</p>
+					<p class="font-tiny">This is usage observed by this app, not Spotify quota remaining.</p>
+				{/if}
 				{#if cooldownRemaining > 0}
 					<p class="font-base">
-						Spotify rate limit: {formatCooldownDuration(cooldownRemaining)} remaining.
+						{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
 					</p>
+					{#if cooldownReason === 'quota-exceeded'}
+						<p class="font-small-beast">
+							Spotify does not expose the remaining quota or its numerical limit.
+						</p>
+					{/if}
 				{/if}
 			{/if}
 			{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}

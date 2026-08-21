@@ -63,6 +63,107 @@ describe('single-episode route deadline', () => {
 			status: 429,
 			body: { message: 'Spotify rate limited. Try again after the Retry-After interval.' }
 		});
-		expect(setHeaders).toHaveBeenCalledWith({ 'Retry-After': '30785' });
+		expect(setHeaders).toHaveBeenCalledWith({
+			'Retry-After': '30785',
+			'X-Spotify-Rate-Limit-Reason': 'rate-limited'
+		});
+	});
+
+	it('returns a distinct sanitized 429 for Development Mode quota exhaustion', async () => {
+		vi.mocked(getClientCredentials).mockResolvedValue('application-token');
+		vi.mocked(mapWithConcurrency).mockRejectedValue({
+			name: 'SpotifyRateLimitError',
+			retryAfterSeconds: 30_785,
+			reason: 'quota-exceeded'
+		});
+		const setHeaders = vi.fn();
+		const fetcher = vi.fn(async () => new Response('<html></html>', { status: 200 }));
+
+		await expect(
+			load({
+				params: { show: 'show', episode: 'episode' },
+				fetch: fetcher,
+				request: new Request('http://localhost/shows/show/episodes/episode'),
+				setHeaders
+			} as never)
+		).rejects.toMatchObject({
+			status: 429,
+			body: {
+				message:
+					'Spotify Development Mode quota exhausted. Try again after the Retry-After interval.'
+			}
+		});
+		expect(setHeaders).toHaveBeenCalledWith({
+			'Retry-After': '30785',
+			'X-Spotify-Rate-Limit-Reason': 'quota-exceeded'
+		});
+	});
+
+	it('returns a sanitized 502 for a systemic Spotify response failure', async () => {
+		vi.mocked(getClientCredentials).mockResolvedValue('application-token');
+		vi.mocked(mapWithConcurrency).mockRejectedValue({
+			name: 'SpotifyResponseValidationError',
+			privateUpstreamValue: 'must not be exposed'
+		});
+		const fetcher = vi.fn(async () => new Response('<html></html>', { status: 200 }));
+
+		await expect(
+			load({
+				params: { show: 'show', episode: 'episode' },
+				fetch: fetcher,
+				request: new Request('http://localhost/shows/show/episodes/episode'),
+				setHeaders: vi.fn()
+			} as never)
+		).rejects.toMatchObject({
+			status: 502,
+			body: { message: 'Spotify returned an invalid search response. Try again later.' }
+		});
+	});
+
+	it('returns a sanitized 503 when Spotify Search is unavailable', async () => {
+		vi.mocked(getClientCredentials).mockResolvedValue('application-token');
+		vi.mocked(mapWithConcurrency).mockRejectedValue({
+			name: 'SpotifySearchUnavailableError',
+			privateUpstreamValue: 'must not be exposed'
+		});
+		const fetcher = vi.fn(async () => new Response('<html></html>', { status: 200 }));
+
+		await expect(
+			load({
+				params: { show: 'show', episode: 'episode' },
+				fetch: fetcher,
+				request: new Request('http://localhost/shows/show/episodes/episode'),
+				setHeaders: vi.fn()
+			} as never)
+		).rejects.toMatchObject({
+			status: 503,
+			body: { message: 'Spotify search is temporarily unavailable. Try again later.' }
+		});
+	});
+
+	it('never sends raw thrown properties to single-episode logging', async () => {
+		vi.mocked(getClientCredentials).mockResolvedValue('application-token');
+		vi.mocked(mapWithConcurrency).mockRejectedValue({
+			name: 'PrivateFailure',
+			token: 'must-not-be-logged',
+			url: 'https://private.example/callback'
+		});
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi.fn(async () => new Response('<html></html>', { status: 200 }));
+		try {
+			await expect(
+				load({
+					params: { show: 'show', episode: 'episode' },
+					fetch: fetcher,
+					request: new Request('http://localhost/shows/show/episodes/episode'),
+					setHeaders: vi.fn()
+				} as never)
+			).rejects.toMatchObject({ status: 500 });
+			expect(consoleError).toHaveBeenCalledWith('Single-episode load failed', 'unexpected_error');
+			expect(JSON.stringify(consoleError.mock.calls)).not.toContain('must-not-be-logged');
+			expect(JSON.stringify(consoleError.mock.calls)).not.toContain('private.example');
+		} finally {
+			consoleError.mockRestore();
+		}
 	});
 });

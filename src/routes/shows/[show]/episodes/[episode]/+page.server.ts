@@ -5,7 +5,10 @@ import { error } from '@sveltejs/kit';
 import { getNTSData } from './utils.server';
 import {
 	getClientCredentials,
+	getSpotifyRateLimitReason,
 	isSpotifyRateLimitError,
+	isSpotifyResponseValidationError,
+	isSpotifySearchUnavailableError,
 	mapWithConcurrency,
 	searchSpotifyTrack
 } from '$lib/utils/spotify.server';
@@ -58,10 +61,25 @@ export const load: PageServerLoad = async ({ params, fetch, request, setHeaders 
 		};
 	} catch (err) {
 		if (isSpotifyRateLimitError(err)) {
-			setHeaders({ 'Retry-After': String(err.retryAfterSeconds) });
-			throw error(429, 'Spotify rate limited. Try again after the Retry-After interval.');
+			const reason = getSpotifyRateLimitReason(err);
+			setHeaders({
+				'Retry-After': String(err.retryAfterSeconds),
+				'X-Spotify-Rate-Limit-Reason': reason
+			});
+			throw error(
+				429,
+				reason === 'quota-exceeded'
+					? 'Spotify Development Mode quota exhausted. Try again after the Retry-After interval.'
+					: 'Spotify rate limited. Try again after the Retry-After interval.'
+			);
 		}
-		console.error(err);
+		if (isSpotifyResponseValidationError(err)) {
+			throw error(502, 'Spotify returned an invalid search response. Try again later.');
+		}
+		if (isSpotifySearchUnavailableError(err)) {
+			throw error(503, 'Spotify search is temporarily unavailable. Try again later.');
+		}
+		console.error('Single-episode load failed', 'unexpected_error');
 		throw error(500, `Unable to load document from url: ${routeParamsToNtsUrl(show, episode)}`);
 	} finally {
 		scope.cleanup();

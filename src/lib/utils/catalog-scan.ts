@@ -16,7 +16,13 @@ export type CatalogScanOutcome =
 	| { type: 'done' }
 	| { type: 'failed' }
 	| { type: 'cancelled' }
-	| { type: 'rate-limited'; retryAfterSeconds: number; requiresManualResume: boolean };
+	| { type: 'systemic-spotify-failure' }
+	| {
+			type: 'rate-limited';
+			retryAfterSeconds: number;
+			requiresManualResume: boolean;
+			reason: CatalogSpotifyRateLimitReason;
+	  };
 
 export type EpisodeState = NTSEpisodeSummary & {
 	status: EpisodeStatus;
@@ -25,6 +31,15 @@ export type EpisodeState = NTSEpisodeSummary & {
 };
 
 export type PlaylistOrder = 'latest-first' | 'oldest-first';
+
+export type CatalogSpotifyRateLimitReason = 'quota-exceeded' | 'rate-limited';
+
+export type SpotifySessionMetrics = {
+	searchRequests: number;
+	cacheHits: number;
+	rateLimitResponses: number;
+	quotaExceededResponses: number;
+};
 
 export type GeneratedPlaylistText = {
 	title: string;
@@ -235,6 +250,9 @@ export const getCatalogSummaryCounts = (episodes: Array<Pick<EpisodeState, 'stat
 		{ scanned: 0, pending: 0, failed: 0 }
 	);
 
+export const shouldReturnEpisodeToPending = (status: EpisodeStatus, systemicallyAffected = false) =>
+	status === 'scanning' || status === 'rate-limited' || (systemicallyAffected && status !== 'done');
+
 export const formatCooldownDuration = (seconds: number) => {
 	const totalSeconds = Number.isFinite(seconds) ? Math.max(0, Math.ceil(seconds)) : 0;
 	const days = Math.floor(totalSeconds / 86_400);
@@ -248,6 +266,80 @@ export const formatCooldownDuration = (seconds: number) => {
 	if (days > 0 || hours > 0 || minutes > 0) parts.push(`${minutes}m`);
 	parts.push(`${remainingSeconds}s`);
 	return parts.join(' ');
+};
+
+export const parseCatalogSpotifyRateLimitReason = (value: unknown): CatalogSpotifyRateLimitReason =>
+	value === 'quota-exceeded' ? 'quota-exceeded' : 'rate-limited';
+
+export const isSystemicSpotifyResponseFailure = (payload: unknown) =>
+	Boolean(
+		payload &&
+			typeof payload === 'object' &&
+			!Array.isArray(payload) &&
+			((payload as Record<string, unknown>).error === 'spotify_response_invalid' ||
+				(payload as Record<string, unknown>).error === 'spotify_search_unavailable')
+	);
+
+export const isSafeRetryAfterSeconds = (seconds: unknown, now = Date.now()): seconds is number => {
+	if (
+		typeof seconds !== 'number' ||
+		!Number.isFinite(seconds) ||
+		!Number.isSafeInteger(seconds) ||
+		seconds <= 0 ||
+		!Number.isSafeInteger(now)
+	) {
+		return false;
+	}
+	const milliseconds = seconds * 1000;
+	const deadline = now + milliseconds;
+	return Number.isSafeInteger(milliseconds) && Number.isSafeInteger(deadline) && deadline > now;
+};
+
+export const parseCatalogRetryAfter = (
+	payload: unknown,
+	headerValue: string | null,
+	now = Date.now()
+) => {
+	const payloadValue =
+		payload && typeof payload === 'object' && 'retryAfterSeconds' in payload
+			? (payload as { retryAfterSeconds: unknown }).retryAfterSeconds
+			: undefined;
+	if (isSafeRetryAfterSeconds(payloadValue, now)) return payloadValue;
+	const normalizedHeader = headerValue?.trim() ?? '';
+	const headerSeconds = /^\d+$/.test(normalizedHeader) ? Number(normalizedHeader) : Number.NaN;
+	return isSafeRetryAfterSeconds(headerSeconds, now) ? headerSeconds : 1;
+};
+
+export const formatSpotifyCooldownMessage = (
+	reason: CatalogSpotifyRateLimitReason,
+	seconds: number
+) =>
+	reason === 'quota-exceeded'
+		? `Spotify Development Mode quota exhausted: ${formatCooldownDuration(seconds)} remaining.`
+		: `Spotify rate limit: ${formatCooldownDuration(seconds)} remaining.`;
+
+const validMetric = (value: unknown): value is number =>
+	typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+export const parseSpotifySessionMetrics = (payload: unknown): SpotifySessionMetrics | null => {
+	if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+	const metrics = (payload as Record<string, unknown>).spotifySessionMetrics;
+	if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return null;
+	const candidate = metrics as Record<string, unknown>;
+	if (
+		!validMetric(candidate.searchRequests) ||
+		!validMetric(candidate.cacheHits) ||
+		!validMetric(candidate.rateLimitResponses) ||
+		!validMetric(candidate.quotaExceededResponses)
+	) {
+		return null;
+	}
+	return {
+		searchRequests: candidate.searchRequests,
+		cacheHits: candidate.cacheHits,
+		rateLimitResponses: candidate.rateLimitResponses,
+		quotaExceededResponses: candidate.quotaExceededResponses
+	};
 };
 
 export const getCatalogExportUris = (
@@ -274,7 +366,8 @@ export const runCatalogWorkers = async ({
 	signal,
 	waitUntilReady,
 	scanEpisode,
-	onRateLimit
+	onRateLimit,
+	onSystemicSpotifyFailure
 }: {
 	indexes: number[];
 	concurrency: number;
@@ -285,6 +378,7 @@ export const runCatalogWorkers = async ({
 		index: number,
 		outcome: Extract<CatalogScanOutcome, { type: 'rate-limited' }>
 	) => void;
+	onSystemicSpotifyFailure: (index: number) => void;
 }) => {
 	const queue = [...indexes];
 	const queued = new Set(queue);
@@ -316,6 +410,9 @@ export const runCatalogWorkers = async ({
 			if (outcome.type === 'rate-limited') {
 				enqueue(index);
 				onRateLimit(index, outcome);
+			} else if (outcome.type === 'systemic-spotify-failure') {
+				enqueue(index);
+				onSystemicSpotifyFailure(index);
 			} else if (outcome.type === 'cancelled' && !signal.aborted) {
 				enqueue(index);
 			}

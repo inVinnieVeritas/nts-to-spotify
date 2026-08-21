@@ -8,14 +8,20 @@ import {
 	createCatalogResetState,
 	createGeneratedPlaylistText,
 	formatCooldownDuration,
+	formatSpotifyCooldownMessage,
 	getCatalogExportUris,
 	getCatalogSummaryCounts,
 	getResumableEpisodeIndexes,
+	isSystemicSpotifyResponseFailure,
+	parseCatalogRetryAfter,
+	parseCatalogSpotifyRateLimitReason,
+	parseSpotifySessionMetrics,
 	reconcileEpisodes,
 	restoreCatalogPlaylistOrder,
 	restoreCatalogRetryState,
 	runCatalogWorkers,
 	shouldApplyCatalogRestoration,
+	shouldReturnEpisodeToPending,
 	uniqueSpotifyUris,
 	updateGeneratedPlaylistText,
 	type CatalogProgress,
@@ -183,6 +189,76 @@ describe('catalogue cooldown display', () => {
 		expect(counts).toEqual({ scanned: 1, pending: 3, failed: 1 });
 		expect(counts.scanned + counts.pending + counts.failed).toBe(5);
 	});
+
+	it('returns interrupted and systemically affected episodes to pending without undoing completed work', () => {
+		expect(shouldReturnEpisodeToPending('scanning')).toBe(true);
+		expect(shouldReturnEpisodeToPending('rate-limited')).toBe(true);
+		expect(shouldReturnEpisodeToPending('error', true)).toBe(true);
+		expect(shouldReturnEpisodeToPending('pending', true)).toBe(true);
+		expect(shouldReturnEpisodeToPending('done', true)).toBe(false);
+		expect(shouldReturnEpisodeToPending('error', false)).toBe(false);
+	});
+
+	it('selects distinct sanitized messages for ordinary limits and quota exhaustion', () => {
+		expect(formatSpotifyCooldownMessage('rate-limited', 750)).toBe(
+			'Spotify rate limit: 12m 30s remaining.'
+		);
+		expect(formatSpotifyCooldownMessage('quota-exceeded', 30_600)).toBe(
+			'Spotify Development Mode quota exhausted: 8h 30m 0s remaining.'
+		);
+		expect(parseCatalogSpotifyRateLimitReason('quota-exceeded')).toBe('quota-exceeded');
+		expect(parseCatalogSpotifyRateLimitReason('QUOTA_EXCEEDED')).toBe('rate-limited');
+		expect(isSystemicSpotifyResponseFailure({ error: 'spotify_response_invalid' })).toBe(true);
+		expect(isSystemicSpotifyResponseFailure({ error: 'spotify_search_unavailable' })).toBe(true);
+		expect(isSystemicSpotifyResponseFailure({ error: 'other' })).toBe(false);
+	});
+
+	it('accepts only Retry-After values that produce safe client deadlines', () => {
+		const now = Date.parse('2026-08-15T12:00:00Z');
+		expect(parseCatalogRetryAfter({ retryAfterSeconds: 30_785 }, null, now)).toBe(30_785);
+		expect(parseCatalogRetryAfter({}, '172800', now)).toBe(172_800);
+		expect(parseCatalogRetryAfter({ retryAfterSeconds: 2.5 }, '3', now)).toBe(3);
+		expect(parseCatalogRetryAfter({}, '1e3', now)).toBe(1);
+		expect(parseCatalogRetryAfter({ retryAfterSeconds: Number.MAX_SAFE_INTEGER }, null, now)).toBe(
+			1
+		);
+		expect(
+			parseCatalogRetryAfter(
+				{ retryAfterSeconds: Math.floor((Number.MAX_SAFE_INTEGER - now) / 1000) + 1 },
+				null,
+				now
+			)
+		).toBe(1);
+	});
+
+	it('accepts complete non-negative server metrics and ignores missing or malformed values', () => {
+		expect(
+			parseSpotifySessionMetrics({
+				spotifySessionMetrics: {
+					searchRequests: 123,
+					cacheHits: 18,
+					rateLimitResponses: 2,
+					quotaExceededResponses: 1
+				}
+			})
+		).toEqual({
+			searchRequests: 123,
+			cacheHits: 18,
+			rateLimitResponses: 2,
+			quotaExceededResponses: 1
+		});
+		expect(parseSpotifySessionMetrics({})).toBeNull();
+		expect(
+			parseSpotifySessionMetrics({
+				spotifySessionMetrics: {
+					searchRequests: -1,
+					cacheHits: 18,
+					rateLimitResponses: 2,
+					quotaExceededResponses: 1
+				}
+			})
+		).toBeNull();
+	});
 });
 
 describe('catalogue scan workers', () => {
@@ -203,7 +279,8 @@ describe('catalogue scan workers', () => {
 					return Promise.resolve({
 						type: 'rate-limited' as const,
 						retryAfterSeconds: 30,
-						requiresManualResume: false
+						requiresManualResume: false,
+						reason: 'rate-limited' as const
 					});
 				}
 				return new Promise((resolve) => {
@@ -213,7 +290,8 @@ describe('catalogue scan workers', () => {
 			onRateLimit: () => {
 				cooldownActive = true;
 				cancelSibling?.();
-			}
+			},
+			onSystemicSpotifyFailure: () => undefined
 		});
 
 		await vi.waitFor(() => expect(started).toEqual([0, 1]));
@@ -245,7 +323,8 @@ describe('catalogue scan workers', () => {
 						{ once: true }
 					);
 				}),
-			onRateLimit: () => undefined
+			onRateLimit: () => undefined,
+			onSystemicSpotifyFailure: () => undefined
 		});
 
 		await vi.waitFor(() => expect(started).toEqual([0, 1]));
@@ -253,6 +332,45 @@ describe('catalogue scan workers', () => {
 		await running;
 		expect(settled).toEqual([0, 1]);
 		expect(started).toEqual([0, 1]);
+	});
+
+	it('pauses both workers after a systemic Spotify response failure', async () => {
+		const controller = new AbortController();
+		const started: number[] = [];
+		const retried: number[] = [];
+		const statuses = ['pending', 'pending', 'pending', 'pending'];
+		let settleSibling: (() => void) | undefined;
+		const running = runCatalogWorkers({
+			indexes: [0, 1, 2, 3],
+			concurrency: 2,
+			signal: controller.signal,
+			waitUntilReady: () => Promise.resolve(),
+			scanEpisode: (index) => {
+				started.push(index);
+				statuses[index] = 'scanning';
+				if (index === 0) {
+					statuses[index] = 'pending';
+					return Promise.resolve({ type: 'systemic-spotify-failure' });
+				}
+				return new Promise((resolve) => {
+					settleSibling = () => {
+						statuses[index] = 'pending';
+						resolve({ type: 'cancelled' });
+					};
+				});
+			},
+			onRateLimit: () => undefined,
+			onSystemicSpotifyFailure: (index) => {
+				retried.push(index);
+				settleSibling?.();
+				controller.abort();
+			}
+		});
+
+		await running;
+		expect(started).toEqual([0, 1]);
+		expect(retried).toEqual([0]);
+		expect(statuses).toEqual(['pending', 'pending', 'pending', 'pending']);
 	});
 });
 

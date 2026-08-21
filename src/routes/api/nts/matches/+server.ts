@@ -4,7 +4,11 @@ import { isValidNTSSlug } from '$lib/utils/nts';
 import { getNTSEpisodeTracklist } from '$lib/utils/nts.server';
 import {
 	getClientCredentials,
+	getSpotifyRateLimitReason,
+	getSpotifySessionMetrics,
 	isSpotifyRateLimitError,
+	isSpotifyResponseValidationError,
+	isSpotifySearchUnavailableError,
 	mapWithConcurrency,
 	searchSpotifyTrack
 } from '$lib/utils/spotify.server';
@@ -42,15 +46,38 @@ export const POST: RequestHandler = async (event) => {
 			scope.signal
 		);
 
-		return json({ tracks: matches });
+		return json({ tracks: matches, spotifySessionMetrics: getSpotifySessionMetrics() });
 	} catch (cause) {
 		if (isSpotifyRateLimitError(cause)) {
 			return json(
-				{ error: 'spotify_rate_limited', retryAfterSeconds: cause.retryAfterSeconds },
+				{
+					error: 'spotify_rate_limited',
+					retryAfterSeconds: cause.retryAfterSeconds,
+					reason: getSpotifyRateLimitReason(cause),
+					spotifySessionMetrics: getSpotifySessionMetrics()
+				},
 				{
 					status: 429,
 					headers: { 'Retry-After': String(cause.retryAfterSeconds) }
 				}
+			);
+		}
+		if (isSpotifyResponseValidationError(cause)) {
+			return json(
+				{
+					error: 'spotify_response_invalid',
+					spotifySessionMetrics: getSpotifySessionMetrics()
+				},
+				{ status: 502 }
+			);
+		}
+		if (isSpotifySearchUnavailableError(cause)) {
+			return json(
+				{
+					error: 'spotify_search_unavailable',
+					spotifySessionMetrics: getSpotifySessionMetrics()
+				},
+				{ status: 503 }
 			);
 		}
 		if (cause instanceof RequestTimeoutError || scope.didTimeout()) {
@@ -58,7 +85,7 @@ export const POST: RequestHandler = async (event) => {
 		}
 		if (isAbortError(cause)) throw error(499, 'Episode scan cancelled');
 		if (cause && typeof cause === 'object' && 'status' in cause) throw cause;
-		console.error(cause);
+		console.error('Catalogue episode matching failed', 'unexpected_error');
 		throw error(502, 'Unable to match this NTS episode');
 	} finally {
 		scope.cleanup();
