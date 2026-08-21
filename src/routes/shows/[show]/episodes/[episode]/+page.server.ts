@@ -77,6 +77,7 @@ export const load: PageServerLoad = async ({ params, fetch, request, setHeaders 
 			throw error(502, 'Spotify returned an invalid search response. Try again later.');
 		}
 		if (isSpotifySearchUnavailableError(err)) {
+			setHeaders({ 'X-Spotify-Search-Error-Reason': err.reason });
 			throw error(503, 'Spotify search is temporarily unavailable. Try again later.');
 		}
 		console.error('Single-episode load failed', 'unexpected_error');

@@ -4,6 +4,8 @@ import {
 	createSpotifySearchCacheKey,
 	getSpotifySessionMetrics,
 	isSpotifyRateLimitError,
+	isSpotifyRequestRejectedStatus,
+	isSpotifySearchUnavailableError,
 	normalizeSpotifySearchKeyPart,
 	parseRetryAfter,
 	parseSpotifyRateLimitReason,
@@ -11,6 +13,7 @@ import {
 	resetSpotifyServerSessionForTests,
 	searchSpotifyTrack,
 	SPOTIFY_SEARCH_INTERVAL_MS,
+	SPOTIFY_TRANSIENT_RETRY_DELAYS_MS,
 	SpotifyRateLimitError,
 	SpotifyResponseValidationError,
 	SpotifySearchUnavailableError,
@@ -19,6 +22,14 @@ import {
 import type { Fetcher } from './request';
 
 const TRACK_ID = '0123456789ABCDEFGHIJKL';
+const DUPLICATED_ENSEMBLE_ARTIST = Array.from(
+	{ length: 24 },
+	() => 'Brown Ensemble, Fizzled Out Players'
+).join(', ');
+const ENSEMBLE_TRACK = {
+	artist: DUPLICATED_ENSEMBLE_ARTIST,
+	title: 'Brown, Fizzled Out (2013/2014) For Ensemble'
+};
 
 const spotifyItem = (title = 'Track') => ({
 	artists: [{ name: 'Artist' }],
@@ -207,6 +218,49 @@ describe('Spotify rate limiting', () => {
 		expect(isSpotifyRateLimitError({ name: 'Error', retryAfterSeconds: 17 })).toBe(false);
 	});
 
+	it('accepts only validated systemic Spotify Search reasons', () => {
+		expect(isSpotifySearchUnavailableError(new SpotifySearchUnavailableError('network'))).toBe(
+			true
+		);
+		expect(
+			isSpotifySearchUnavailableError({
+				name: 'SpotifySearchUnavailableError',
+				reason: 'timeout'
+			})
+		).toBe(true);
+		expect(
+			isSpotifySearchUnavailableError({
+				name: 'SpotifySearchUnavailableError',
+				reason: 'private-upstream-value'
+			})
+		).toBe(false);
+		expect(isSpotifySearchUnavailableError({ name: 'SpotifySearchUnavailableError' })).toBe(false);
+		expect(
+			isSpotifySearchUnavailableError({
+				name: 'SpotifySearchUnavailableError',
+				reason: 'request-rejected',
+				upstreamStatus: 400
+			})
+		).toBe(true);
+		for (const status of [399, 401, 403, 429, 500, 400.5, Number.MAX_SAFE_INTEGER, '400']) {
+			expect(isSpotifyRequestRejectedStatus(status)).toBe(false);
+			expect(
+				isSpotifySearchUnavailableError({
+					name: 'SpotifySearchUnavailableError',
+					reason: 'request-rejected',
+					upstreamStatus: status
+				})
+			).toBe(false);
+		}
+		expect(
+			isSpotifySearchUnavailableError({
+				name: 'SpotifySearchUnavailableError',
+				reason: 'network',
+				upstreamStatus: 400
+			})
+		).toBe(false);
+	});
+
 	it('holds queue concurrency until the complete response body is consumed', async () => {
 		vi.useFakeTimers();
 		let firstBody: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -300,6 +354,7 @@ describe('Spotify rate limiting', () => {
 		expect(getSpotifySessionMetrics()).toEqual({
 			searchRequests: 1,
 			cacheHits: 0,
+			transientRetries: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 1
 		});
@@ -441,31 +496,238 @@ describe('Spotify server-session search cache', () => {
 		expect(request).toHaveBeenCalledTimes(2);
 		expect(getSpotifySessionMetrics()).toMatchObject({
 			searchRequests: 2,
+			transientRetries: 0,
 			rateLimitResponses: 2,
 			quotaExceededResponses: 0
 		});
 	});
 
-	it.each([
-		['HTTP 401', () => Promise.resolve(new Response('{}', { status: 401 }))],
-		['HTTP 403', () => Promise.resolve(new Response('{}', { status: 403 }))],
-		['HTTP 500', () => Promise.resolve(new Response('{}', { status: 500 }))],
-		['HTTP 503', () => Promise.resolve(new Response('{}', { status: 503 }))],
-		['invalid JSON', () => Promise.resolve(new Response('{not-json'))],
-		['network rejection', () => Promise.reject(new Error('private network detail'))]
-	])('wraps and does not cache systemic Spotify %s failures', async (_label, response) => {
-		vi.useFakeTimers();
-		const request = vi.fn(response) as unknown as Fetcher;
+	it.each([401, 403])('does not retry Spotify HTTP %i authentication failures', async (status) => {
+		const request = vi.fn(async () => new Response('{}', { status })) as unknown as Fetcher;
 		await expect(
-			searchSpotifyTrack({ artist: 'Artist', title: 'Failure' }, 'token', request)
-		).rejects.toBeInstanceOf(SpotifySearchUnavailableError);
-		const repeated = searchSpotifyTrack({ artist: 'Artist', title: 'Failure' }, 'token', request);
-		const repeatedExpectation = expect(repeated).rejects.toBeInstanceOf(
-			SpotifySearchUnavailableError
-		);
+			searchSpotifyTrack({ artist: 'Artist', title: 'Authentication' }, 'token', request)
+		).rejects.toMatchObject({
+			name: 'SpotifySearchUnavailableError',
+			reason: 'authentication'
+		});
+		expect(request).toHaveBeenCalledOnce();
+		expect(getSpotifySessionMetrics()).toMatchObject({
+			searchRequests: 1,
+			transientRetries: 0
+		});
+	});
+
+	it('recovers a rejected primary HTTP 400 with the title-only fallback', async () => {
+		vi.useFakeTimers();
+		const request = vi
+			.fn()
+			.mockResolvedValueOnce(new Response('private rejection', { status: 400 }))
+			.mockResolvedValueOnce(
+				searchResponse([spotifyItem('Brown, Fizzled Out')])
+			) as unknown as Fetcher;
+		const pending = searchSpotifyTrack(ENSEMBLE_TRACK, 'token', request);
+
+		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
+		await expect(pending).resolves.toMatchObject({
+			...ENSEMBLE_TRACK,
+			fallback: true,
+			confident: false,
+			matches: [expect.objectContaining({ title: 'Brown, Fizzled Out' })]
+		});
+		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toMatchObject({
+			searchRequests: 2,
+			transientRetries: 0,
+			cacheHits: 0
+		});
+	});
+
+	it('returns an unmatched track after a rejected primary 400 and a valid empty fallback', async () => {
+		vi.useFakeTimers();
+		const request = vi
+			.fn()
+			.mockResolvedValueOnce(new Response('{}', { status: 400 }))
+			.mockResolvedValueOnce(searchResponse([])) as unknown as Fetcher;
+		const pending = searchSpotifyTrack(ENSEMBLE_TRACK, 'token', request);
+
+		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
+		await expect(pending).resolves.toMatchObject({
+			...ENSEMBLE_TRACK,
+			matches: [],
+			fallback: true,
+			confident: false
+		});
+		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toMatchObject({
+			searchRequests: 2,
+			transientRetries: 0
+		});
+	});
+
+	it('does not cache results reached after a rejected primary 400', async () => {
+		vi.useFakeTimers();
+		const request = vi
+			.fn()
+			.mockResolvedValueOnce(new Response('{}', { status: 400 }))
+			.mockResolvedValueOnce(searchResponse())
+			.mockResolvedValueOnce(new Response('{}', { status: 400 }))
+			.mockResolvedValueOnce(searchResponse()) as unknown as Fetcher;
+
+		const first = searchSpotifyTrack(ENSEMBLE_TRACK, 'token', request);
+		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
+		await expect(first).resolves.toMatchObject({ fallback: true });
+
+		const repeated = searchSpotifyTrack(ENSEMBLE_TRACK, 'token', request);
+		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
+		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
+		await expect(repeated).resolves.toMatchObject({ fallback: true });
+		expect(request).toHaveBeenCalledTimes(4);
+		expect(getSpotifySessionMetrics()).toMatchObject({
+			searchRequests: 4,
+			transientRetries: 0,
+			cacheHits: 0
+		});
+	});
+
+	it('keeps a fallback HTTP 400 on the systemic request-rejected path', async () => {
+		vi.useFakeTimers();
+		const request = vi.fn(async () => new Response('{}', { status: 400 })) as unknown as Fetcher;
+		const pending = searchSpotifyTrack(ENSEMBLE_TRACK, 'token', request);
+		const rejection = expect(pending).rejects.toMatchObject({
+			reason: 'request-rejected',
+			upstreamStatus: 400
+		});
+
+		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
+		await rejection;
+		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toMatchObject({
+			searchRequests: 2,
+			transientRetries: 0,
+			cacheHits: 0
+		});
+	});
+
+	it.each([404, 418])(
+		'classifies Spotify HTTP %i as a non-retryable request rejection',
+		async (status) => {
+			const request = vi.fn(
+				async () => new Response('private body', { status })
+			) as unknown as Fetcher;
+			await expect(
+				searchSpotifyTrack({ artist: 'Private artist', title: 'Private query' }, 'token', request)
+			).rejects.toMatchObject({
+				name: 'SpotifySearchUnavailableError',
+				reason: 'request-rejected',
+				upstreamStatus: status
+			});
+			expect(request).toHaveBeenCalledOnce();
+			expect(getSpotifySessionMetrics()).toMatchObject({
+				searchRequests: 1,
+				transientRetries: 0,
+				cacheHits: 0
+			});
+		}
+	);
+
+	it('does not retry or cache request-rejected searches', async () => {
+		vi.useFakeTimers();
+		const request = vi.fn(async () => new Response('{}', { status: 422 })) as unknown as Fetcher;
+		await expect(
+			searchSpotifyTrack({ artist: 'Artist', title: 'Rejected' }, 'token', request)
+		).rejects.toMatchObject({ reason: 'request-rejected', upstreamStatus: 422 });
+
+		const repeated = searchSpotifyTrack({ artist: 'Artist', title: 'Rejected' }, 'token', request);
+		const repeatedExpectation = expect(repeated).rejects.toMatchObject({
+			reason: 'request-rejected',
+			upstreamStatus: 422
+		});
 		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
 		await repeatedExpectation;
 		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toEqual({
+			searchRequests: 2,
+			cacheHits: 0,
+			transientRetries: 0,
+			rateLimitResponses: 0,
+			quotaExceededResponses: 0
+		});
+	});
+
+	it('keeps unclassified internal exceptions sanitized and non-retryable', async () => {
+		const request = vi.fn(async () => {
+			throw Object.assign(new Error('private raw message'), {
+				token: 'private token',
+				url: 'https://private.example/search?q=private'
+			});
+		}) as unknown as Fetcher;
+		const cause = await searchSpotifyTrack(
+			{ artist: 'Private artist', title: 'Private title' },
+			'token',
+			request
+		).catch((error) => error as SpotifySearchUnavailableError);
+
+		expect(cause).toMatchObject({
+			name: 'SpotifySearchUnavailableError',
+			reason: 'unexpected'
+		});
+		expect(cause).not.toHaveProperty('upstreamStatus');
+		expect(JSON.stringify(cause)).not.toContain('private');
+		expect(request).toHaveBeenCalledOnce();
+		expect(getSpotifySessionMetrics()).toMatchObject({ transientRetries: 0, cacheHits: 0 });
+	});
+
+	it.each([
+		['HTTP 5xx', () => Promise.resolve(new Response('{}', { status: 503 }))],
+		['network failure', () => Promise.reject(new TypeError('private network detail'))],
+		['invalid JSON', () => Promise.resolve(new Response('{not-json'))]
+	])('retries a transient Spotify %s and succeeds', async (_label, firstAttempt) => {
+		vi.useFakeTimers();
+		const request = vi
+			.fn()
+			.mockImplementationOnce(firstAttempt)
+			.mockResolvedValueOnce(searchResponse()) as unknown as Fetcher;
+		const pending = searchSpotifyTrack({ artist: 'Artist', title: 'Transient' }, 'token', request);
+
+		await vi.advanceTimersByTimeAsync(SPOTIFY_TRANSIENT_RETRY_DELAYS_MS[0]);
+		await expect(pending).resolves.toMatchObject({ title: 'Transient' });
+		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toEqual({
+			searchRequests: 2,
+			transientRetries: 1,
+			cacheHits: 0,
+			rateLimitResponses: 0,
+			quotaExceededResponses: 0
+		});
+	});
+
+	it('returns the final safe reason after three transient failures and never caches them', async () => {
+		vi.useFakeTimers();
+		const request = vi.fn(async () => new Response('{}', { status: 503 })) as unknown as Fetcher;
+		const pending = searchSpotifyTrack({ artist: 'Artist', title: 'Exhausted' }, 'token', request);
+		const expectation = expect(pending).rejects.toMatchObject({
+			name: 'SpotifySearchUnavailableError',
+			reason: 'upstream'
+		});
+
+		await vi.advanceTimersByTimeAsync(
+			SPOTIFY_TRANSIENT_RETRY_DELAYS_MS[0] + SPOTIFY_TRANSIENT_RETRY_DELAYS_MS[1]
+		);
+		await expectation;
+		expect(request).toHaveBeenCalledTimes(3);
+		expect(getSpotifySessionMetrics()).toEqual({
+			searchRequests: 3,
+			transientRetries: 2,
+			cacheHits: 0,
+			rateLimitResponses: 0,
+			quotaExceededResponses: 0
+		});
+
+		vi.mocked(request).mockResolvedValue(searchResponse());
+		const repeated = searchSpotifyTrack({ artist: 'Artist', title: 'Exhausted' }, 'token', request);
+		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
+		await expect(repeated).resolves.toMatchObject({ title: 'Exhausted' });
+		expect(request).toHaveBeenCalledTimes(4);
 	});
 
 	it('keeps parser-invalid responses typed separately and non-cacheable', async () => {
@@ -483,9 +745,10 @@ describe('Spotify server-session search cache', () => {
 		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
 		await repeatedExpectation;
 		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toMatchObject({ transientRetries: 0 });
 	});
 
-	it('does not cache a timed-out stalled response body', async () => {
+	it('retries a timed-out stalled response body and succeeds', async () => {
 		vi.useFakeTimers();
 		let requestCount = 0;
 		const requestMock = vi.fn(async () =>
@@ -494,40 +757,63 @@ describe('Spotify server-session search cache', () => {
 				: searchResponse()
 		);
 		const request = requestMock as unknown as Fetcher;
-		const first = searchSpotifyTrack({ artist: 'Artist', title: 'Timeout' }, 'token', request);
-		const firstExpectation = expect(first).rejects.toBeInstanceOf(SpotifySearchUnavailableError);
-		await vi.advanceTimersByTimeAsync(20_000);
-		await firstExpectation;
-
-		await expect(
-			searchSpotifyTrack({ artist: 'Artist', title: 'Timeout' }, 'token', request)
-		).resolves.toMatchObject({ title: 'Timeout' });
+		const pending = searchSpotifyTrack({ artist: 'Artist', title: 'Timeout' }, 'token', request);
+		await vi.advanceTimersByTimeAsync(20_000 + SPOTIFY_TRANSIENT_RETRY_DELAYS_MS[0]);
+		await expect(pending).resolves.toMatchObject({ title: 'Timeout' });
 		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toMatchObject({
+			searchRequests: 2,
+			transientRetries: 1
+		});
 	});
 
-	it('wraps a timed-out Spotify Search request as unavailable', async () => {
+	it('retries a timed-out Spotify Search request and succeeds', async () => {
 		vi.useFakeTimers();
-		const request = vi.fn(
-			(_input: RequestInfo | URL, init?: RequestInit) =>
-				new Promise<Response>((_resolve, reject) => {
-					init?.signal?.addEventListener(
-						'abort',
-						() =>
-							reject(Object.assign(new Error('private timeout detail'), { name: 'AbortError' })),
-						{ once: true }
-					);
-				})
-		) as unknown as Fetcher;
+		const request = vi
+			.fn()
+			.mockImplementationOnce(
+				(_input: RequestInfo | URL, init?: RequestInit) =>
+					new Promise<Response>((_resolve, reject) => {
+						init?.signal?.addEventListener(
+							'abort',
+							() =>
+								reject(Object.assign(new Error('private timeout detail'), { name: 'AbortError' })),
+							{ once: true }
+						);
+					})
+			)
+			.mockResolvedValueOnce(searchResponse()) as unknown as Fetcher;
 		const pending = searchSpotifyTrack(
 			{ artist: 'Artist', title: 'Request timeout' },
 			'token',
 			request
 		);
-		const expectation = expect(pending).rejects.toBeInstanceOf(SpotifySearchUnavailableError);
+		await vi.advanceTimersByTimeAsync(20_000 + SPOTIFY_TRANSIENT_RETRY_DELAYS_MS[0]);
+		await expect(pending).resolves.toMatchObject({ title: 'Request timeout' });
+		expect(request).toHaveBeenCalledTimes(2);
+		expect(getSpotifySessionMetrics()).toMatchObject({ transientRetries: 1 });
+	});
 
-		await vi.advanceTimersByTimeAsync(20_000);
+	it('cancels an abortable transient backoff without dispatching a retry', async () => {
+		vi.useFakeTimers();
+		const request = vi.fn(async () => new Response('{}', { status: 503 })) as unknown as Fetcher;
+		const controller = new AbortController();
+		const pending = searchSpotifyTrack(
+			{ artist: 'Artist', title: 'Cancelled backoff' },
+			'token',
+			request,
+			controller.signal
+		);
+		const expectation = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+		await vi.advanceTimersByTimeAsync(0);
+		controller.abort();
 		await expectation;
+		await vi.runAllTimersAsync();
 		expect(request).toHaveBeenCalledOnce();
+		expect(getSpotifySessionMetrics()).toMatchObject({
+			searchRequests: 1,
+			transientRetries: 0
+		});
 	});
 
 	it('removes an aborted in-flight search and allows a later retry', async () => {
@@ -550,6 +836,7 @@ describe('Spotify server-session search cache', () => {
 		await vi.advanceTimersByTimeAsync(0);
 		controller.abort();
 		await firstExpectation;
+		expect(getSpotifySessionMetrics()).toMatchObject({ transientRetries: 0 });
 
 		const repeated = searchSpotifyTrack({ artist: 'Artist', title: 'Cancelled' }, 'token', request);
 		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
@@ -559,7 +846,7 @@ describe('Spotify server-session search cache', () => {
 
 	it.each([
 		['rate limit', new SpotifyRateLimitError(10)],
-		['timeout', new SpotifySearchUnavailableError()],
+		['timeout', new SpotifySearchUnavailableError('timeout')],
 		['abort', Object.assign(new Error('cancelled'), { name: 'AbortError' })],
 		['authentication', new Error('authentication failed')],
 		['malformed response', new Error('malformed response')]

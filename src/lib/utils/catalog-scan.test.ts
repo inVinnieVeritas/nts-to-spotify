@@ -209,7 +209,16 @@ describe('catalogue cooldown display', () => {
 		expect(parseCatalogSpotifyRateLimitReason('quota-exceeded')).toBe('quota-exceeded');
 		expect(parseCatalogSpotifyRateLimitReason('QUOTA_EXCEEDED')).toBe('rate-limited');
 		expect(isSystemicSpotifyResponseFailure({ error: 'spotify_response_invalid' })).toBe(true);
-		expect(isSystemicSpotifyResponseFailure({ error: 'spotify_search_unavailable' })).toBe(true);
+		expect(
+			isSystemicSpotifyResponseFailure({ error: 'spotify_search_unavailable', reason: 'upstream' })
+		).toBe(true);
+		expect(
+			isSystemicSpotifyResponseFailure({
+				error: 'spotify_search_unavailable',
+				reason: 'request-rejected',
+				upstreamStatus: 400
+			})
+		).toBe(true);
 		expect(isSystemicSpotifyResponseFailure({ error: 'other' })).toBe(false);
 	});
 
@@ -237,6 +246,7 @@ describe('catalogue cooldown display', () => {
 				spotifySessionMetrics: {
 					searchRequests: 123,
 					cacheHits: 18,
+					transientRetries: 4,
 					rateLimitResponses: 2,
 					quotaExceededResponses: 1
 				}
@@ -244,10 +254,21 @@ describe('catalogue cooldown display', () => {
 		).toEqual({
 			searchRequests: 123,
 			cacheHits: 18,
+			transientRetries: 4,
 			rateLimitResponses: 2,
 			quotaExceededResponses: 1
 		});
 		expect(parseSpotifySessionMetrics({})).toBeNull();
+		expect(
+			parseSpotifySessionMetrics({
+				spotifySessionMetrics: {
+					searchRequests: 3,
+					cacheHits: 1,
+					rateLimitResponses: 0,
+					quotaExceededResponses: 0
+				}
+			})
+		).toMatchObject({ transientRetries: 0 });
 		expect(
 			parseSpotifySessionMetrics({
 				spotifySessionMetrics: {
@@ -334,7 +355,7 @@ describe('catalogue scan workers', () => {
 		expect(started).toEqual([0, 1]);
 	});
 
-	it('pauses both workers after a systemic Spotify response failure', async () => {
+	it('settles both workers and keeps affected and untouched episodes pending after final exhaustion', async () => {
 		const controller = new AbortController();
 		const started: number[] = [];
 		const retried: number[] = [];

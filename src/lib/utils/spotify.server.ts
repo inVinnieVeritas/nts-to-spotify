@@ -1,12 +1,19 @@
 import { env } from '$env/dynamic/private';
 import type { BasicTrack, Match, MatchedTrack } from '$lib/types';
-import { abortableDelay, createAbortError, isAbortError, throwIfAborted } from './abort';
+import {
+	abortableDelay,
+	createAbortError,
+	isAbortError,
+	RequestTimeoutError,
+	throwIfAborted
+} from './abort';
 import { isSafeRetryAfterSeconds, SPOTIFY_MATCHER_VERSION } from './catalog-scan';
 import { fetchWithTimeout, type Fetcher } from './request';
 
 const TOKEN_TIMEOUT_MS = 15_000;
 const SEARCH_TIMEOUT_MS = 20_000;
 export const SPOTIFY_SEARCH_INTERVAL_MS = 2_000;
+export const SPOTIFY_TRANSIENT_RETRY_DELAYS_MS = [2_000, 5_000] as const;
 // Successful final matches live only for this Node server session. FIFO eviction keeps memory
 // bounded and deterministic; neither keys nor values contain tokens or user-identifying data.
 export const SPOTIFY_SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -20,6 +27,7 @@ export type SpotifyRateLimitReason = 'quota-exceeded' | 'rate-limited';
 export type SpotifySessionMetrics = {
 	searchRequests: number;
 	cacheHits: number;
+	transientRetries: number;
 	rateLimitResponses: number;
 	quotaExceededResponses: number;
 };
@@ -27,6 +35,7 @@ export type SpotifySessionMetrics = {
 const spotifySessionMetrics: SpotifySessionMetrics = {
 	searchRequests: 0,
 	cacheHits: 0,
+	transientRetries: 0,
 	rateLimitResponses: 0,
 	quotaExceededResponses: 0
 };
@@ -54,21 +63,92 @@ export class SpotifyResponseValidationError extends Error {
 	}
 }
 
+export type SpotifySearchUnavailableReason =
+	| 'authentication'
+	| 'request-rejected'
+	| 'upstream'
+	| 'invalid-json'
+	| 'network'
+	| 'timeout'
+	| 'unexpected';
+
+const SPOTIFY_SEARCH_UNAVAILABLE_REASONS = new Set<SpotifySearchUnavailableReason>([
+	'authentication',
+	'request-rejected',
+	'upstream',
+	'invalid-json',
+	'network',
+	'timeout',
+	'unexpected'
+]);
+
+const isSpotifySearchUnavailableReason = (
+	value: unknown
+): value is SpotifySearchUnavailableReason =>
+	typeof value === 'string' &&
+	SPOTIFY_SEARCH_UNAVAILABLE_REASONS.has(value as SpotifySearchUnavailableReason);
+
+export const isSpotifyRequestRejectedStatus = (value: unknown): value is number =>
+	typeof value === 'number' &&
+	Number.isSafeInteger(value) &&
+	value >= 400 &&
+	value <= 499 &&
+	value !== 401 &&
+	value !== 403 &&
+	value !== 429;
+
+type SpotifySearchUnavailableShape =
+	| {
+			name: 'SpotifySearchUnavailableError';
+			reason: 'request-rejected';
+			upstreamStatus: number;
+	  }
+	| {
+			name: 'SpotifySearchUnavailableError';
+			reason: Exclude<SpotifySearchUnavailableReason, 'request-rejected'>;
+			upstreamStatus?: never;
+	  };
+
+type ObservedSpotifyHttpFailure =
+	| { reason: 'request-rejected'; upstreamStatus: number }
+	| {
+			reason: Exclude<SpotifySearchUnavailableReason, 'request-rejected'>;
+	  };
+
 export class SpotifySearchUnavailableError extends Error {
-	constructor() {
+	readonly reason: SpotifySearchUnavailableReason;
+	declare readonly upstreamStatus?: number;
+
+	constructor(reason: Exclude<SpotifySearchUnavailableReason, 'request-rejected'>);
+	constructor(reason: 'request-rejected', upstreamStatus: number);
+	constructor(reason: SpotifySearchUnavailableReason, upstreamStatus?: number) {
 		super('Spotify search is unavailable');
 		this.name = 'SpotifySearchUnavailableError';
+		this.reason = reason;
+		if (reason === 'request-rejected') {
+			if (!isSpotifyRequestRejectedStatus(upstreamStatus)) {
+				throw new TypeError('Invalid Spotify request-rejected status');
+			}
+			this.upstreamStatus = upstreamStatus;
+		}
 	}
 }
 
 export const isSpotifySearchUnavailableError = (
 	cause: unknown
-): cause is { name: 'SpotifySearchUnavailableError' } =>
-	Boolean(
-		cause &&
-			typeof cause === 'object' &&
-			(cause as Record<string, unknown>).name === 'SpotifySearchUnavailableError'
-	);
+): cause is SpotifySearchUnavailableShape => {
+	if (!cause || typeof cause !== 'object') return false;
+	const candidate = cause as Record<string, unknown>;
+	if (
+		candidate.name !== 'SpotifySearchUnavailableError' ||
+		!isSpotifySearchUnavailableReason(candidate.reason)
+	) {
+		return false;
+	}
+	return candidate.reason === 'request-rejected'
+		? isSpotifyRequestRejectedStatus(candidate.upstreamStatus)
+		: candidate.upstreamStatus === undefined;
+};
 
 export const isSpotifyResponseValidationError = (
 	cause: unknown
@@ -537,14 +617,31 @@ export const parseSpotifyTrackSearchResult = (value: unknown): ParsedSpotifySear
 	return { matches, skippedCandidates, adjustedCandidates };
 };
 
-const requestSpotifySearch = async (
+const requestSpotifySearchAttempt = async (
 	url: string,
 	token: string,
 	request: Fetcher,
+	isRetry: boolean,
 	signal?: AbortSignal
 ) =>
 	spotifySearchQueue.enqueue(async () => {
 		spotifySessionMetrics.searchRequests += 1;
+		if (isRetry) spotifySessionMetrics.transientRetries += 1;
+		let observedRateLimitSeconds: number | undefined;
+		let observedHttpFailure: ObservedSpotifyHttpFailure | undefined;
+		const rateLimitError = (reason: SpotifyRateLimitReason) => {
+			const safeRetryAfterSeconds = spotifySearchQueue.setCooldown(
+				observedRateLimitSeconds ?? DEFAULT_RETRY_AFTER_SECONDS,
+				reason
+			);
+			if (reason === 'quota-exceeded') spotifySessionMetrics.quotaExceededResponses += 1;
+			else spotifySessionMetrics.rateLimitResponses += 1;
+			return new SpotifyRateLimitError(safeRetryAfterSeconds, reason);
+		};
+		const httpFailureError = (failure: ObservedSpotifyHttpFailure) =>
+			failure.reason === 'request-rejected'
+				? new SpotifySearchUnavailableError('request-rejected', failure.upstreamStatus)
+				: new SpotifySearchUnavailableError(failure.reason);
 		try {
 			return await fetchWithTimeout(
 				request,
@@ -553,7 +650,7 @@ const requestSpotifySearch = async (
 				SEARCH_TIMEOUT_MS,
 				async (response) => {
 					if (response.status === 429) {
-						const retryAfterSeconds = parseRetryAfter(response.headers.get('Retry-After'));
+						observedRateLimitSeconds = parseRetryAfter(response.headers.get('Retry-After'));
 						let payload: unknown = null;
 						try {
 							payload = await response.json();
@@ -561,17 +658,34 @@ const requestSpotifySearch = async (
 							if (isAbortError(cause)) throw cause;
 						}
 						const reason = parseSpotifyRateLimitReason(payload);
-						const safeRetryAfterSeconds = spotifySearchQueue.setCooldown(retryAfterSeconds, reason);
-						if (reason === 'quota-exceeded') spotifySessionMetrics.quotaExceededResponses += 1;
-						else spotifySessionMetrics.rateLimitResponses += 1;
-						throw new SpotifyRateLimitError(safeRetryAfterSeconds, reason);
+						throw rateLimitError(reason);
 					}
 					if (!response.ok) {
-						await response.body?.cancel();
-						throw new SpotifySearchUnavailableError();
+						observedHttpFailure = isSpotifyRequestRejectedStatus(response.status)
+							? { reason: 'request-rejected', upstreamStatus: response.status }
+							: {
+									reason:
+										response.status === 401 || response.status === 403
+											? 'authentication'
+											: response.status >= 500
+											? 'upstream'
+											: 'unexpected'
+							  };
+						await response.body?.cancel().catch(() => undefined);
+						throw httpFailureError(observedHttpFailure);
 					}
 
-					return parseSpotifyTrackSearchResult(await response.json());
+					let payload: unknown;
+					try {
+						payload = await response.json();
+					} catch (cause) {
+						if (isAbortError(cause)) throw cause;
+						if (cause instanceof SyntaxError) {
+							throw new SpotifySearchUnavailableError('invalid-json');
+						}
+						throw cause;
+					}
+					return parseSpotifyTrackSearchResult(payload);
 				},
 				signal
 			);
@@ -584,9 +698,46 @@ const requestSpotifySearch = async (
 			) {
 				throw cause;
 			}
-			throw new SpotifySearchUnavailableError();
+			if (observedRateLimitSeconds !== undefined) throw rateLimitError('rate-limited');
+			if (observedHttpFailure) throw httpFailureError(observedHttpFailure);
+			if (cause instanceof RequestTimeoutError) {
+				throw new SpotifySearchUnavailableError('timeout');
+			}
+			if (cause instanceof TypeError) {
+				throw new SpotifySearchUnavailableError('network');
+			}
+			throw new SpotifySearchUnavailableError('unexpected');
 		}
 	}, signal);
+
+const TRANSIENT_SPOTIFY_SEARCH_REASONS = new Set<SpotifySearchUnavailableReason>([
+	'upstream',
+	'invalid-json',
+	'network',
+	'timeout'
+]);
+
+const requestSpotifySearch = async (
+	url: string,
+	token: string,
+	request: Fetcher,
+	signal?: AbortSignal
+) => {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			return await requestSpotifySearchAttempt(url, token, request, attempt > 0, signal);
+		} catch (cause) {
+			if (
+				!isSpotifySearchUnavailableError(cause) ||
+				!TRANSIENT_SPOTIFY_SEARCH_REASONS.has(cause.reason) ||
+				attempt >= SPOTIFY_TRANSIENT_RETRY_DELAYS_MS.length
+			) {
+				throw cause;
+			}
+			await abortableDelay(SPOTIFY_TRANSIENT_RETRY_DELAYS_MS[attempt], signal);
+		}
+	}
+};
 
 const performSpotifyTrackSearch = async (
 	track: BasicTrack,
@@ -602,7 +753,21 @@ const performSpotifyTrackSearch = async (
 		)}`;
 		if (!fallback) url += `%20artist:${encodeURIComponent(track.artist)}`;
 
-		const result = await requestSpotifySearch(url, token, request, signal);
+		let result: Awaited<ReturnType<typeof requestSpotifySearch>>;
+		try {
+			result = await requestSpotifySearch(url, token, request, signal);
+		} catch (cause) {
+			if (
+				!fallback &&
+				isSpotifySearchUnavailableError(cause) &&
+				cause.reason === 'request-rejected' &&
+				cause.upstreamStatus === 400
+			) {
+				cacheable = false;
+				continue;
+			}
+			throw cause;
+		}
 		const matches = result.matches;
 		if (result.skippedCandidates > 0 || result.adjustedCandidates > 0) cacheable = false;
 
@@ -642,6 +807,7 @@ export const resetSpotifyServerSessionForTests = () => {
 	spotifySearchQueue.resetForTests();
 	spotifySessionMetrics.searchRequests = 0;
 	spotifySessionMetrics.cacheHits = 0;
+	spotifySessionMetrics.transientRetries = 0;
 	spotifySessionMetrics.rateLimitResponses = 0;
 	spotifySessionMetrics.quotaExceededResponses = 0;
 };

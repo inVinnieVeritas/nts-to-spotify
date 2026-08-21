@@ -75,6 +75,8 @@ export const POST: RequestHandler = async (event) => {
 			return json(
 				{
 					error: 'spotify_search_unavailable',
+					reason: cause.reason,
+					...(cause.reason === 'request-rejected' ? { upstreamStatus: cause.upstreamStatus } : {}),
 					spotifySessionMetrics: getSpotifySessionMetrics()
 				},
 				{ status: 503 }

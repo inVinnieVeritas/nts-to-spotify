@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('$lib/utils/auth.server', () => ({ getAccessToken: vi.fn() }));
 vi.mock('$lib/utils/nts.server', () => ({ getNTSEpisodeTracklist: vi.fn() }));
@@ -14,13 +14,24 @@ import { getNTSEpisodeTracklist } from '$lib/utils/nts.server';
 import { getClientCredentials, resetSpotifyServerSessionForTests } from '$lib/utils/spotify.server';
 import { POST } from './+server';
 
+const DUPLICATED_ENSEMBLE_ARTIST = Array.from(
+	{ length: 24 },
+	() => 'Brown Ensemble, Fizzled Out Players'
+).join(', ');
+
 describe('/api/nts/matches rate-limit response', () => {
 	beforeEach(() => {
+		vi.useRealTimers();
 		vi.clearAllMocks();
 		resetSpotifyServerSessionForTests();
 		vi.mocked(getAccessToken).mockResolvedValue('user-token');
 		vi.mocked(getClientCredentials).mockResolvedValue('application-token');
 		vi.mocked(getNTSEpisodeTracklist).mockResolvedValue([{ artist: 'Artist', title: 'Track' }]);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
 	});
 
 	it('returns sanitized quota 429 responses with metrics and fails fast during cooldown', async () => {
@@ -50,6 +61,7 @@ describe('/api/nts/matches rate-limit response', () => {
 			spotifySessionMetrics: {
 				searchRequests: 1,
 				cacheHits: 0,
+				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 1
 			}
@@ -137,6 +149,7 @@ describe('/api/nts/matches rate-limit response', () => {
 			reason: 'rate-limited',
 			spotifySessionMetrics: {
 				searchRequests: 1,
+				transientRetries: 0,
 				rateLimitResponses: 1,
 				quotaExceededResponses: 0
 			}
@@ -164,6 +177,7 @@ describe('/api/nts/matches rate-limit response', () => {
 			spotifySessionMetrics: {
 				searchRequests: 1,
 				cacheHits: 0,
+				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 0
 			}
@@ -172,7 +186,168 @@ describe('/api/nts/matches rate-limit response', () => {
 	});
 
 	it('returns a structured sanitized 503 when Spotify Search is unavailable', async () => {
-		const spotifyFetch = vi.fn(async () => new Response('{invalid-json'));
+		vi.useFakeTimers();
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const spotifyFetch = vi.fn(
+			async () => new Response(JSON.stringify({ token: 'private-upstream-value' }), { status: 503 })
+		);
+		const pendingResponse = POST({
+			request: new Request('http://localhost/api/nts/matches', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ show: 'show', episode: 'episode' })
+			}),
+			fetch: spotifyFetch
+		} as never);
+		await vi.advanceTimersByTimeAsync(7_000);
+		const response = await pendingResponse;
+		const body = await response.json();
+
+		expect(response.status).toBe(503);
+		expect(body).toEqual({
+			error: 'spotify_search_unavailable',
+			reason: 'upstream',
+			spotifySessionMetrics: {
+				searchRequests: 3,
+				cacheHits: 0,
+				transientRetries: 2,
+				rateLimitResponses: 0,
+				quotaExceededResponses: 0
+			}
+		});
+		expect(JSON.stringify(body)).not.toContain('private-upstream-value');
+		expect(consoleError).not.toHaveBeenCalled();
+		expect(spotifyFetch).toHaveBeenCalledTimes(3);
+	});
+
+	it('returns only a validated status for a sanitized request-rejected 503', async () => {
+		vi.useFakeTimers();
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		vi.mocked(getNTSEpisodeTracklist).mockResolvedValue([
+			{ artist: 'PRIVATE_ARTIST', title: 'PRIVATE_QUERY' }
+		]);
+		const spotifyFetch = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ error: 'PRIVATE_RESPONSE_BODY' }), {
+					status: 400,
+					headers: { 'X-Private-Upstream-Header': 'PRIVATE_HEADER_VALUE' }
+				})
+		);
+		const pendingResponse = POST({
+			request: new Request('http://localhost/api/nts/matches?PRIVATE_URL_VALUE', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ show: 'show', episode: 'episode' })
+			}),
+			fetch: spotifyFetch
+		} as never);
+		await vi.advanceTimersByTimeAsync(2_000);
+		const response = await pendingResponse;
+		const body = await response.json();
+
+		expect(response.status).toBe(503);
+		expect(body).toEqual({
+			error: 'spotify_search_unavailable',
+			reason: 'request-rejected',
+			upstreamStatus: 400,
+			spotifySessionMetrics: {
+				searchRequests: 2,
+				cacheHits: 0,
+				transientRetries: 0,
+				rateLimitResponses: 0,
+				quotaExceededResponses: 0
+			}
+		});
+		expect(response.headers.get('X-Private-Upstream-Header')).toBeNull();
+		for (const privateValue of [
+			'PRIVATE_ARTIST',
+			'PRIVATE_QUERY',
+			'PRIVATE_RESPONSE_BODY',
+			'PRIVATE_HEADER_VALUE',
+			'PRIVATE_URL_VALUE'
+		]) {
+			expect(JSON.stringify(body)).not.toContain(privateValue);
+			expect(JSON.stringify(consoleError.mock.calls)).not.toContain(privateValue);
+		}
+		expect(consoleError).not.toHaveBeenCalled();
+		expect(spotifyFetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('completes an episode through the title-only fallback after a rejected primary 400', async () => {
+		vi.useFakeTimers();
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		vi.mocked(getNTSEpisodeTracklist).mockResolvedValue([
+			{
+				artist: DUPLICATED_ENSEMBLE_ARTIST,
+				title: 'Brown, Fizzled Out (2013/2014) For Ensemble'
+			}
+		]);
+		const spotifyFetch = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ error: 'PRIVATE_RESPONSE_BODY' }), {
+					status: 400,
+					headers: { 'X-Private-Upstream-Header': 'PRIVATE_HEADER_VALUE' }
+				})
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						tracks: {
+							items: [
+								{
+									artists: [{ name: 'Brown Ensemble' }],
+									name: 'Brown, Fizzled Out',
+									uri: 'spotify:track:0123456789ABCDEFGHIJKL',
+									preview_url: null,
+									album: { images: [] },
+									external_urls: {
+										spotify: 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL'
+									}
+								}
+							]
+						}
+					})
+				)
+			);
+		const pendingResponse = POST({
+			request: new Request('http://localhost/api/nts/matches', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ show: 'show', episode: 'episode' })
+			}),
+			fetch: spotifyFetch
+		} as never);
+
+		await vi.advanceTimersByTimeAsync(2_000);
+		const response = await pendingResponse;
+		const body = await response.json();
+
+		expect(response.status).toBe(200);
+		expect(body.tracks).toEqual([
+			expect.objectContaining({
+				artist: DUPLICATED_ENSEMBLE_ARTIST,
+				fallback: true,
+				matches: [expect.objectContaining({ title: 'Brown, Fizzled Out' })]
+			})
+		]);
+		expect(body.spotifySessionMetrics).toMatchObject({
+			searchRequests: 2,
+			transientRetries: 0,
+			cacheHits: 0
+		});
+		expect(spotifyFetch).toHaveBeenCalledTimes(2);
+		expect(consoleError).not.toHaveBeenCalled();
+	});
+
+	it('keeps raw internal exception properties out of an unexpected 503', async () => {
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const spotifyFetch = vi.fn(async () => {
+			throw Object.assign(new Error('PRIVATE_RAW_MESSAGE'), {
+				token: 'PRIVATE_TOKEN',
+				url: 'https://private.example/search?PRIVATE_QUERY'
+			});
+		});
 		const response = await POST({
 			request: new Request('http://localhost/api/nts/matches', {
 				method: 'POST',
@@ -184,16 +359,16 @@ describe('/api/nts/matches rate-limit response', () => {
 		const body = await response.json();
 
 		expect(response.status).toBe(503);
-		expect(body).toEqual({
+		expect(body).toMatchObject({
 			error: 'spotify_search_unavailable',
-			spotifySessionMetrics: {
-				searchRequests: 1,
-				cacheHits: 0,
-				rateLimitResponses: 0,
-				quotaExceededResponses: 0
-			}
+			reason: 'unexpected',
+			spotifySessionMetrics: { searchRequests: 1, transientRetries: 0 }
 		});
-		expect(JSON.stringify(body)).not.toContain('invalid-json');
+		expect(body).not.toHaveProperty('upstreamStatus');
+		expect(JSON.stringify(body)).not.toContain('PRIVATE');
+		expect(JSON.stringify(consoleError.mock.calls)).not.toContain('PRIVATE');
+		expect(consoleError).not.toHaveBeenCalled();
+		expect(spotifyFetch).toHaveBeenCalledOnce();
 	});
 
 	it('never sends raw thrown properties to catalogue-route logging', async () => {

@@ -124,8 +124,10 @@ describe('single-episode route deadline', () => {
 		vi.mocked(getClientCredentials).mockResolvedValue('application-token');
 		vi.mocked(mapWithConcurrency).mockRejectedValue({
 			name: 'SpotifySearchUnavailableError',
+			reason: 'network',
 			privateUpstreamValue: 'must not be exposed'
 		});
+		const setHeaders = vi.fn();
 		const fetcher = vi.fn(async () => new Response('<html></html>', { status: 200 }));
 
 		await expect(
@@ -133,11 +135,14 @@ describe('single-episode route deadline', () => {
 				params: { show: 'show', episode: 'episode' },
 				fetch: fetcher,
 				request: new Request('http://localhost/shows/show/episodes/episode'),
-				setHeaders: vi.fn()
+				setHeaders
 			} as never)
 		).rejects.toMatchObject({
 			status: 503,
 			body: { message: 'Spotify search is temporarily unavailable. Try again later.' }
+		});
+		expect(setHeaders).toHaveBeenCalledWith({
+			'X-Spotify-Search-Error-Reason': 'network'
 		});
 	});
 
