@@ -132,6 +132,8 @@
 	let progressTransferError = '';
 	let progressFileInput: HTMLInputElement;
 	let activeShowAlias = data.showAlias;
+	let activeShowName = data.name;
+	let activeShowCover = data.cover;
 	let showGeneration = 0;
 	let reviewFilter: CatalogReviewFilter = 'all';
 	const activeEpisodeControllers = new Map<number, AbortController>();
@@ -159,7 +161,11 @@
 				...(linkedPlaylistId ? { linkedPlaylistId } : {}),
 				...(!linkedPlaylistId && playlistCreationPending ? { creationPending: true } : {})
 			},
-			{ cooldownUntil, pausedByRateLimit }
+			{ cooldownUntil, pausedByRateLimit },
+			{
+				showName: activeShowName,
+				...(activeShowCover ? { showCover: activeShowCover } : {})
+			}
 		);
 
 	const persistProgress = (waitForSave = false) => {
@@ -748,6 +754,8 @@
 		const generation = showGeneration;
 		const showAlias = pageData.showAlias;
 		activeShowAlias = showAlias;
+		activeShowName = pageData.name;
+		activeShowCover = pageData.cover;
 		skipDestroyPersistence = false;
 		clearProgressTransferMessage();
 		const defaults = showDefaults(pageData);

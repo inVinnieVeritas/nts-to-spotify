@@ -4,6 +4,7 @@ import {
 	coordinateCatalogProgressOperation,
 	createLatestSnapshotWriter,
 	deleteCatalogProgress,
+	listCatalogProgress,
 	loadCatalogProgress,
 	saveCatalogProgress
 } from './catalog-progress.client';
@@ -63,6 +64,238 @@ describe('catalogue IndexedDB deadlines', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+const listedProgress = (showAlias: string, updatedAt: number): CatalogProgress => ({
+	...progress,
+	showAlias,
+	updatedAt,
+	display: { showName: `Show ${showAlias}` }
+});
+
+const listFactory = (values: unknown[]) => {
+	const request = {} as IDBRequest<unknown[]>;
+	const transaction = {
+		error: null,
+		abort: vi.fn(),
+		objectStore: () => ({ getAll: () => request })
+	} as unknown as IDBTransaction;
+	const database = {
+		transaction: vi.fn(() => transaction),
+		close: vi.fn()
+	} as unknown as IDBDatabase;
+	const openRequest = { result: database } as IDBOpenDBRequest;
+	const factory = {
+		open: vi.fn(() => {
+			queueMicrotask(() => {
+				openRequest.onsuccess?.(new Event('success'));
+				queueMicrotask(() => {
+					Object.defineProperty(request, 'result', { value: values });
+					request.onsuccess?.(new Event('success'));
+					transaction.oncomplete?.(new Event('complete'));
+				});
+			});
+			return openRequest;
+		})
+	} as unknown as IDBFactory;
+	return { factory, database, request, transaction };
+};
+
+describe('catalogue progress listing', () => {
+	it('rejects a listing database open that never settles', async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = { open: vi.fn(() => ({})) } as unknown as IDBFactory;
+			const listing = listCatalogProgress({ factory, timeoutMs: 20 });
+			const expectation = expect(listing).rejects.toBeInstanceOf(CatalogPersistenceTimeoutError);
+
+			await vi.advanceTimersByTimeAsync(20);
+			await expectation;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each([
+		['zero', []],
+		['one', [listedProgress('one', Date.UTC(2026, 0, 1))]],
+		[
+			'multiple',
+			[listedProgress('older', Date.UTC(2026, 0, 1)), listedProgress('newer', Date.UTC(2026, 1, 1))]
+		]
+	])('lists %s valid records and sorts newest first', async (_label, values) => {
+		const { factory, database } = listFactory(values);
+		const result = await listCatalogProgress({ factory, timeoutMs: 20 });
+
+		expect(result.records.map(({ showAlias }) => showAlias)).toEqual(
+			[...values]
+				.sort((left, right) => right.updatedAt - left.updatedAt)
+				.map(({ showAlias }) => showAlias)
+		);
+		expect(result.skippedCount).toBe(0);
+		expect(database.close).toHaveBeenCalledOnce();
+	});
+
+	it('waits for already queued writes before opening the listing transaction', async () => {
+		let releaseWrite: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => (releaseWrite = resolve));
+		const queued = coordinateCatalogProgressOperation('queued-before-list', () => gate);
+		const { factory } = listFactory([]);
+		const listing = listCatalogProgress({ factory, timeoutMs: 20 });
+
+		await Promise.resolve();
+		expect(factory.open).not.toHaveBeenCalled();
+		releaseWrite?.();
+		await queued;
+		await listing;
+		expect(factory.open).toHaveBeenCalledOnce();
+	});
+
+	it('waits until follow-up work queued by a settling writer is also complete', async () => {
+		let releaseFirst: (() => void) | undefined;
+		let releaseSecond: (() => void) | undefined;
+		const firstGate = new Promise<void>((resolve) => (releaseFirst = resolve));
+		const secondGate = new Promise<void>((resolve) => (releaseSecond = resolve));
+		const first = coordinateCatalogProgressOperation('coalesced-before-list', () => firstGate);
+		let second: Promise<void> | undefined;
+		void first.then(() => {
+			second = coordinateCatalogProgressOperation('coalesced-before-list', () => secondGate);
+		});
+		const { factory } = listFactory([]);
+		const listing = listCatalogProgress({ factory, timeoutMs: 50 });
+
+		releaseFirst?.();
+		await first;
+		await vi.waitFor(() => expect(second).toBeDefined());
+		expect(factory.open).not.toHaveBeenCalled();
+		releaseSecond?.();
+		await second;
+		await listing;
+		expect(factory.open).toHaveBeenCalledOnce();
+	});
+
+	it('bounds waiting for a queued operation that never settles', async () => {
+		vi.useFakeTimers();
+		try {
+			let release: (() => void) | undefined;
+			const gate = new Promise<void>((resolve) => (release = resolve));
+			const stalled = coordinateCatalogProgressOperation('stalled-before-list', () => gate);
+			const { factory } = listFactory([]);
+			const listing = listCatalogProgress({ factory, timeoutMs: 20 });
+			const expectation = expect(listing).rejects.toBeInstanceOf(CatalogPersistenceTimeoutError);
+
+			await vi.advanceTimersByTimeAsync(20);
+			await expectation;
+			expect(factory.open).not.toHaveBeenCalled();
+			release?.();
+			await stalled;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('returns defensive validated copies and skips malformed or incompatible records', async () => {
+		const original = listedProgress('valid', Date.UTC(2026, 0, 1));
+		const incompatible = { ...listedProgress('old', Date.UTC(2026, 0, 2)), matcherVersion: 999 };
+		const malformed = { showAlias: 'broken', updatedAt: Date.UTC(2026, 0, 3) };
+		const { factory } = listFactory([original, incompatible, malformed]);
+
+		const result = await listCatalogProgress({ factory, timeoutMs: 20 });
+		expect(result.records).toHaveLength(1);
+		expect(result.skippedCount).toBe(2);
+		expect(result.records[0]).not.toBe(original);
+		result.records[0].playlist.title = 'Changed copy';
+		expect(original.playlist.title).toBe('Title');
+	});
+
+	it('does not make Spotify or NTS fetches while listing', async () => {
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		const { factory } = listFactory([listedProgress('offline', Date.UTC(2026, 0, 1))]);
+
+		await listCatalogProgress({ factory, timeoutMs: 20 });
+		expect(fetchSpy).not.toHaveBeenCalled();
+		fetchSpy.mockRestore();
+	});
+
+	it('rejects and closes the database when getAll fails', async () => {
+		const { factory, database, request } = listFactory([]);
+		Object.defineProperty(request, 'error', { value: new Error('getAll failed') });
+		vi.mocked(factory.open).mockImplementation(() => {
+			const openRequest = { result: database } as IDBOpenDBRequest;
+			queueMicrotask(() => {
+				openRequest.onsuccess?.(new Event('success'));
+				queueMicrotask(() => request.onerror?.(new Event('error')));
+			});
+			return openRequest;
+		});
+
+		await expect(listCatalogProgress({ factory, timeoutMs: 20 })).rejects.toThrow('getAll failed');
+		expect(database.close).toHaveBeenCalledOnce();
+	});
+
+	it('rejects and closes the database when the listing transaction fails', async () => {
+		const { factory, database, transaction } = listFactory([]);
+		Object.defineProperty(transaction, 'error', { value: new Error('transaction failed') });
+		vi.mocked(factory.open).mockImplementation(() => {
+			const openRequest = { result: database } as IDBOpenDBRequest;
+			queueMicrotask(() => {
+				openRequest.onsuccess?.(new Event('success'));
+				queueMicrotask(() => transaction.onerror?.(new Event('error')));
+			});
+			return openRequest;
+		});
+
+		await expect(listCatalogProgress({ factory, timeoutMs: 20 })).rejects.toThrow(
+			'transaction failed'
+		);
+		expect(database.close).toHaveBeenCalledOnce();
+	});
+
+	it('aborts, rejects, and closes a listing transaction that never settles', async () => {
+		vi.useFakeTimers();
+		try {
+			const request = {} as IDBRequest<unknown[]>;
+			const transaction = {
+				error: null,
+				abort: vi.fn(),
+				objectStore: () => ({ getAll: () => request })
+			} as unknown as IDBTransaction;
+			const database = {
+				transaction: () => transaction,
+				close: vi.fn()
+			} as unknown as IDBDatabase;
+			const openRequest = { result: database } as IDBOpenDBRequest;
+			const factory = {
+				open: vi.fn(() => {
+					queueMicrotask(() => openRequest.onsuccess?.(new Event('success')));
+					return openRequest;
+				})
+			} as unknown as IDBFactory;
+			const listing = listCatalogProgress({ factory, timeoutMs: 20 });
+			const expectation = expect(listing).rejects.toBeInstanceOf(CatalogPersistenceTimeoutError);
+
+			await vi.advanceTimersByTimeAsync(20);
+			await expectation;
+			expect(transaction.abort).toHaveBeenCalledOnce();
+			expect(database.close).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('rejects an IndexedDB open failure without exposing it through a result', async () => {
+		const openRequest = { error: new Error('private database detail') } as IDBOpenDBRequest;
+		const factory = {
+			open: vi.fn(() => {
+				queueMicrotask(() => openRequest.onerror?.(new Event('error')));
+				return openRequest;
+			})
+		} as unknown as IDBFactory;
+
+		await expect(listCatalogProgress({ factory, timeoutMs: 20 })).rejects.toThrow(
+			'private database detail'
+		);
 	});
 });
 

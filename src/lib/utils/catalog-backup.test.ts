@@ -94,6 +94,10 @@ describe('catalogue progress backup', () => {
 	it('round trips every whitelisted persisted field', () => {
 		const progress = makeProgress();
 		progress.updatedAt = EXPORTED_AT_MS;
+		progress.display = {
+			showName: "Jim O'Rourke",
+			showCover: 'https://images.example.test/show.jpg'
+		};
 		const parsed = parseCatalogBackup(
 			serializeCatalogBackup(progress, new Date(EXPORTED_AT)),
 			'show'
@@ -106,6 +110,14 @@ describe('catalogue progress backup', () => {
 			showAlias: 'show',
 			progress
 		});
+	});
+
+	it('keeps legacy backups without optional dashboard display metadata compatible', () => {
+		const legacy = JSON.parse(jsonEnvelope()) as {
+			progress: { display?: unknown };
+		};
+		delete legacy.progress.display;
+		expect(parseCatalogBackup(JSON.stringify(legacy), 'show').progress.display).toBeUndefined();
 	});
 
 	it('accepts legacy backups without linkage state and rejects invalid linked IDs', () => {

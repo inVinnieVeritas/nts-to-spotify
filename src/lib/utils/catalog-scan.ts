@@ -85,6 +85,12 @@ export type CatalogProgress = {
 	episodes: Record<string, EpisodeState>;
 	playlist: PlaylistDraft;
 	retry?: CatalogRetryState;
+	display?: CatalogDisplayMetadata;
+};
+
+export type CatalogDisplayMetadata = {
+	showName: string;
+	showCover?: string;
 };
 
 const freshEpisode = (episode: NTSEpisodeSummary): EpisodeState => ({
@@ -338,7 +344,8 @@ export const createCatalogProgress = (
 	showAlias: string,
 	episodes: EpisodeState[],
 	playlist: PlaylistDraft,
-	retry: CatalogRetryState = { cooldownUntil: 0, pausedByRateLimit: false }
+	retry: CatalogRetryState = { cooldownUntil: 0, pausedByRateLimit: false },
+	display?: CatalogDisplayMetadata
 ): CatalogProgress => ({
 	schemaVersion: CATALOG_PROGRESS_SCHEMA_VERSION,
 	matcherVersion: SPOTIFY_MATCHER_VERSION,
@@ -346,17 +353,19 @@ export const createCatalogProgress = (
 	updatedAt: Date.now(),
 	episodes: Object.fromEntries(episodes.map((episode) => [episode.episodeAlias, episode])),
 	playlist,
-	retry
+	retry,
+	...(display ? { display } : {})
 });
 
 export const captureCatalogProgress = (
 	showAlias: string,
 	episodes: EpisodeState[],
 	playlist: PlaylistDraft,
-	retry?: CatalogRetryState
+	retry?: CatalogRetryState,
+	display?: CatalogDisplayMetadata
 ): CatalogProgress =>
 	JSON.parse(
-		JSON.stringify(createCatalogProgress(showAlias, episodes, playlist, retry))
+		JSON.stringify(createCatalogProgress(showAlias, episodes, playlist, retry, display))
 	) as CatalogProgress;
 
 export const getResumableEpisodeIndexes = (episodes: EpisodeState[]) =>

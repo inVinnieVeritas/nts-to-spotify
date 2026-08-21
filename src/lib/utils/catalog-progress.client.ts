@@ -1,4 +1,9 @@
 import type { CatalogProgress } from './catalog-scan';
+import {
+	CATALOG_BACKUP_FORMAT,
+	CATALOG_BACKUP_VERSION,
+	parseCatalogBackup
+} from './catalog-backup';
 
 const DATABASE_NAME = 'nts-to-spotify';
 const DATABASE_VERSION = 1;
@@ -8,6 +13,11 @@ export const INDEXED_DB_TIMEOUT_MS = 5_000;
 type DatabaseOptions = {
 	factory?: IDBFactory;
 	timeoutMs?: number;
+};
+
+export type CatalogProgressListResult = {
+	records: CatalogProgress[];
+	skippedCount: number;
 };
 
 const operationQueues = new Map<string, Promise<void>>();
@@ -119,6 +129,114 @@ export const loadCatalogProgress = (showAlias: string, options: DatabaseOptions 
 	coordinateCatalogProgressOperation(showAlias, () =>
 		loadCatalogProgressUncoordinated(showAlias, options)
 	);
+
+const waitForQueuedCatalogProgressOperations = async (timeoutMs = INDEXED_DB_TIMEOUT_MS) => {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_resolve, reject) => {
+		timeout = setTimeout(
+			() =>
+				reject(
+					new CatalogPersistenceTimeoutError('Waiting for catalogue progress operations timed out')
+				),
+			timeoutMs
+		);
+	});
+	try {
+		for (;;) {
+			const queued = [...operationQueues.values()];
+			if (queued.length === 0) {
+				await Promise.resolve();
+				if (operationQueues.size === 0) return;
+				continue;
+			}
+			await Promise.race([Promise.all(queued), deadline]);
+			await Promise.resolve();
+		}
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+};
+
+const validateStoredCatalogProgress = (value: unknown, now: number) => {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+	const showAlias = (value as Record<string, unknown>).showAlias;
+	if (typeof showAlias !== 'string' || showAlias.length === 0) return undefined;
+	try {
+		return parseCatalogBackup(
+			JSON.stringify({
+				format: CATALOG_BACKUP_FORMAT,
+				version: CATALOG_BACKUP_VERSION,
+				exportedAt: new Date(now).toISOString(),
+				showAlias,
+				progress: value
+			}),
+			showAlias,
+			now
+		).progress;
+	} catch {
+		return undefined;
+	}
+};
+
+const listCatalogProgressUncoordinated = async (
+	options: DatabaseOptions = {}
+): Promise<CatalogProgressListResult> => {
+	const database = await openDatabase(options);
+	try {
+		const values = await new Promise<unknown[]>((resolve, reject) => {
+			const transaction = database.transaction(STORE_NAME, 'readonly');
+			const request = transaction.objectStore(STORE_NAME).getAll();
+			let result: unknown[] = [];
+			let settled = false;
+			const timeout = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				try {
+					transaction.abort();
+				} catch {
+					// The transaction may already be inactive.
+				}
+				reject(new CatalogPersistenceTimeoutError('Listing catalogue progress timed out'));
+			}, options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+			const fail = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				reject(transaction.error || request.error);
+			};
+			request.onerror = fail;
+			request.onsuccess = () => {
+				result = Array.isArray(request.result) ? request.result : [];
+			};
+			transaction.onerror = fail;
+			transaction.onabort = fail;
+			transaction.oncomplete = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				resolve(result);
+			};
+		});
+
+		const now = Date.now();
+		const records: CatalogProgress[] = [];
+		let skippedCount = 0;
+		for (const value of values) {
+			const validated = validateStoredCatalogProgress(value, now);
+			if (validated) records.push(validated);
+			else skippedCount += 1;
+		}
+		records.sort((left, right) => right.updatedAt - left.updatedAt);
+		return { records, skippedCount };
+	} finally {
+		database.close();
+	}
+};
+
+export const listCatalogProgress = async (options: DatabaseOptions = {}) => {
+	await waitForQueuedCatalogProgressOperations(options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+	return listCatalogProgressUncoordinated(options);
+};
 
 const saveCatalogProgressUncoordinated = async (
 	progress: CatalogProgress,

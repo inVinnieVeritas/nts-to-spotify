@@ -9,6 +9,7 @@ import {
 	restoreCatalogLinkedPlaylistId,
 	restoreCatalogRetryState,
 	type CatalogProgress,
+	type CatalogDisplayMetadata,
 	type EpisodeState,
 	type PlaylistDraft,
 	type PlaylistOrder,
@@ -324,7 +325,16 @@ const validateProgress = (value: unknown, exportedAt: number): CatalogProgress =
 	const progress = asRecord(value, 'progress');
 	assertAllowedKeys(
 		progress,
-		['schemaVersion', 'matcherVersion', 'showAlias', 'updatedAt', 'episodes', 'playlist', 'retry'],
+		[
+			'schemaVersion',
+			'matcherVersion',
+			'showAlias',
+			'updatedAt',
+			'episodes',
+			'playlist',
+			'retry',
+			'display'
+		],
 		'progress'
 	);
 	const episodeRecord = asRecord(progress.episodes, 'progress.episodes');
@@ -356,6 +366,16 @@ const validateProgress = (value: unknown, exportedAt: number): CatalogProgress =
 			)
 		};
 	}
+	let display: CatalogDisplayMetadata | undefined;
+	if (progress.display !== undefined) {
+		const displayRecord = asRecord(progress.display, 'progress.display');
+		assertAllowedKeys(displayRecord, ['showName', 'showCover'], 'progress.display');
+		const showCover = optionalHttpsUrl(displayRecord.showCover, 'progress.display.showCover');
+		display = {
+			showName: requiredString(displayRecord.showName, 'progress.display.showName', 500),
+			...(showCover ? { showCover } : {})
+		};
+	}
 	const validated: CatalogProgress = {
 		schemaVersion: finiteNumber(progress.schemaVersion, 'progress.schemaVersion'),
 		matcherVersion: finiteNumber(progress.matcherVersion, 'progress.matcherVersion'),
@@ -370,6 +390,7 @@ const validateProgress = (value: unknown, exportedAt: number): CatalogProgress =
 		playlist: validatePlaylist(progress.playlist)
 	};
 	if (retry) validated.retry = retry;
+	if (display) validated.display = display;
 	return validated;
 };
 
@@ -426,6 +447,14 @@ const copyProgress = (progress: CatalogProgress): CatalogProgress => ({
 				retry: {
 					cooldownUntil: progress.retry.cooldownUntil,
 					pausedByRateLimit: progress.retry.pausedByRateLimit
+				}
+		  }
+		: {}),
+	...(progress.display
+		? {
+				display: {
+					showName: progress.display.showName,
+					...(progress.display.showCover ? { showCover: progress.display.showCover } : {})
 				}
 		  }
 		: {})
