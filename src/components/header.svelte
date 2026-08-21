@@ -34,8 +34,10 @@
 			href="https://ko-fi.com/pdrbrnd"
 			target="_blank"
 			rel="noopener noreferrer"
+			aria-label="Buy the original dev a coffee"
+			title="Buy the original dev a coffee"
 		>
-			<span class="coffee">Buy me a coffee</span>
+			<span class="coffee">Buy the original dev a coffee</span>
 		</Button>
 	</div>
 </header>
