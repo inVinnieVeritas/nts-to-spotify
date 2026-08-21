@@ -29,7 +29,9 @@
 		createGeneratedPlaylistText,
 		formatCooldownDuration,
 		formatSpotifyCooldownMessage,
+		getCatalogEpisodeReviewTracks,
 		getCatalogExportUris,
+		getCatalogReviewFilterCounts,
 		getCatalogSummaryCounts,
 		getResumableEpisodeIndexes,
 		isCatalogProgressCompatible,
@@ -42,8 +44,10 @@
 		restoreCatalogRetryState,
 		runCatalogWorkers,
 		shouldApplyCatalogRestoration,
+		shouldShowCatalogEpisodeForReview,
 		shouldReturnEpisodeToPending,
 		updateGeneratedPlaylistText,
+		type CatalogReviewFilter,
 		type CatalogScanOutcome,
 		type CatalogSpotifyRateLimitReason,
 		type EpisodeState,
@@ -63,6 +67,13 @@
 	const BROWSER_EPISODE_TIMEOUT_MS = 3 * 60 * 1000 + 15_000;
 	const MAX_AUTOMATIC_RATE_LIMITS = 3;
 	const LONG_RETRY_AFTER_SECONDS = 60 * 60;
+	const reviewFilters: Array<{ value: CatalogReviewFilter; label: string }> = [
+		{ value: 'all', label: 'All' },
+		{ value: 'selected', label: 'Selected' },
+		{ value: 'primary-review', label: 'Primary review' },
+		{ value: 'fallback-review', label: 'Fallback review' },
+		{ value: 'no-candidates', label: 'No candidates' }
+	];
 
 	const shortDate = (date: string) => {
 		const [year, month, day] = date.slice(0, 10).split('-');
@@ -113,6 +124,7 @@
 	let progressFileInput: HTMLInputElement;
 	let activeShowAlias = data.showAlias;
 	let showGeneration = 0;
+	let reviewFilter: CatalogReviewFilter = 'all';
 	const activeEpisodeControllers = new Map<number, AbortController>();
 
 	let episodes: EpisodeState[] = reconcileEpisodes(data.episodes);
@@ -150,6 +162,10 @@
 	};
 
 	const captureAndPersistReview = () => void persistProgress();
+	const captureAndPersistTrackReview = () => {
+		episodes = episodes;
+		captureAndPersistReview();
+	};
 	const changePlaylistOrder = (event: Event) => {
 		const nextOrder: PlaylistOrder =
 			(event.currentTarget as HTMLSelectElement).value === 'oldest-first'
@@ -603,6 +619,8 @@
 	let failedCount = 0;
 	let pendingCount = 0;
 	let uncertainCount = 0;
+	let reviewFilterCounts = getCatalogReviewFilterCounts(episodes);
+	let activeReviewCount = 0;
 	let progressLabel = '';
 	$: rawSelectedTracks = episodes.flatMap((episode) =>
 		episode.tracks
@@ -619,6 +637,8 @@
 		(total, episode) => total + episode.tracks.filter(({ confident }) => !confident).length,
 		0
 	);
+	$: reviewFilterCounts = getCatalogReviewFilterCounts(episodes);
+	$: activeReviewCount = reviewFilterCounts[reviewFilter];
 	$: scanComplete = completedCount === episodes.length;
 	$: progressLabel = `${completedCount} scanned · ${pendingCount} pending · ${failedCount} failed`;
 
@@ -651,6 +671,7 @@
 		playlistDescription = defaults.description;
 		publicPlaylist = false;
 		playlistOrder = 'latest-first';
+		reviewFilter = 'all';
 		episodes = reconcileEpisodes(pageData.episodes);
 		scanning = false;
 		scanController = undefined;
@@ -889,41 +910,81 @@
 			</section>
 		{/if}
 
+		{#if restored}
+			<section class="review-filters" aria-labelledby="catalogue-review-heading">
+				<h2 id="catalogue-review-heading" class="font-base">Review tracks</h2>
+				<div class="review-filter-buttons" aria-label="Catalogue track review filters">
+					{#each reviewFilters as filter}
+						<Button
+							type="button"
+							size="sm"
+							variant={reviewFilter === filter.value ? 'solid' : 'outline'}
+							aria-pressed={reviewFilter === filter.value}
+							on:click={() => (reviewFilter = filter.value)}
+						>
+							{filter.label} ({reviewFilterCounts[filter.value]})
+						</Button>
+					{/each}
+				</div>
+				<p class="font-small-beast">
+					Primary results used artist and title. Fallback results used title only and need more
+					caution.
+				</p>
+			</section>
+			{#if activeReviewCount === 0}
+				<p class="review-empty font-small-beast" role="status">
+					No completed tracks match this review filter.
+				</p>
+			{/if}
+		{/if}
+
 		<div class="episodes">
 			{#each episodes as episode, episodeIndex}
-				<section class="episode">
-					<div class="episode-heading">
-						<div>
-							<p class="font-tiny">Episode {episodeIndex + 1} · {shortDate(episode.broadcast)}</p>
-							<h2 class="font-base">{episode.name}</h2>
+				{#if shouldShowCatalogEpisodeForReview(episode, reviewFilter)}
+					<section class="episode">
+						<div class="episode-heading">
+							<div>
+								<p class="font-tiny">Episode {episodeIndex + 1} · {shortDate(episode.broadcast)}</p>
+								<h2 class="font-base">{episode.name}</h2>
+							</div>
+							<p class="font-small-beast">{episodeStatus(episode)}</p>
 						</div>
-						<p class="font-small-beast">{episodeStatus(episode)}</p>
-					</div>
 
-					{#if episode.status === 'error' && !scanning}
-						<div class="retry">
-							<Button size="sm" variant="outline" on:click={() => scanCatalog([episodeIndex])}
-								>Retry</Button
-							>
-						</div>
-					{/if}
+						{#if episode.status === 'error' && !scanning}
+							<div class="retry">
+								<Button size="sm" variant="outline" on:click={() => scanCatalog([episodeIndex])}
+									>Retry</Button
+								>
+							</div>
+						{/if}
 
-					{#if episode.status === 'done' && episode.tracks.length === 0}
-						<p class="empty font-small-beast">No published NTS tracklist.</p>
-					{:else if episode.tracks.length > 0}
-						<div class="tracks">
-							{#each episode.tracks as track}
-								<Track
-									bind:checked={track.checked}
-									bind:selectedMatch={track.selectedMatch}
-									on:reviewchange={captureAndPersistReview}
-									original={{ artist: track.artist, title: track.title }}
-									matches={track.matches}
-								/>
-							{/each}
-						</div>
-					{/if}
-				</section>
+						{#if episode.status === 'done'}
+							<div class="tracks">
+								{#each getCatalogEpisodeReviewTracks(episode, reviewFilter) as track}
+									<Track
+										bind:checked={track.checked}
+										bind:selectedMatch={track.selectedMatch}
+										on:reviewchange={captureAndPersistTrackReview}
+										original={{ artist: track.artist, title: track.title }}
+										matches={track.matches}
+									/>
+								{/each}
+							</div>
+						{:else if episode.tracks.length > 0}
+							<div class="tracks">
+								{#each episode.tracks as track}
+									<Track
+										bind:checked={track.checked}
+										bind:selectedMatch={track.selectedMatch}
+										on:reviewchange={captureAndPersistTrackReview}
+										original={{ artist: track.artist, title: track.title }}
+										matches={track.matches}
+									/>
+								{/each}
+							</div>
+						{/if}
+					</section>
+				{/if}
 			{/each}
 		</div>
 	</article>
@@ -1005,6 +1066,34 @@
 		margin: 0;
 	}
 
+	.review-filters {
+		padding: 20px 24px;
+		border-bottom: 1px solid var(--color-foreground);
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+
+		@media (--md) {
+			padding-inline: 40px;
+		}
+	}
+
+	.review-filter-buttons {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.review-empty {
+		padding: 16px 24px;
+		border-bottom: 1px solid var(--color-foreground);
+
+		@media (--md) {
+			padding-inline: 40px;
+		}
+	}
+
 	.episodes {
 		display: flex;
 		flex-direction: column;
@@ -1036,8 +1125,7 @@
 		counter-reset: track;
 	}
 
-	.retry,
-	.empty {
+	.retry {
 		padding: 12px 24px;
 
 		@media (--md) {

@@ -9,7 +9,9 @@ import {
 	createGeneratedPlaylistText,
 	formatCooldownDuration,
 	formatSpotifyCooldownMessage,
+	getCatalogEpisodeReviewTracks,
 	getCatalogExportUris,
+	getCatalogReviewFilterCounts,
 	getCatalogSummaryCounts,
 	getResumableEpisodeIndexes,
 	isSystemicSpotifyResponseFailure,
@@ -20,11 +22,13 @@ import {
 	restoreCatalogPlaylistOrder,
 	restoreCatalogRetryState,
 	runCatalogWorkers,
+	shouldShowCatalogEpisodeForReview,
 	shouldApplyCatalogRestoration,
 	shouldReturnEpisodeToPending,
 	uniqueSpotifyUris,
 	updateGeneratedPlaylistText,
 	type CatalogProgress,
+	type CatalogReviewFilter,
 	type EpisodeState
 } from './catalog-scan';
 
@@ -166,6 +170,109 @@ describe('catalogue progress restoration', () => {
 			},
 			retry: { cooldownUntil: 0, pausedByRateLimit: false }
 		});
+	});
+});
+
+describe('catalogue review filters', () => {
+	const candidate = reviewTrack.matches[0];
+	const filteredTrack = (
+		title: string,
+		overrides: Partial<EpisodeState['tracks'][number]> = {}
+	): EpisodeState['tracks'][number] => ({
+		...reviewTrack,
+		title,
+		matches: [{ ...candidate }],
+		selectedMatch: null,
+		checked: false,
+		...overrides
+	});
+	const completedEpisode = (tracks: EpisodeState['tracks']): EpisodeState => ({
+		...episode('completed', '2026-01-01'),
+		status: 'done',
+		tracks
+	});
+
+	it('counts scanned track occurrences for every review category', () => {
+		const selected = filteredTrack('Selected', {
+			confident: true,
+			checked: true,
+			selectedMatch: candidate.uri
+		});
+		const primary = filteredTrack('Primary', { fallback: false, confident: false });
+		const fallback = filteredTrack('Fallback', { fallback: true, confident: false });
+		const noCandidates = filteredTrack('No candidates', {
+			matches: [],
+			fallback: true,
+			confident: false
+		});
+		const invalidSelection = filteredTrack('Invalid selection', {
+			confident: true,
+			checked: true,
+			selectedMatch: 'spotify:track:not-a-candidate'
+		});
+		const pending: EpisodeState = {
+			...episode('pending', '2026-02-01'),
+			status: 'pending',
+			tracks: [filteredTrack('Not scanned', { matches: [] })]
+		};
+
+		expect(
+			getCatalogReviewFilterCounts([
+				completedEpisode([selected, primary, fallback, noCandidates, invalidSelection]),
+				pending
+			])
+		).toEqual({
+			all: 5,
+			selected: 1,
+			'primary-review': 1,
+			'fallback-review': 1,
+			'no-candidates': 1
+		});
+	});
+
+	it('classifies primary and fallback review independently of checkbox choices', () => {
+		const primary = filteredTrack('Primary', {
+			fallback: false,
+			confident: false,
+			checked: true,
+			selectedMatch: candidate.uri
+		});
+		const fallback = filteredTrack('Fallback', {
+			fallback: true,
+			confident: false,
+			checked: true,
+			selectedMatch: candidate.uri
+		});
+		const confident = filteredTrack('Confident', { fallback: false, confident: true });
+		const completed = completedEpisode([primary, fallback, confident]);
+
+		expect(getCatalogEpisodeReviewTracks(completed, 'primary-review')).toEqual([primary]);
+		expect(getCatalogEpisodeReviewTracks(completed, 'fallback-review')).toEqual([fallback]);
+		expect(getCatalogEpisodeReviewTracks(completed, 'selected')).toEqual([primary, fallback]);
+	});
+
+	it('preserves track order and keeps incomplete episode states visible', () => {
+		const first = filteredTrack('First', { fallback: true });
+		const second = filteredTrack('Second', { fallback: false });
+		const third = filteredTrack('Third', { fallback: true });
+		const completed = completedEpisode([first, second, third]);
+		const pending: EpisodeState = {
+			...episode('pending', '2026-02-01'),
+			status: 'pending',
+			tracks: []
+		};
+
+		expect(getCatalogEpisodeReviewTracks(completed, 'fallback-review')).toEqual([first, third]);
+		expect(shouldShowCatalogEpisodeForReview(completed, 'no-candidates')).toBe(false);
+		for (const filter of [
+			'all',
+			'selected',
+			'primary-review',
+			'fallback-review',
+			'no-candidates'
+		] as CatalogReviewFilter[]) {
+			expect(shouldShowCatalogEpisodeForReview(pending, filter)).toBe(true);
+		}
 	});
 });
 

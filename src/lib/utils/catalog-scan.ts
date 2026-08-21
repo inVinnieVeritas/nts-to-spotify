@@ -30,6 +30,15 @@ export type EpisodeState = NTSEpisodeSummary & {
 	error?: string;
 };
 
+export type CatalogReviewFilter =
+	| 'all'
+	| 'selected'
+	| 'primary-review'
+	| 'fallback-review'
+	| 'no-candidates';
+
+export type CatalogReviewFilterCounts = Record<CatalogReviewFilter, number>;
+
 export type PlaylistOrder = 'latest-first' | 'oldest-first';
 
 export type CatalogSpotifyRateLimitReason = 'quota-exceeded' | 'rate-limited';
@@ -250,6 +259,57 @@ export const getCatalogSummaryCounts = (episodes: Array<Pick<EpisodeState, 'stat
 		},
 		{ scanned: 0, pending: 0, failed: 0 }
 	);
+
+export const catalogTrackMatchesReviewFilter = (
+	track: ReviewTrack,
+	filter: CatalogReviewFilter
+) => {
+	if (filter === 'all') return true;
+	if (filter === 'selected') {
+		return (
+			track.checked &&
+			track.selectedMatch !== null &&
+			track.matches.some(({ uri }) => uri === track.selectedMatch)
+		);
+	}
+	if (filter === 'no-candidates') return track.matches.length === 0;
+	if (track.confident || track.matches.length === 0) return false;
+	return filter === 'fallback-review' ? track.fallback : !track.fallback;
+};
+
+export const getCatalogReviewFilterCounts = (
+	episodes: Array<Pick<EpisodeState, 'status' | 'tracks'>>
+): CatalogReviewFilterCounts => {
+	const counts: CatalogReviewFilterCounts = {
+		all: 0,
+		selected: 0,
+		'primary-review': 0,
+		'fallback-review': 0,
+		'no-candidates': 0
+	};
+	for (const episode of episodes) {
+		if (episode.status !== 'done') continue;
+		for (const track of episode.tracks) {
+			for (const filter of Object.keys(counts) as CatalogReviewFilter[]) {
+				if (catalogTrackMatchesReviewFilter(track, filter)) counts[filter] += 1;
+			}
+		}
+	}
+	return counts;
+};
+
+export const getCatalogEpisodeReviewTracks = (
+	episode: Pick<EpisodeState, 'status' | 'tracks'>,
+	filter: CatalogReviewFilter
+) =>
+	episode.status === 'done'
+		? episode.tracks.filter((track) => catalogTrackMatchesReviewFilter(track, filter))
+		: [];
+
+export const shouldShowCatalogEpisodeForReview = (
+	episode: Pick<EpisodeState, 'status' | 'tracks'>,
+	filter: CatalogReviewFilter
+) => episode.status !== 'done' || getCatalogEpisodeReviewTracks(episode, filter).length > 0;
 
 export const shouldReturnEpisodeToPending = (status: EpisodeStatus, systemicallyAffected = false) =>
 	status === 'scanning' || status === 'rate-limited' || (systemicallyAffected && status !== 'done');
