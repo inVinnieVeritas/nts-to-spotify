@@ -283,6 +283,77 @@ export const saveCatalogProgress = (progress: CatalogProgress, options: Database
 		saveCatalogProgressUncoordinated(progress, options)
 	);
 
+const updateCatalogProgressUncoordinated = async (
+	showAlias: string,
+	update: (current: CatalogProgress) => CatalogProgress,
+	options: DatabaseOptions = {}
+) => {
+	const database = await openDatabase(options);
+	try {
+		return await new Promise<CatalogProgress>((resolve, reject) => {
+			const transaction = database.transaction(STORE_NAME, 'readwrite');
+			const store = transaction.objectStore(STORE_NAME);
+			const request = store.get(showAlias);
+			let next: CatalogProgress | undefined;
+			let operationError: unknown;
+			let settled = false;
+			const timeout = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				try {
+					transaction.abort();
+				} catch {
+					// The transaction may already be inactive.
+				}
+				reject(new CatalogPersistenceTimeoutError('Updating catalogue progress timed out'));
+			}, options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+			const fail = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				reject(operationError || transaction.error || request.error);
+			};
+			request.onerror = fail;
+			request.onsuccess = () => {
+				const current = request.result as CatalogProgress | undefined;
+				try {
+					if (!current) throw new Error('Catalogue progress is no longer available');
+					next = update(current);
+					if (next.showAlias !== showAlias) throw new Error('Catalogue progress alias changed');
+					if (next !== current) store.put(next);
+				} catch (cause) {
+					operationError = cause;
+					try {
+						transaction.abort();
+					} catch {
+						fail();
+					}
+				}
+			};
+			transaction.onerror = fail;
+			transaction.onabort = fail;
+			transaction.oncomplete = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				if (next) resolve(next);
+				else reject(new Error('Catalogue progress update did not complete'));
+			};
+		});
+	} finally {
+		database.close();
+	}
+};
+
+export const updateCatalogProgress = (
+	showAlias: string,
+	update: (current: CatalogProgress) => CatalogProgress,
+	options: DatabaseOptions = {}
+) =>
+	coordinateCatalogProgressOperation(showAlias, () =>
+		updateCatalogProgressUncoordinated(showAlias, update, options)
+	);
+
 const deleteCatalogProgressUncoordinated = async (
 	showAlias: string,
 	options: DatabaseOptions = {}

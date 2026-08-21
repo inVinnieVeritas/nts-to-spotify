@@ -3,7 +3,9 @@
 	import { Button, Divider, LoginWithSpotify, Logo, Panel } from '$components';
 	import { onMount } from 'svelte';
 	import {
+		applySavedCatalogUpdateOutcome,
 		createSavedCatalogCards,
+		createSavedCatalogUpdateChecker,
 		deleteSavedCatalogProgressIfConfirmed,
 		downloadSavedCatalogProgress,
 		type SavedCatalogCard
@@ -16,6 +18,14 @@
 	let savedCataloguesWarning = '';
 	let savedCataloguesError = '';
 	let deletingAlias: string | undefined;
+	let catalogueCheckStates: Record<
+		string,
+		{
+			type: 'checking' | 'up-to-date' | 'updated' | 'check-failed' | 'save-failed';
+			addedCount?: number;
+		}
+	> = {};
+	const catalogueUpdateChecker = createSavedCatalogUpdateChecker();
 
 	const formatSavedAt = (timestamp: number) =>
 		new Intl.DateTimeFormat(undefined, {
@@ -68,6 +78,37 @@
 		} finally {
 			deletingAlias = undefined;
 		}
+	};
+
+	const checkForNewEpisodes = async (card: SavedCatalogCard) => {
+		if (deletingAlias === card.showAlias || catalogueUpdateChecker.isChecking(card.showAlias))
+			return;
+		catalogueCheckStates = {
+			...catalogueCheckStates,
+			[card.showAlias]: { type: 'checking' }
+		};
+		const outcome = await catalogueUpdateChecker.check(card.showAlias);
+		if (outcome.type === 'already-checking') return;
+		savedCatalogues = applySavedCatalogUpdateOutcome(savedCatalogues, outcome);
+		catalogueCheckStates = {
+			...catalogueCheckStates,
+			[card.showAlias]:
+				outcome.type === 'updated'
+					? { type: 'updated', addedCount: outcome.addedCount }
+					: { type: outcome.type }
+		};
+	};
+
+	const catalogCheckMessage = (showAlias: string) => {
+		const state = catalogueCheckStates[showAlias];
+		if (!state) return '';
+		if (state.type === 'checking') return 'Checking NTS…';
+		if (state.type === 'up-to-date') return 'Up to date';
+		if (state.type === 'check-failed') return 'Check failed. Try again.';
+		if (state.type === 'save-failed') return 'New episodes found but could not be saved.';
+		return state.addedCount === 1
+			? '1 new episode added'
+			: `${state.addedCount || 0} new episodes added`;
 	};
 
 	onMount(() => {
@@ -200,7 +241,31 @@
 										playlist.
 									</p>
 								{/if}
+								{#if catalogueCheckStates[catalogue.showAlias]}
+									<p
+										class:catalogue-warning={catalogueCheckStates[catalogue.showAlias].type ===
+											'check-failed' ||
+											catalogueCheckStates[catalogue.showAlias].type === 'save-failed'}
+										class="font-base"
+										role={catalogueCheckStates[catalogue.showAlias].type === 'check-failed' ||
+										catalogueCheckStates[catalogue.showAlias].type === 'save-failed'
+											? 'alert'
+											: 'status'}
+									>
+										{catalogCheckMessage(catalogue.showAlias)}
+									</p>
+								{/if}
 								<div class="catalogue-actions">
+									<Button
+										type="button"
+										variant="outline"
+										disabled={catalogueCheckStates[catalogue.showAlias]?.type === 'checking' ||
+											deletingAlias === catalogue.showAlias}
+										on:click={() => checkForNewEpisodes(catalogue)}
+										>{catalogueCheckStates[catalogue.showAlias]?.type === 'checking'
+											? 'Checking NTS…'
+											: 'Check for new episodes'}</Button
+									>
 									<Button
 										as="a"
 										variant="outline"
@@ -222,7 +287,8 @@
 									<Button
 										type="button"
 										variant="outline"
-										disabled={Boolean(deletingAlias)}
+										disabled={Boolean(deletingAlias) ||
+											catalogueCheckStates[catalogue.showAlias]?.type === 'checking'}
 										loading={deletingAlias === catalogue.showAlias}
 										on:click={() => deleteLocalProgress(catalogue)}>Delete local progress</Button
 									>

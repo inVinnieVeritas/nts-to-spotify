@@ -6,7 +6,8 @@ import {
 	deleteCatalogProgress,
 	listCatalogProgress,
 	loadCatalogProgress,
-	saveCatalogProgress
+	saveCatalogProgress,
+	updateCatalogProgress
 } from './catalog-progress.client';
 import type { CatalogProgress } from './catalog-scan';
 
@@ -333,6 +334,89 @@ describe('catalogue progress reset', () => {
 		expect(objectStore.delete).toHaveBeenCalledWith('show-a');
 		expect(records.has('show-a')).toBe(false);
 		expect(records.has('show-b')).toBe(true);
+	});
+});
+
+describe('catalogue progress atomic updates', () => {
+	const updateFactory = (initial: CatalogProgress) => {
+		let stored = initial;
+		let writeCompleted = false;
+		let transaction: IDBTransaction;
+		const put = vi.fn((next: CatalogProgress) => {
+			stored = next;
+			queueMicrotask(() => {
+				writeCompleted = true;
+				transaction.oncomplete?.(new Event('complete'));
+			});
+		});
+		const database = {
+			transaction: vi.fn(() => {
+				transaction = {
+					error: null,
+					abort: vi.fn()
+				} as unknown as IDBTransaction;
+				const objectStore = {
+					get: () => {
+						const request = {} as IDBRequest<CatalogProgress>;
+						queueMicrotask(() => {
+							Object.defineProperty(request, 'result', { value: stored });
+							request.onsuccess?.(new Event('success'));
+							if (put.mock.calls.length === 0) {
+								queueMicrotask(() => transaction.oncomplete?.(new Event('complete')));
+							}
+						});
+						return request;
+					},
+					put
+				};
+				Object.assign(transaction, { objectStore: () => objectStore });
+				return transaction;
+			}),
+			close: vi.fn()
+		} as unknown as IDBDatabase;
+		const factory = {
+			open: vi.fn(() => {
+				const request = { result: database } as IDBOpenDBRequest;
+				queueMicrotask(() => request.onsuccess?.(new Event('success')));
+				return request;
+			})
+		} as unknown as IDBFactory;
+		return {
+			factory,
+			database,
+			put,
+			getStored: () => stored,
+			writeCompleted: () => writeCompleted
+		};
+	};
+
+	it('performs no record write and preserves updatedAt for a semantic no-op', async () => {
+		const { factory, database, put, getStored } = updateFactory(progress);
+		const result = await updateCatalogProgress('show', (current) => current, {
+			factory,
+			timeoutMs: 50
+		});
+
+		expect(put).not.toHaveBeenCalled();
+		expect(result.updatedAt).toBe(1);
+		expect(getStored().updatedAt).toBe(1);
+		expect(database.close).toHaveBeenCalledOnce();
+	});
+
+	it('reads the latest queued record and resolves only after its replacement is committed', async () => {
+		const { factory, database, put, getStored, writeCompleted } = updateFactory(progress);
+
+		const result = await updateCatalogProgress(
+			'show',
+			(current) => ({ ...current, updatedAt: 2 }),
+			{ factory, timeoutMs: 50 }
+		);
+
+		expect(result.updatedAt).toBe(2);
+		expect(getStored().updatedAt).toBe(2);
+		expect(put).toHaveBeenCalledOnce();
+		expect(writeCompleted()).toBe(true);
+		expect(database.close).toHaveBeenCalledOnce();
 	});
 });
 
