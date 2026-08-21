@@ -182,6 +182,7 @@ describe('catalogue progress backup', () => {
 		const progress = makeProgress() as CatalogProgress & Record<string, unknown>;
 		progress.updatedAt = EXPORTED_AT_MS;
 		progress.clientSecret = 'secret-value';
+		progress.playlistPreview = { previewFingerprint: 'temporary-preview-value' };
 		(progress.playlist as unknown as Record<string, unknown>).accessToken = 'token-value';
 		(progress.retry as unknown as Record<string, unknown>).environment = 'environment-value';
 		(progress.episodes.older as unknown as Record<string, unknown>).session = 'session-value';
@@ -198,6 +199,7 @@ describe('catalogue progress backup', () => {
 		expect(serialized).not.toContain('header-value');
 		expect(serialized).not.toContain('environment-value');
 		expect(serialized).not.toContain('session-value');
+		expect(serialized).not.toContain('temporary-preview-value');
 	});
 
 	it('accepts the Spotify URI and HTTPS resource shapes produced by the application', () => {

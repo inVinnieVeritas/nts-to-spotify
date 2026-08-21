@@ -706,6 +706,7 @@
 
 	let rawSelectedTracks: string[] = [];
 	let selectedTracks: string[] = [];
+	let playlistPreviewKey = '';
 	let duplicateCount = 0;
 	let summaryCounts = { scanned: 0, pending: 0, failed: 0 };
 	let completedCount = 0;
@@ -721,6 +722,12 @@
 			.map((track) => track.selectedMatch as string)
 	);
 	$: selectedTracks = getCatalogExportUris(episodes, playlistOrder);
+	$: playlistPreviewKey = JSON.stringify(
+		episodes.map((episode) => [
+			episode.episodeAlias,
+			episode.tracks.map((track) => [track.checked, track.selectedMatch])
+		])
+	);
 	$: duplicateCount = rawSelectedTracks.length - selectedTracks.length;
 	$: summaryCounts = getCatalogSummaryCounts(episodes);
 	$: completedCount = summaryCounts.scanned;
@@ -1116,7 +1123,8 @@
 			cover: data.cover,
 			tracks: selectedTracks,
 			public: publicPlaylist,
-			linkedPlaylistId
+			linkedPlaylistId,
+			previewKey: playlistPreviewKey
 		}}
 	/>
 </Panel>
