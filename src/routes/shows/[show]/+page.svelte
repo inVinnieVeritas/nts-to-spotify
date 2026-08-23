@@ -27,6 +27,7 @@
 		downloadCatalogReviewCsv,
 		getCatalogReviewTrackCount
 	} from '$lib/utils/catalog-review-csv.client';
+	import { getTrackPartMismatchWarning } from '$lib/utils/part-mismatch';
 	import {
 		applyDurableCatalogPlaylistLinkTransition,
 		canCreateCatalogSpotifyPlaylist,
@@ -83,7 +84,8 @@
 		{ value: 'selected', label: 'Selected' },
 		{ value: 'primary-review', label: 'Primary review' },
 		{ value: 'fallback-review', label: 'Fallback review' },
-		{ value: 'no-candidates', label: 'No candidates' }
+		{ value: 'no-candidates', label: 'No candidates' },
+		{ value: 'part-mismatches', label: 'Part mismatches' }
 	];
 
 	const shortDate = (date: string) => {
@@ -1099,6 +1101,7 @@
 										on:reviewchange={captureAndPersistTrackReview}
 										original={{ artist: track.artist, title: track.title }}
 										matches={track.matches}
+										partMismatchReason={getTrackPartMismatchWarning(track)?.reason ?? ''}
 									/>
 								{/each}
 							</div>
@@ -1111,6 +1114,7 @@
 										on:reviewchange={captureAndPersistTrackReview}
 										original={{ artist: track.artist, title: track.title }}
 										matches={track.matches}
+										partMismatchReason={getTrackPartMismatchWarning(track)?.reason ?? ''}
 									/>
 								{/each}
 							</div>
