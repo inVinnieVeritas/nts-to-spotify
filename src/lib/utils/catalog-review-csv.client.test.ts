@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Match } from '$lib/types';
 import type { EpisodeState, ReviewTrack } from './catalog-scan';
 import {
+	CATALOG_REVIEW_CSV_COLUMNS,
 	catalogReviewCsvFilename,
 	downloadCatalogReviewCsv,
 	getCatalogReviewCsvRows,
@@ -47,7 +48,11 @@ describe('catalogue review CSV rows', () => {
 	it('uses the visible review classifier and preserves episode, track, and duplicate occurrence order', () => {
 		const primary = match('primary');
 		const alternative = match('alternative', 'Chosen Artist', 'Chosen Title');
-		const repeated = track({ matches: [primary], selectedMatch: primary.uri });
+		const repeated = track({
+			title: 'Work Part II',
+			matches: [{ ...primary, title: 'Work' }],
+			selectedMatch: primary.uri
+		});
 		const episodes = [
 			episode('Old episode', '2026-01-02T12:00:00.000Z', [
 				repeated,
@@ -96,6 +101,12 @@ describe('catalogue review CSV rows', () => {
 			spotifyUrl: ''
 		});
 		expect(rows[0].selected).toBe('yes');
+		expect(rows[0]).toMatchObject({
+			partMismatch: 'yes',
+			partMismatchReason: 'NTS specifies Part II; Spotify suggestion does not.'
+		});
+		expect(rows[1].partMismatch).toBe('no');
+		expect(rows[2]).toMatchObject({ partMismatch: 'no', partMismatchReason: '' });
 	});
 
 	it('writes an Excel-compatible BOM, CRLF rows, Unicode, quoting, and formula protection', () => {
@@ -107,7 +118,8 @@ describe('catalogue review CSV rows', () => {
 		const dangerousValues = ['=equals', '+plus', '-minus', '@at', '\ttab', '\rcarriage'];
 		const csv = serializeCatalogReviewCsv([
 			row,
-			...dangerousValues.map((ntsArtist) => ({ ...row, ntsArtist }))
+			...dangerousValues.map((ntsArtist) => ({ ...row, ntsArtist })),
+			{ ...row, partMismatch: 'yes' as const, partMismatchReason: '=reason' }
 		]);
 
 		expect(csv.startsWith('\uFEFF')).toBe(true);
@@ -119,8 +131,37 @@ describe('catalogue review CSV rows', () => {
 			expect(csv).toContain(`"'${value}"`);
 		}
 		expect(csv).toContain('"\'\r\ncarriage"');
+		expect(csv).toContain('"\'=reason"');
+		expect(CATALOG_REVIEW_CSV_COLUMNS.slice(-2)).toEqual(['Part mismatch', 'Part mismatch reason']);
 		expect(csv.endsWith('\r\n')).toBe(true);
 		expect(csv.replace(/\r\n/g, '')).not.toContain('\n');
+	});
+
+	it('recalculates warning columns from the currently chosen alternative without changing selection', () => {
+		const equivalent = match('equivalent', 'Artist', 'Work Part II');
+		const conflicting = match('conflicting', 'Artist', 'Work Part III');
+		const reviewed = track({
+			title: 'Work Part II',
+			matches: [equivalent, conflicting],
+			selectedMatch: equivalent.uri,
+			checked: false
+		});
+		const episodes = [episode('Episode', '2026-01-02T12:00:00.000Z', [reviewed])];
+
+		expect(getCatalogReviewCsvRows('Show', episodes)[0]).toMatchObject({
+			suggestedSpotifyTitle: 'Work Part II',
+			selected: 'no',
+			partMismatch: 'no',
+			partMismatchReason: ''
+		});
+		reviewed.selectedMatch = conflicting.uri;
+		expect(getCatalogReviewCsvRows('Show', episodes)[0]).toMatchObject({
+			suggestedSpotifyTitle: 'Work Part III',
+			selected: 'no',
+			partMismatch: 'yes',
+			partMismatchReason: 'NTS specifies Part II; Spotify suggestion specifies Part III.'
+		});
+		expect(reviewed.checked).toBe(false);
 	});
 });
 

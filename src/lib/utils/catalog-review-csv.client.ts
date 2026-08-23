@@ -1,4 +1,5 @@
 import type { Match } from '$lib/types';
+import { getTrackPartMismatchWarning } from './part-mismatch';
 import {
 	catalogTrackMatchesReviewFilter,
 	getCatalogReviewFilterCounts,
@@ -19,7 +20,9 @@ export const CATALOG_REVIEW_CSV_COLUMNS = [
 	'Suggested Spotify title',
 	'Selected',
 	'Candidate count',
-	'Spotify URL'
+	'Spotify URL',
+	'Part mismatch',
+	'Part mismatch reason'
 ] as const;
 
 const reviewStatuses = ['primary-review', 'fallback-review', 'no-candidates'] as const;
@@ -41,6 +44,8 @@ export type CatalogReviewCsvRow = {
 	selected: 'yes' | 'no';
 	candidateCount: number;
 	spotifyUrl: string;
+	partMismatch: 'yes' | 'no';
+	partMismatchReason: string;
 };
 
 type DownloadAnchor = {
@@ -89,6 +94,7 @@ export const getCatalogReviewCsvRows = (
 			const reviewStatus = getReviewStatus(track);
 			if (!reviewStatus) return [];
 			const selectedCandidate = getSelectedCandidate(track);
+			const partMismatch = getTrackPartMismatchWarning(track);
 			return [
 				{
 					show: showName,
@@ -108,7 +114,9 @@ export const getCatalogReviewCsvRows = (
 					suggestedSpotifyTitle: selectedCandidate?.title ?? '',
 					selected: catalogTrackMatchesReviewFilter(track, 'selected') ? 'yes' : 'no',
 					candidateCount: track.matches.length,
-					spotifyUrl: selectedCandidate?.href ?? ''
+					spotifyUrl: selectedCandidate?.href ?? '',
+					partMismatch: partMismatch ? 'yes' : 'no',
+					partMismatchReason: partMismatch?.reason ?? ''
 				}
 			];
 		});
@@ -135,7 +143,9 @@ const rowValues = (row: CatalogReviewCsvRow) => [
 	row.suggestedSpotifyTitle,
 	row.selected,
 	row.candidateCount,
-	row.spotifyUrl
+	row.spotifyUrl,
+	row.partMismatch,
+	row.partMismatchReason
 ];
 
 export const serializeCatalogReviewCsv = (rows: CatalogReviewCsvRow[]) =>

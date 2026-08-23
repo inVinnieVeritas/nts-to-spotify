@@ -331,7 +331,12 @@ describe('catalogue review filters', () => {
 			checked: true,
 			selectedMatch: candidate.uri
 		});
-		const primary = filteredTrack('Primary', { fallback: false, confident: false });
+		const primary = filteredTrack('Work Part II', {
+			fallback: false,
+			confident: false,
+			selectedMatch: candidate.uri,
+			matches: [{ ...candidate, title: 'Work' }]
+		});
 		const fallback = filteredTrack('Fallback', { fallback: true, confident: false });
 		const noCandidates = filteredTrack('No candidates', {
 			matches: [],
@@ -359,8 +364,30 @@ describe('catalogue review filters', () => {
 			selected: 1,
 			'primary-review': 1,
 			'fallback-review': 1,
-			'no-candidates': 1
+			'no-candidates': 1,
+			'part-mismatches': 1
 		});
+	});
+
+	it('recalculates the overlapping mismatch subset from the selected alternative', () => {
+		const equivalent = { ...candidate, uri: 'spotify:track:equivalent', title: 'Work Part II' };
+		const conflicting = { ...candidate, uri: 'spotify:track:conflicting', title: 'Work Part III' };
+		const reviewed = filteredTrack('Work Part II', {
+			matches: [equivalent, conflicting],
+			selectedMatch: equivalent.uri,
+			checked: true
+		});
+		const completed = completedEpisode([reviewed]);
+
+		expect(getCatalogReviewFilterCounts([completed])['part-mismatches']).toBe(0);
+		reviewed.selectedMatch = conflicting.uri;
+		expect(getCatalogReviewFilterCounts([completed])).toMatchObject({
+			all: 1,
+			selected: 1,
+			'fallback-review': 1,
+			'part-mismatches': 1
+		});
+		expect(getCatalogEpisodeReviewTracks(completed, 'part-mismatches')).toEqual([reviewed]);
 	});
 
 	it('classifies primary and fallback review independently of checkbox choices', () => {
@@ -388,7 +415,12 @@ describe('catalogue review filters', () => {
 		const first = filteredTrack('First', { fallback: true });
 		const second = filteredTrack('Second', { fallback: false });
 		const third = filteredTrack('Third', { fallback: true });
-		const completed = completedEpisode([first, second, third]);
+		const mismatch = filteredTrack('Work Part II', {
+			fallback: false,
+			matches: [{ ...candidate, title: 'Work' }],
+			selectedMatch: candidate.uri
+		});
+		const completed = completedEpisode([first, mismatch, second, third]);
 		const pending: EpisodeState = {
 			...episode('pending', '2026-02-01'),
 			status: 'pending',
@@ -396,13 +428,16 @@ describe('catalogue review filters', () => {
 		};
 
 		expect(getCatalogEpisodeReviewTracks(completed, 'fallback-review')).toEqual([first, third]);
+		expect(getCatalogEpisodeReviewTracks(completed, 'part-mismatches')).toEqual([mismatch]);
 		expect(shouldShowCatalogEpisodeForReview(completed, 'no-candidates')).toBe(false);
+		expect(shouldShowCatalogEpisodeForReview(completed, 'part-mismatches')).toBe(true);
 		for (const filter of [
 			'all',
 			'selected',
 			'primary-review',
 			'fallback-review',
-			'no-candidates'
+			'no-candidates',
+			'part-mismatches'
 		] as CatalogReviewFilter[]) {
 			expect(shouldShowCatalogEpisodeForReview(pending, filter)).toBe(true);
 		}

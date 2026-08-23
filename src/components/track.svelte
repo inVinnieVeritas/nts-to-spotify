@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { BasicTrack, Match, URI } from '$lib/types';
+	import { PART_MISMATCH_WARNING_PREFIX } from '$lib/utils/part-mismatch';
 	import { createEventDispatcher } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import Button from './button.svelte';
@@ -10,6 +11,7 @@
 	export let matches: undefined | Match[] = undefined;
 	export let selectedMatch: URI | null = null;
 	export let checked = false;
+	export let partMismatchReason = '';
 	const dispatch = createEventDispatcher<{ reviewchange: void }>();
 
 	let expanded = false;
@@ -55,6 +57,11 @@
 			/>
 		</div>
 	</div>
+	{#if partMismatchReason}
+		<p class="part-mismatch font-small-beast">
+			<strong>{PART_MISMATCH_WARNING_PREFIX}</strong>{partMismatchReason}
+		</p>
+	{/if}
 	{#if expanded}
 		<div class="matches" transition:slide={{ duration: 300 }} data-theme="dark">
 			{#each matches || [] as match}
@@ -116,6 +123,16 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
+	}
+
+	.part-mismatch {
+		margin: 0;
+		padding: 0 24px 12px;
+		font-weight: 500;
+
+		@media (--md) {
+			padding-inline: 40px;
+		}
 	}
 
 	.matches {

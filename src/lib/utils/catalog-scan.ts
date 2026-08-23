@@ -1,5 +1,6 @@
 import type { MatchedTrack, NTSEpisodeSummary, URI } from '$lib/types';
 import { isAbortError } from './abort';
+import { getTrackPartMismatchWarning } from './part-mismatch';
 
 export const CATALOG_PROGRESS_SCHEMA_VERSION = 2;
 export const SPOTIFY_MATCHER_VERSION = 1;
@@ -36,7 +37,8 @@ export type CatalogReviewFilter =
 	| 'selected'
 	| 'primary-review'
 	| 'fallback-review'
-	| 'no-candidates';
+	| 'no-candidates'
+	| 'part-mismatches';
 
 export type CatalogReviewFilterCounts = Record<CatalogReviewFilter, number>;
 
@@ -398,6 +400,7 @@ export const catalogTrackMatchesReviewFilter = (
 		);
 	}
 	if (filter === 'no-candidates') return track.matches.length === 0;
+	if (filter === 'part-mismatches') return getTrackPartMismatchWarning(track) !== null;
 	if (track.confident || track.matches.length === 0) return false;
 	return filter === 'fallback-review' ? track.fallback : !track.fallback;
 };
@@ -410,7 +413,8 @@ export const getCatalogReviewFilterCounts = (
 		selected: 0,
 		'primary-review': 0,
 		'fallback-review': 0,
-		'no-candidates': 0
+		'no-candidates': 0,
+		'part-mismatches': 0
 	};
 	for (const episode of episodes) {
 		if (episode.status !== 'done') continue;
