@@ -27,7 +27,7 @@ export const CATALOG_REVIEW_CSV_COLUMNS = [
 
 const reviewStatuses = ['primary-review', 'fallback-review', 'no-candidates'] as const;
 
-export type CatalogReviewStatus = typeof reviewStatuses[number];
+export type CatalogReviewStatus = (typeof reviewStatuses)[number];
 export type CatalogReviewSearchMethod = 'primary' | 'fallback' | 'none';
 
 export type CatalogReviewCsvRow = {
@@ -108,8 +108,8 @@ export const getCatalogReviewCsvRows = (
 						reviewStatus === 'no-candidates'
 							? 'none'
 							: reviewStatus === 'fallback-review'
-							? 'fallback'
-							: 'primary',
+								? 'fallback'
+								: 'primary',
 					suggestedSpotifyArtist: selectedCandidate?.artist ?? '',
 					suggestedSpotifyTitle: selectedCandidate?.title ?? '',
 					selected: catalogTrackMatchesReviewFilter(track, 'selected') ? 'yes' : 'no',

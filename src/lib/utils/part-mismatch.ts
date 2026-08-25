@@ -10,14 +10,7 @@ export type PartMismatchWarning = {
 export const PART_MISMATCH_WARNING_PREFIX = 'Possible part mismatch: ';
 
 type MarkerCategory =
-	| 'part'
-	| 'movement'
-	| 'act'
-	| 'scene'
-	| 'section'
-	| 'medley'
-	| 'excerpt'
-	| 'compound';
+	'part' | 'movement' | 'act' | 'scene' | 'section' | 'medley' | 'excerpt' | 'compound';
 
 type StructuralMarker = {
 	category: MarkerCategory;
@@ -171,8 +164,8 @@ const extractStructure = (title: string) => {
 			match[1] === 'part' || match[1] === 'pt'
 				? 'part'
 				: match[1] === 'movement' || match[1] === 'mvt'
-				? 'movement'
-				: (match[1] as 'act' | 'scene');
+					? 'movement'
+					: (match[1] as 'act' | 'scene');
 		markers.push({ category, value });
 		if (markers.length >= 8) break;
 	}

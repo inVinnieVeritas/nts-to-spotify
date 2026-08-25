@@ -18,7 +18,7 @@
 
 <div>
 	{#if src}
-		<audio bind:this={audio} bind:paused on:play={stopOthers} {src} />
+		<audio bind:this={audio} bind:paused on:play={stopOthers} {src}></audio>
 	{/if}
 	<Button
 		size="sm"

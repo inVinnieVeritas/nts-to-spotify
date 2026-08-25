@@ -46,8 +46,8 @@
 	$: linkedPlaylistId = isSpotifyPlaylistId(data.linkedPlaylistId)
 		? data.linkedPlaylistId
 		: catalogueMode
-		? undefined
-		: responsePlaylistId;
+			? undefined
+			: responsePlaylistId;
 	$: playlistUrl = linkedPlaylistId ? spotifyPlaylistUrl(linkedPlaylistId) : '';
 	$: inputSignature = createPlaylistPreviewInputSignature({
 		playlistId: linkedPlaylistId,
@@ -68,8 +68,8 @@
 				? 'Apply Spotify update'
 				: 'Preview Spotify update'
 			: creationPending
-			? 'Creation outcome pending'
-			: 'Create Spotify playlist'
+				? 'Creation outcome pending'
+				: 'Create Spotify playlist'
 		: 'Import to Spotify';
 
 	const failureMessage = (payload: unknown) => {
@@ -198,7 +198,7 @@
 								operation: 'apply',
 								playlistId: linkedPlaylistId,
 								previewFingerprint: preview.previewFingerprint
-						  }
+							}
 						: {})
 				})
 			});

@@ -359,7 +359,7 @@ const validateProgress = (value: unknown, exportedAt: number): CatalogProgress =
 							'progress.retry.cooldownUntil',
 							CATALOG_BACKUP_EARLIEST_TIMESTAMP,
 							exportedAt + CATALOG_BACKUP_MAX_COOLDOWN_MS
-					  ),
+						),
 			pausedByRateLimit: requiredBoolean(
 				retryRecord.pausedByRateLimit,
 				'progress.retry.pausedByRateLimit'
@@ -448,7 +448,7 @@ const copyProgress = (progress: CatalogProgress): CatalogProgress => ({
 					cooldownUntil: progress.retry.cooldownUntil,
 					pausedByRateLimit: progress.retry.pausedByRateLimit
 				}
-		  }
+			}
 		: {}),
 	...(progress.display
 		? {
@@ -456,7 +456,7 @@ const copyProgress = (progress: CatalogProgress): CatalogProgress => ({
 					showName: progress.display.showName,
 					...(progress.display.showCover ? { showCover: progress.display.showCover } : {})
 				}
-		  }
+			}
 		: {})
 });
 

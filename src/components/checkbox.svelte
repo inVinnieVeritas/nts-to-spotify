@@ -5,7 +5,7 @@
 
 <label>
 	<input bind:checked on:change type="checkbox" {disabled} />
-	<span class="checkmark" />
+	<span class="checkmark"></span>
 </label>
 
 <style lang="postcss">
@@ -37,7 +37,9 @@
 
 			border: 1px solid var(--color-foreground);
 
-			transition: opacity var(--transition-appearance), box-shadow var(--transition-smooth);
+			transition:
+				opacity var(--transition-appearance),
+				box-shadow var(--transition-smooth);
 
 			&:before {
 				--checkmark-border-color: var(--color-foreground);
@@ -48,7 +50,9 @@
 				border-left: 2px solid var(--checkmark-border-color);
 				border-bottom: 2px solid var(--checkmark-border-color);
 
-				transition: width var(--transition-motion), height var(--transition-motion),
+				transition:
+					width var(--transition-motion),
+					height var(--transition-motion),
 					transform var(--transition-motion);
 			}
 		}
@@ -59,7 +63,7 @@
 			pointer-events: none;
 		}
 
-		& input::focus-visible ~ .checkmark {
+		& input:focus-visible ~ .checkmark {
 			box-shadow: 0 0 0 2px hsl(var(--color-foreground-hsl) / 0.5);
 		}
 

@@ -36,3 +36,12 @@ npm run build
 
 Spotify OAuth requests public and private playlist modification scopes. Users who authenticated
 before those scopes were added need to log out and reconnect Spotify.
+
+## Development toolchain notes
+
+- The newest stable SvelteKit currently brings `@polka/url@1.0.0-next.29` through Sirv. This
+  unavoidable transitive dependency must not be overridden to the incompatible stable 0.5.0
+  release.
+- The full npm audit reports three Low nodes for one `cookie@0.6.0` advisory through SvelteKit and
+  adapter-auto. The application uses fixed cookie names and paths, `npm audit --omit=dev` reports
+  zero vulnerabilities, and no compatible upstream correction is currently available.

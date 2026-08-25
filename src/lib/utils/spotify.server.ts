@@ -156,8 +156,8 @@ export const isSpotifyResponseValidationError = (
 ): cause is { name: 'SpotifyResponseValidationError' } =>
 	Boolean(
 		cause &&
-			typeof cause === 'object' &&
-			(cause as Record<string, unknown>).name === 'SpotifyResponseValidationError'
+		typeof cause === 'object' &&
+		(cause as Record<string, unknown>).name === 'SpotifyResponseValidationError'
 	);
 
 export const isSpotifyRateLimitError = (
@@ -652,9 +652,9 @@ const requestSpotifySearchAttempt = async (
 										response.status === 401 || response.status === 403
 											? 'authentication'
 											: response.status >= 500
-											? 'upstream'
-											: 'unexpected'
-							  };
+												? 'upstream'
+												: 'unexpected'
+								};
 						await response.body?.cancel().catch(() => undefined);
 						throw httpFailureError(observedHttpFailure);
 					}

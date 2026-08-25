@@ -42,7 +42,7 @@ const savedEpisode = (
 						selectedMatch: 'spotify:track:0123456789ABCDEFGHIJKL',
 						checked: false
 					}
-			  ]
+				]
 			: [],
 	...(status === 'error' ? { error: 'Could not scan this episode' } : {})
 });

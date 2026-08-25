@@ -6,11 +6,7 @@ export const SPOTIFY_TOKEN_TIMEOUT_MS = 15_000;
 const MAX_TOKEN_LENGTH = 16_384;
 
 export type SpotifyTokenFailureReason =
-	| 'authentication'
-	| 'upstream'
-	| 'network'
-	| 'timeout'
-	| 'invalid-response';
+	'authentication' | 'upstream' | 'network' | 'timeout' | 'invalid-response';
 
 export class SpotifyTokenAcquisitionError extends Error {
 	constructor(public readonly reason: SpotifyTokenFailureReason) {
@@ -25,12 +21,12 @@ export const isSpotifyTokenAcquisitionError = (
 	cause instanceof SpotifyTokenAcquisitionError ||
 	Boolean(
 		cause &&
-			typeof cause === 'object' &&
-			(cause as { name?: unknown }).name === 'SpotifyTokenAcquisitionError' &&
-			typeof (cause as { reason?: unknown }).reason === 'string' &&
-			['authentication', 'upstream', 'network', 'timeout', 'invalid-response'].includes(
-				(cause as { reason: string }).reason
-			)
+		typeof cause === 'object' &&
+		(cause as { name?: unknown }).name === 'SpotifyTokenAcquisitionError' &&
+		typeof (cause as { reason?: unknown }).reason === 'string' &&
+		['authentication', 'upstream', 'network', 'timeout', 'invalid-response'].includes(
+			(cause as { reason: string }).reason
+		)
 	);
 
 export type ValidatedSpotifyToken = {

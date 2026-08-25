@@ -25,8 +25,8 @@ import {
 
 const SPOTIFY_PLAYLIST_TIMEOUT_MS = 20_000;
 const SPOTIFY_PLAYLIST_ROUTE_TIMEOUT_MS = 5 * 60 * 1000;
-export const SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
-export const SPOTIFY_PLAYLIST_MAX_TRACKS = 10_000;
+export const _SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const SPOTIFY_PLAYLIST_MAX_TRACKS = 10_000;
 
 type PlaylistSyncRequest = {
 	operation: 'sync';
@@ -50,10 +50,7 @@ type PlaylistApplyRequest = Omit<PlaylistSyncRequest, 'operation' | 'playlistId'
 
 type PlaylistVerifyRequest = { operation: 'verify'; playlistId: string };
 type PlaylistRequest =
-	| PlaylistSyncRequest
-	| PlaylistPreviewRequest
-	| PlaylistApplyRequest
-	| PlaylistVerifyRequest;
+	PlaylistSyncRequest | PlaylistPreviewRequest | PlaylistApplyRequest | PlaylistVerifyRequest;
 
 type SpotifyPlaylistFailureCategory =
 	| 'authentication'
@@ -108,13 +105,13 @@ const readChunk = <T>(reader: ReadableStreamDefaultReader<T>, signal: AbortSigna
 		);
 	});
 
-export const readBoundedPlaylistRequestBody = async (request: Request, signal: AbortSignal) => {
+const readBoundedPlaylistRequestBody = async (request: Request, signal: AbortSignal) => {
 	const declaredLengthHeader = request.headers.get('Content-Length');
 	if (declaredLengthHeader && /^\d+$/.test(declaredLengthHeader.trim())) {
 		const declaredLength = Number(declaredLengthHeader);
 		if (
 			!Number.isSafeInteger(declaredLength) ||
-			declaredLength > SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES
+			declaredLength > _SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES
 		) {
 			throw new SpotifyPlaylistFailure('request-rejected');
 		}
@@ -129,7 +126,7 @@ export const readBoundedPlaylistRequestBody = async (request: Request, signal: A
 			const { done, value } = await readChunk(reader, signal);
 			if (done) break;
 			total += value.byteLength;
-			if (total > SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES) {
+			if (total > _SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES) {
 				await reader.cancel().catch(() => undefined);
 				throw new SpotifyPlaylistFailure('request-rejected');
 			}
@@ -252,14 +249,14 @@ const requestSpotify = async (
 						response.status === 401
 							? 'authentication'
 							: response.status === 403 && options.inaccessible
-							? 'inaccessible'
-							: response.status === 403
-							? 'authentication'
-							: response.status === 404 && options.notFound
-							? 'not-found'
-							: response.status >= 500
-							? 'upstream'
-							: 'request-rejected';
+								? 'inaccessible'
+								: response.status === 403
+									? 'authentication'
+									: response.status === 404 && options.notFound
+										? 'not-found'
+										: response.status >= 500
+											? 'upstream'
+											: 'request-rejected';
 					await response.body?.cancel().catch(() => undefined);
 					throw new SpotifyPlaylistFailure(category);
 				}

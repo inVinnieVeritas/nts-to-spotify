@@ -29,6 +29,7 @@ const requestFor = (body: unknown = { showAlias: 'test-show' }) =>
 	});
 
 beforeEach(() => {
+	vi.clearAllMocks();
 	vi.mocked(getNTSShowCatalog).mockResolvedValue(validCatalog);
 });
 
