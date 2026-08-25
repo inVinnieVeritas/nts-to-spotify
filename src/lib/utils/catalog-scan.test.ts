@@ -586,6 +586,7 @@ describe('catalogue cooldown display', () => {
 				spotifySessionMetrics: {
 					searchRequests: 123,
 					cacheHits: 18,
+					persistentCacheHits: 7,
 					transientRetries: 4,
 					rateLimitResponses: 2,
 					quotaExceededResponses: 1
@@ -594,6 +595,7 @@ describe('catalogue cooldown display', () => {
 		).toEqual({
 			searchRequests: 123,
 			cacheHits: 18,
+			persistentCacheHits: 7,
 			transientRetries: 4,
 			rateLimitResponses: 2,
 			quotaExceededResponses: 1

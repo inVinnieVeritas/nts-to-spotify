@@ -27,6 +27,21 @@ Paste either a show URL such as `https://www.nts.live/shows/jim-o-rourke` or an 
 episode URL into the search bar. A full catalogue scan can take several minutes because Spotify
 requests are deliberately rate-limited and uncertain matches require review.
 
+## Local Spotify match cache
+
+Successful Spotify matches are cached in `.data/spotify-match-cache` on the local Node
+installation. This reduces repeated searches across scans and restarts, but it neither increases
+nor reveals Spotify quota. The cache contains public match metadata, not credentials. Deleting
+that directory clears only the match cache and does not delete catalogue progress. Serverless
+hosts may not preserve local files; a durable hosted adapter remains future deployment work.
+
+The cache directory must be owned and writable only by the operating-system account running the
+application. Shared or adversarially writable project directories are unsupported; public hosting
+must keep both application and cache directories inaccessible to untrusted writers. The cache
+contains no credentials or private Spotify account data. Node cannot provide fully handle-relative
+filesystem operations on every supported platform, so the cache fails closed on detected links or
+path replacement but does not claim protection against continuous same-user path replacement.
+
 ## Checks
 
 ```bash
