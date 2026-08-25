@@ -1,4 +1,4 @@
-<div />
+<div></div>
 
 <style lang="postcss">
 	div {

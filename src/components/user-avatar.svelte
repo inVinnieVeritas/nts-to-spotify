@@ -15,13 +15,19 @@
 			<form method="POST" action="/logout">
 				<Button variant="ghost" type="submit">
 					<p class="font-small-beast">Logout</p>
-					<div class="avatar" style:background-image={me.image ? `url(${me.image})` : undefined} />
+					<div
+						class="avatar"
+						style:background-image={me.image ? `url(${me.image})` : undefined}
+					></div>
 				</Button>
 			</form>
 		{:else}
 			<Button variant="ghost" on:click={() => (isLoggingOut = true)}>
 				<p class="font-small-beast">{me.display_name}</p>
-				<div class="avatar" style:background-image={me.image ? `url(${me.image})` : undefined} />
+				<div
+					class="avatar"
+					style:background-image={me.image ? `url(${me.image})` : undefined}
+				></div>
 			</Button>
 		{/if}
 	</div>

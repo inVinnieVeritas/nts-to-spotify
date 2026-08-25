@@ -963,8 +963,7 @@
 						bind:value={playlistDescription}
 						on:input={captureAndPersistReview}
 						maxlength="300"
-						rows="4"
-					/>
+						rows="4"></textarea>
 				</label>
 				<label class="font-small-beast">
 					PLAYLIST ORDER
@@ -978,8 +977,7 @@
 					</select>
 					<span id="playlist-order-help" class="playlist-order-help font-tiny">
 						<strong>This choice controls the track order in the Spotify playlist.</strong> Tracks within
-						each episode keep their original order. The catalogue below remains oldest to newest for
-						review.
+						each episode keep their original order. The catalogue below remains oldest to newest for review.
 					</span>
 				</label>
 				<label class="visibility font-base">

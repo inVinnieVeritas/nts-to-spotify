@@ -31,7 +31,7 @@
 		<slot />
 	</span>
 	{#if loading}
-		<div class="spinner" />
+		<div class="spinner"></div>
 	{/if}
 </svelte:element>
 
@@ -68,7 +68,9 @@
 		height: var(--button-size);
 		box-sizing: border-box;
 
-		transition: opacity var(--transition-appearance), box-shadow var(--transition-smooth);
+		transition:
+			opacity var(--transition-appearance),
+			box-shadow var(--transition-smooth);
 
 		@media (hover: hover) {
 			&:hover {

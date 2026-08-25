@@ -9,6 +9,7 @@ module.exports = {
 					importFrom: ['./src/styles/media.pcss']
 				},
 				'nesting-rules': true,
+				'focus-visible-pseudo-class': false,
 				'custom-properties': false
 			}
 		})

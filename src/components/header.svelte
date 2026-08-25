@@ -19,7 +19,7 @@
 				<Logo />
 			</a>
 			{#if navigating}
-				<div class="spinner" />
+				<div class="spinner"></div>
 			{/if}
 		</div>
 		<div class="right">

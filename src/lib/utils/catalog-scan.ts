@@ -33,12 +33,7 @@ export type EpisodeState = NTSEpisodeSummary & {
 };
 
 export type CatalogReviewFilter =
-	| 'all'
-	| 'selected'
-	| 'primary-review'
-	| 'fallback-review'
-	| 'no-candidates'
-	| 'part-mismatches';
+	'all' | 'selected' | 'primary-review' | 'fallback-review' | 'no-candidates' | 'part-mismatches';
 
 export type CatalogReviewFilterCounts = Record<CatalogReviewFilter, number>;
 
@@ -166,9 +161,9 @@ export const isCatalogProgressCompatible = (
 ): progress is CatalogProgress =>
 	Boolean(
 		progress &&
-			(progress.schemaVersion === CATALOG_PROGRESS_SCHEMA_VERSION ||
-				progress.schemaVersion === LEGACY_CATALOG_PROGRESS_SCHEMA_VERSION) &&
-			progress.matcherVersion === SPOTIFY_MATCHER_VERSION
+		(progress.schemaVersion === CATALOG_PROGRESS_SCHEMA_VERSION ||
+			progress.schemaVersion === LEGACY_CATALOG_PROGRESS_SCHEMA_VERSION) &&
+		progress.matcherVersion === SPOTIFY_MATCHER_VERSION
 	);
 
 export const restoreCatalogRetryState = (
@@ -296,9 +291,9 @@ export const createGeneratedPlaylistText = (
 			oldest && newest
 				? `A comprehensive archive of tracks played on ${showName} on NTS Radio, covering broadcasts from ${longPlaylistDate(
 						oldest.broadcast
-				  )} through ${longPlaylistDate(
+					)} through ${longPlaylistDate(
 						newest.broadcast
-				  )}. Some tracks unavailable on Spotify may be missing.`
+					)}. Some tracks unavailable on Spotify may be missing.`
 				: `Tracks played on ${showName} on NTS Radio. Some tracks unavailable on Spotify may be missing.`,
 		dateStamp
 	};
@@ -332,9 +327,9 @@ export const createLegacyGeneratedPlaylistText = (
 			first && last && oldest && newest
 				? `“${normalizedName}” ${dateStamp} — A comprehensive archive of tracks played on ${showName} on NTS Radio, covering broadcasts from ${longPlaylistDate(
 						oldest.broadcast
-				  )} through ${longPlaylistDate(
+					)} through ${longPlaylistDate(
 						newest.broadcast
-				  )}. Some tracks unavailable on Spotify may be missing.`
+					)}. Some tracks unavailable on Spotify may be missing.`
 				: `Tracks played on ${showName} on NTS Radio. Some tracks unavailable on Spotify may be missing.`,
 		dateStamp
 	};
@@ -498,16 +493,18 @@ export const formatCooldownDuration = (seconds: number) => {
 	return parts.join(' ');
 };
 
-export const parseCatalogSpotifyRateLimitReason = (value: unknown): CatalogSpotifyRateLimitReason =>
+export const parseCatalogSpotifyRateLimitReason = (
+	value: unknown
+): CatalogSpotifyRateLimitReason =>
 	value === 'quota-exceeded' ? 'quota-exceeded' : 'rate-limited';
 
 export const isSystemicSpotifyResponseFailure = (payload: unknown) =>
 	Boolean(
 		payload &&
-			typeof payload === 'object' &&
-			!Array.isArray(payload) &&
-			((payload as Record<string, unknown>).error === 'spotify_response_invalid' ||
-				(payload as Record<string, unknown>).error === 'spotify_search_unavailable')
+		typeof payload === 'object' &&
+		!Array.isArray(payload) &&
+		((payload as Record<string, unknown>).error === 'spotify_response_invalid' ||
+			(payload as Record<string, unknown>).error === 'spotify_search_unavailable')
 	);
 
 export const isSafeRetryAfterSeconds = (seconds: unknown, now = Date.now()): seconds is number => {

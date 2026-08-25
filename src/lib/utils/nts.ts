@@ -7,9 +7,9 @@ export const showParamToNtsUrl = (show: string) => `https://nts.live/shows/${sho
 export const isValidNTSSlug = (value: string) => /^[a-z0-9-]+$/.test(value);
 
 export const ntsUrlToParams = (url: string) => {
-	if (
-		!(url.startsWith('https://www.nts.live/shows/') || url.startsWith('https://nts.live/shows/'))
-	) {
+	if (!(
+		url.startsWith('https://www.nts.live/shows/') || url.startsWith('https://nts.live/shows/')
+	)) {
 		throw new Error(`Expecting an NTS episode. Received: ${url}`);
 	}
 
@@ -35,7 +35,7 @@ export const ntsUrlToRouteUrl = (url: string) => {
 		}
 
 		throw new Error();
-	} catch (error) {
+	} catch {
 		return '/404';
 	}
 };

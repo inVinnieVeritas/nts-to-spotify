@@ -9,7 +9,7 @@ import {
 	getSpotifySessionMetrics,
 	resetSpotifyServerSessionForTests
 } from '$lib/utils/spotify.server';
-import { POST, SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES } from './+server';
+import { POST, _SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES } from './+server';
 
 const PLAYLIST_ID = 'ABCDEFGHIJKLMNOPQRSTUV';
 const USER_ID = 'current-user';
@@ -55,7 +55,7 @@ const requestFor = (overrides: Record<string, unknown> = {}) => {
 				description: String(values.description),
 				tracks: uniqueSpotifyUris(values.tracks as string[]),
 				public: values.public as boolean
-		  })
+			})
 		: undefined;
 	return new Request('http://localhost/api/spotify/playlist', {
 		method: 'POST',
@@ -66,7 +66,7 @@ const requestFor = (overrides: Record<string, unknown> = {}) => {
 				? {
 						operation: 'apply',
 						previewFingerprint: generatedFingerprint
-				  }
+					}
 				: {}),
 			...overrides
 		})
@@ -691,7 +691,7 @@ describe('/api/spotify/playlist synchronization', () => {
 	it('rejects an oversized declared payload before authentication or parsing', async () => {
 		const fetcher = vi.fn();
 		const request = requestFor();
-		request.headers.set('Content-Length', String(SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES + 1));
+		request.headers.set('Content-Length', String(_SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES + 1));
 		const response = await POST({ request, fetch: fetcher } as never);
 
 		expect(response.status).toBe(400);
@@ -704,7 +704,7 @@ describe('/api/spotify/playlist synchronization', () => {
 		let cancelled = false;
 		const stream = new ReadableStream<Uint8Array>({
 			start(controller) {
-				controller.enqueue(new Uint8Array(SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES));
+				controller.enqueue(new Uint8Array(_SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES));
 				controller.enqueue(new Uint8Array(1));
 			},
 			cancel() {

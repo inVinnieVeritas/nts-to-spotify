@@ -8,7 +8,7 @@ export const load: PageServerLoad = async ({ params, fetch }) => {
 
 	try {
 		return await getNTSShowCatalog(params.show, fetch as typeof globalThis.fetch);
-	} catch (cause) {
+	} catch {
 		console.error('Catalogue load failed', 'nts_catalogue_unavailable');
 		throw error(502, `Unable to load show from ${showParamToNtsUrl(params.show)}`);
 	}

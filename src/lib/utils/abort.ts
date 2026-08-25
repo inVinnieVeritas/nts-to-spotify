@@ -22,10 +22,13 @@ export const abortableDelay = (ms: number, signal?: AbortSignal) =>
 	new Promise<void>((resolve, reject) => {
 		throwIfAborted(signal);
 
-		const timeout = setTimeout(() => {
-			cleanup();
-			resolve();
-		}, Math.max(0, ms));
+		const timeout = setTimeout(
+			() => {
+				cleanup();
+				resolve();
+			},
+			Math.max(0, ms)
+		);
 		const onAbort = () => {
 			clearTimeout(timeout);
 			cleanup();
