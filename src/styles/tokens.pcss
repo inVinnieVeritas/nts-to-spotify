@@ -38,24 +38,24 @@
 	--transition-smooth: 400ms cubic-bezier(0.9, 0, 0.05, 1);
 	--transition-in-out: 300ms ease-in-out;
 
-	@media (prefers-reduced-motion: reduce) {
-		:root {
-			--transition-appearance: 0s linear;
-			--transition-motion: 0s linear;
-			--transition-smooth: 0s linear;
-			--transition-in-out: 0s linear;
-		}
-
-		* {
-			animation: none !important;
-			transition: none !important;
-		}
-	}
-
 	/* Palette */
 
 	--color-black-hsl: 0deg 0% 0%;
 	--color-black: hsl(var(--color-black-hsl), 1);
 	--color-white-hsl: 0deg 0% 100%;
 	--color-white: hsl(var(--color-white-hsl), 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--transition-appearance: 0s linear;
+		--transition-motion: 0s linear;
+		--transition-smooth: 0s linear;
+		--transition-in-out: 0s linear;
+	}
+
+	* {
+		animation: none !important;
+		transition: none !important;
+	}
 }

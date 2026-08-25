@@ -63,7 +63,10 @@ const savedProgress = (overrides: Partial<CatalogProgress> = {}): CatalogProgres
 		public: false
 	},
 	retry: { cooldownUntil: 0, pausedByRateLimit: false },
-	display: { showName: "Jim O'Rourke", showCover: 'https://images.example.test/show.jpg' },
+	display: {
+		showName: "Jim O'Rourke",
+		showCover: 'https://media.ntslive.co.uk/crop/770x770/show.jpg'
+	},
 	...overrides
 });
 
@@ -73,7 +76,7 @@ describe('saved catalogue dashboard summaries', () => {
 
 		expect(card).toMatchObject({
 			showName: "Jim O'Rourke",
-			showCover: 'https://images.example.test/show.jpg',
+			showCover: 'https://media.ntslive.co.uk/crop/770x770/show.jpg',
 			scanned: 1,
 			pending: 1,
 			failed: 1,

@@ -1,4 +1,5 @@
 import type { NTSShowCatalog, NTSEpisodeSummary } from '$lib/types';
+import { parseOfficialNTSArtworkUrl } from './artwork';
 import {
 	isCatalogProgressCompatible,
 	reconcileEpisodes,
@@ -21,16 +22,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isBoundedString = (value: unknown, maximum: number, allowEmpty = false): value is string =>
 	typeof value === 'string' && value.length <= maximum && (allowEmpty || value.trim().length > 0);
 
-const isSafeHttpsUrl = (value: unknown) => {
-	if (value === '') return true;
-	if (!isBoundedString(value, MAX_URL_LENGTH)) return false;
-	try {
-		const url = new URL(value);
-		return url.protocol === 'https:' && Boolean(url.hostname) && !url.username && !url.password;
-	} catch {
-		return false;
-	}
-};
+const isSafeNTSArtworkUrl = (value: unknown) =>
+	value === '' ||
+	(isBoundedString(value, MAX_URL_LENGTH) && parseOfficialNTSArtworkUrl(value) !== undefined);
 
 const isEpisodeSummary = (value: unknown): value is NTSEpisodeSummary => {
 	if (!isRecord(value)) return false;
@@ -40,7 +34,7 @@ const isEpisodeSummary = (value: unknown): value is NTSEpisodeSummary => {
 		isBoundedString(value.name, MAX_NAME_LENGTH) &&
 		isBoundedString(value.broadcast, 100) &&
 		Number.isFinite(Date.parse(value.broadcast)) &&
-		isSafeHttpsUrl(value.cover) &&
+		isSafeNTSArtworkUrl(value.cover) &&
 		Array.isArray(value.genres) &&
 		value.genres.length <= MAX_GENRES_PER_EPISODE &&
 		value.genres.every((genre) => isBoundedString(genre, MAX_GENRE_LENGTH, true))
@@ -54,7 +48,7 @@ export const isNTSShowCatalog = (value: unknown): value is NTSShowCatalog => {
 		/^[a-z0-9-]+$/.test(value.showAlias) &&
 		isBoundedString(value.name, MAX_NAME_LENGTH) &&
 		isBoundedString(value.description, MAX_DESCRIPTION_LENGTH, true) &&
-		isSafeHttpsUrl(value.cover) &&
+		isSafeNTSArtworkUrl(value.cover) &&
 		Array.isArray(value.episodes) &&
 		value.episodes.length <= MAX_CATALOG_EPISODES &&
 		value.episodes.every(isEpisodeSummary)

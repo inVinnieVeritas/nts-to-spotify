@@ -1,4 +1,3 @@
-import { env } from '$env/dynamic/private';
 import type { BasicTrack, Match, MatchedTrack } from '$lib/types';
 import {
 	abortableDelay,
@@ -9,8 +8,10 @@ import {
 } from './abort';
 import { isSafeRetryAfterSeconds, SPOTIFY_MATCHER_VERSION } from './catalog-scan';
 import { fetchWithTimeout, type Fetcher } from './request';
+import { getSpotifyConfiguration } from './spotify-config.server';
+import { parseOfficialSpotifyArtworkUrl } from './artwork';
+import { requestSpotifyToken } from './spotify-token.server';
 
-const TOKEN_TIMEOUT_MS = 15_000;
 const SEARCH_TIMEOUT_MS = 20_000;
 export const SPOTIFY_SEARCH_INTERVAL_MS = 2_000;
 export const SPOTIFY_TRANSIENT_RETRY_DELAYS_MS = [2_000, 5_000] as const;
@@ -465,37 +466,20 @@ export const createSpotifySearchCacheKey = (
 	].join('\u0000');
 
 export const getClientCredentials = async (request: Fetcher = fetch, signal?: AbortSignal) => {
+	const configuration = getSpotifyConfiguration();
+	if (!configuration) return null;
 	if (cachedToken && cachedToken.expiresAt > Date.now()) return cachedToken.value;
-	if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) return null;
 
-	const data = await fetchWithTimeout(
+	const data = await requestSpotifyToken(
 		request,
-		'https://accounts.spotify.com/api/token',
-		{
-			method: 'POST',
-			body: new URLSearchParams({ grant_type: 'client_credentials' }),
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded',
-				Authorization: `Basic ${Buffer.from(
-					`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
-				).toString('base64')}`
-			}
-		},
-		TOKEN_TIMEOUT_MS,
-		async (response) => {
-			if (!response.ok) {
-				await response.body?.cancel();
-				return null;
-			}
-			return (await response.json()) as { access_token: string; expires_in: number };
-		},
-		signal
+		configuration,
+		new URLSearchParams({ grant_type: 'client_credentials' }),
+		{ requireRefreshToken: false, signal }
 	);
 
-	if (!data) return null;
 	cachedToken = {
-		value: data.access_token,
-		expiresAt: Date.now() + Math.max(0, data.expires_in - 60) * 1000
+		value: data.accessToken,
+		expiresAt: Date.now() + Math.max(0, data.expiresIn - 60) * 1000
 	};
 	return cachedToken.value;
 };
@@ -569,7 +553,7 @@ const parseSpotifyCandidate = (value: unknown): ParsedSpotifyCandidate | null =>
 			if (!Array.isArray(value.album.images)) adjusted = true;
 			else {
 				for (const image of value.album.images) {
-					const imageUrl = isRecord(image) ? safeOptionalHttpsUrl(image.url) : undefined;
+					const imageUrl = isRecord(image) ? parseOfficialSpotifyArtworkUrl(image.url) : undefined;
 					if (!imageUrl) adjusted = true;
 					else if (!cover) cover = imageUrl;
 				}

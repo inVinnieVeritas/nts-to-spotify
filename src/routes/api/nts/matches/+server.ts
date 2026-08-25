@@ -13,12 +13,21 @@ import {
 	searchSpotifyTrack
 } from '$lib/utils/spotify.server';
 import { getAccessToken } from '$lib/utils/auth.server';
+import { isSpotifyTokenAcquisitionError } from '$lib/utils/spotify-token.server';
 import { createAbortScope, isAbortError, RequestTimeoutError } from '$lib/utils/abort';
 
 const EPISODE_TIMEOUT_MS = 3 * 60 * 1000;
 
 export const POST: RequestHandler = async (event) => {
-	if (!(await getAccessToken(event))) throw error(401, 'Login with Spotify first');
+	try {
+		if (!(await getAccessToken(event))) throw error(401, 'Login with Spotify first');
+	} catch (cause) {
+		if (cause && typeof cause === 'object' && 'status' in cause) throw cause;
+		if (isSpotifyTokenAcquisitionError(cause)) {
+			throw error(502, 'Spotify authorization is temporarily unavailable');
+		}
+		throw error(502, 'Spotify authorization is temporarily unavailable');
+	}
 
 	const { request, fetch } = event;
 	const { show, episode } = (await request.json()) as { show?: string; episode?: string };
@@ -30,7 +39,7 @@ export const POST: RequestHandler = async (event) => {
 	const scope = createAbortScope(request.signal, EPISODE_TIMEOUT_MS);
 	try {
 		const token = await getClientCredentials(fetch as typeof globalThis.fetch, scope.signal);
-		if (!token) throw error(401, 'Spotify application credentials are not configured');
+		if (!token) throw error(503, 'Spotify application is not configured');
 		const tracks = await getNTSEpisodeTracklist(
 			show,
 			episode,
@@ -82,11 +91,18 @@ export const POST: RequestHandler = async (event) => {
 				{ status: 503 }
 			);
 		}
+		if (isSpotifyTokenAcquisitionError(cause)) {
+			throw error(502, 'Spotify token service is temporarily unavailable');
+		}
 		if (cause instanceof RequestTimeoutError || scope.didTimeout()) {
 			throw error(504, 'Episode scan timed out');
 		}
 		if (isAbortError(cause)) throw error(499, 'Episode scan cancelled');
-		if (cause && typeof cause === 'object' && 'status' in cause) throw cause;
+		if (cause && typeof cause === 'object' && 'status' in cause && 'body' in cause) {
+			const status = (cause as { status: unknown }).status;
+			const message = (cause as { body?: { message?: unknown } }).body?.message;
+			if (status === 503 && message === 'Spotify application is not configured') throw cause;
+		}
 		console.error('Catalogue episode matching failed', 'unexpected_error');
 		throw error(502, 'Unable to match this NTS episode');
 	} finally {

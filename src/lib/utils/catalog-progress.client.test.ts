@@ -10,6 +10,7 @@ import {
 	updateCatalogProgress
 } from './catalog-progress.client';
 import type { CatalogProgress } from './catalog-scan';
+import { captureCatalogProgress, reconcileEpisodesPreservingSaved } from './catalog-scan';
 
 const progress: CatalogProgress = {
 	schemaVersion: 2,
@@ -22,6 +23,58 @@ const progress: CatalogProgress = {
 };
 
 describe('catalogue IndexedDB deadlines', () => {
+	it('persists a snapshot containing an upstream-omitted saved boundary episode', async () => {
+		const omitted = {
+			episodeAlias: 'omitted-oldest',
+			name: 'Omitted oldest',
+			broadcast: '2025-01-01T00:00:00.000Z',
+			cover: '',
+			genres: [],
+			status: 'done' as const,
+			tracks: []
+		};
+		const present = {
+			...omitted,
+			episodeAlias: 'present',
+			name: 'Present',
+			broadcast: '2026-01-01T00:00:00.000Z'
+		};
+		const saved = { ...progress, episodes: { [omitted.episodeAlias]: omitted, present } };
+		const reconciled = reconcileEpisodesPreservingSaved([present], saved);
+		const snapshot = captureCatalogProgress('show', reconciled, saved.playlist);
+		const put = vi.fn();
+		const transaction = {
+			error: null,
+			abort: vi.fn(),
+			objectStore: () => ({ put })
+		} as unknown as IDBTransaction;
+		const database = {
+			transaction: vi.fn(() => {
+				queueMicrotask(() => transaction.oncomplete?.(new Event('complete')));
+				return transaction;
+			}),
+			close: vi.fn()
+		} as unknown as IDBDatabase;
+		const openRequest = { result: database } as IDBOpenDBRequest;
+		const factory = {
+			open: vi.fn(() => {
+				queueMicrotask(() => openRequest.onsuccess?.(new Event('success')));
+				return openRequest;
+			})
+		} as unknown as IDBFactory;
+
+		await saveCatalogProgress(snapshot, { factory, timeoutMs: 100 });
+		expect(put).toHaveBeenCalledWith(
+			expect.objectContaining({
+				episodes: expect.objectContaining({
+					'omitted-oldest': expect.objectContaining({ status: 'done' }),
+					present: expect.objectContaining({ status: 'done' })
+				})
+			})
+		);
+		expect(database.close).toHaveBeenCalledOnce();
+	});
+
 	it('rejects an IndexedDB open that never settles', async () => {
 		vi.useFakeTimers();
 		try {

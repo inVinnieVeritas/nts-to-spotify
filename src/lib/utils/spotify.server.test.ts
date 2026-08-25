@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MatchedTrack } from '$lib/types';
+
+vi.mock('./spotify-config.server', () => ({
+	getSpotifyConfiguration: () => ({
+		clientId: 'configured-client',
+		clientSecret: 'configured-secret'
+	})
+}));
+
 import {
 	createSpotifySearchCacheKey,
+	getClientCredentials,
 	getSpotifySessionMetrics,
 	isSpotifyRateLimitError,
 	isSpotifyRequestRejectedStatus,
@@ -61,6 +70,22 @@ const matchedTrack = (title: string): MatchedTrack => ({
 });
 
 describe('Spotify search response parsing', () => {
+	it('never caches malformed client-credentials token responses', async () => {
+		resetSpotifyServerSessionForTests();
+		const request = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ access_token: ' ', expires_in: 3_600, token_type: 'Bearer' }))
+		) as typeof fetch;
+
+		await expect(getClientCredentials(request)).rejects.toMatchObject({
+			reason: 'invalid-response'
+		});
+		await expect(getClientCredentials(request)).rejects.toMatchObject({
+			reason: 'invalid-response'
+		});
+		expect(request).toHaveBeenCalledTimes(2);
+	});
+
 	it('accepts realistic candidates with optional preview, artwork, and link fields missing or null', () => {
 		const missingOptional = parseSpotifyTrackSearchResult({
 			tracks: {
@@ -135,6 +160,22 @@ describe('Spotify search response parsing', () => {
 				cover: 'https://i.scdn.co/image/example'
 			})
 		]);
+	});
+
+	it('omits unofficial optional artwork and marks the otherwise usable result adjusted', () => {
+		const parsed = parseSpotifyTrackSearchResult({
+			tracks: {
+				items: [
+					{
+						...spotifyItem(),
+						album: { images: [{ url: 'https://images.example.test/private.jpg' }] }
+					}
+				]
+			}
+		});
+
+		expect(parsed.matches[0].cover).toBeUndefined();
+		expect(parsed.adjustedCandidates).toBe(1);
 	});
 
 	it('rejects malformed top-level structures and responses with no usable candidates', () => {

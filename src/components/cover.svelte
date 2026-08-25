@@ -1,5 +1,8 @@
 <script lang="ts">
+	import { parseOfficialSpotifyArtworkUrl } from '$lib/utils/artwork';
+
 	export let src: { type: 'nts' } | { type: 'spotify'; src: string | undefined };
+	$: spotifyArtwork = src.type === 'spotify' ? parseOfficialSpotifyArtworkUrl(src.src) : undefined;
 </script>
 
 {#if src.type === 'nts'}
@@ -17,7 +20,7 @@
 		/>
 	</svg>
 {:else}
-	<img class="cover" src={src.src || ''} alt="" />
+	<img class="cover" src={spotifyArtwork || ''} alt="" />
 {/if}
 
 <style lang="postcss">

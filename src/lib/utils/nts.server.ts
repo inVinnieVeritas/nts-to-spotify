@@ -1,5 +1,6 @@
 import type { BasicTrack, NTSShowCatalog, NTSEpisodeSummary } from '$lib/types';
 import { fetchWithTimeout, type Fetcher } from './request';
+import { parseOfficialNTSArtworkUrl } from './artwork';
 
 const NTS_TIMEOUT_MS = 20_000;
 
@@ -46,7 +47,9 @@ const consumeJson =
 	};
 
 const getCover = (media?: NTSMedia) =>
-	media?.picture_medium_large || media?.picture_large || media?.background_medium_large || '';
+	[media?.picture_medium_large, media?.picture_large, media?.background_medium_large]
+		.map(parseOfficialNTSArtworkUrl)
+		.find((cover): cover is string => Boolean(cover)) || '';
 
 const mapEpisode = (episode: NTSEpisode): NTSEpisodeSummary => ({
 	episodeAlias: episode.episode_alias,

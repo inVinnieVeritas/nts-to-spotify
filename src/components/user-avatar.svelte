@@ -11,19 +11,19 @@
 
 {#if me?.id}
 	<div use:clickOutside={() => (isLoggingOut = false)}>
-		<Button
-			variant="ghost"
-			as={isLoggingOut ? 'a' : 'button'}
-			on:click={() => {
-				if (!isLoggingOut) {
-					isLoggingOut = true;
-				}
-			}}
-			href={isLoggingOut ? '/logout' : undefined}
-		>
-			<p class="font-small-beast">{isLoggingOut ? 'Logout' : me.display_name}</p>
-			<div class="avatar" style="background-image: url({me.images[0]?.url})" />
-		</Button>
+		{#if isLoggingOut}
+			<form method="POST" action="/logout">
+				<Button variant="ghost" type="submit">
+					<p class="font-small-beast">Logout</p>
+					<div class="avatar" style:background-image={me.image ? `url(${me.image})` : undefined} />
+				</Button>
+			</form>
+		{:else}
+			<Button variant="ghost" on:click={() => (isLoggingOut = true)}>
+				<p class="font-small-beast">{me.display_name}</p>
+				<div class="avatar" style:background-image={me.image ? `url(${me.image})` : undefined} />
+			</Button>
+		{/if}
 	</div>
 {:else}
 	<LoginWithSpotify variant="ghost" />

@@ -171,4 +171,48 @@ describe('single-episode route deadline', () => {
 			consoleError.mockRestore();
 		}
 	});
+
+	it('returns a fixed missing-configuration response before Spotify Search', async () => {
+		vi.mocked(getClientCredentials).mockResolvedValue(null);
+		vi.mocked(mapWithConcurrency).mockClear();
+		const fetcher = vi.fn(async () => new Response('<html></html>', { status: 200 }));
+
+		await expect(
+			load({
+				params: { show: 'show', episode: 'episode' },
+				fetch: fetcher,
+				request: new Request('http://localhost/shows/show/episodes/episode'),
+				setHeaders: vi.fn()
+			} as never)
+		).rejects.toMatchObject({
+			status: 503,
+			body: { message: 'Spotify application is not configured' }
+		});
+		expect(mapWithConcurrency).not.toHaveBeenCalled();
+	});
+
+	it('returns a fixed response for a configured token acquisition failure', async () => {
+		vi.mocked(getClientCredentials).mockRejectedValue({
+			name: 'SpotifyTokenAcquisitionError',
+			reason: 'upstream',
+			access_token: 'must-not-be-exposed'
+		});
+		const fetcher = vi.fn(async () => new Response('<html></html>', { status: 200 }));
+		let failure: unknown;
+		try {
+			await load({
+				params: { show: 'show', episode: 'episode' },
+				fetch: fetcher,
+				request: new Request('http://localhost/shows/show/episodes/episode'),
+				setHeaders: vi.fn()
+			} as never);
+		} catch (cause) {
+			failure = cause;
+		}
+		expect(failure).toMatchObject({
+			status: 502,
+			body: { message: 'Spotify token service is temporarily unavailable. Try again later.' }
+		});
+		expect(JSON.stringify(failure)).not.toContain('must-not-be-exposed');
+	});
 });

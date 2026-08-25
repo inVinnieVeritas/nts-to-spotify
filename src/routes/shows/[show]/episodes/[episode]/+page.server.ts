@@ -14,6 +14,7 @@ import {
 } from '$lib/utils/spotify.server';
 import { createAbortScope } from '$lib/utils/abort';
 import { fetchWithTimeout } from '$lib/utils/request';
+import { isSpotifyTokenAcquisitionError } from '$lib/utils/spotify-token.server';
 
 const SINGLE_EPISODE_TIMEOUT_MS = 3 * 60 * 1000;
 const NTS_DOCUMENT_TIMEOUT_MS = 20_000;
@@ -45,7 +46,7 @@ export const load: PageServerLoad = async ({ params, fetch, request, setHeaders 
 
 		const token = await getClientCredentials(fetch as typeof globalThis.fetch, scope.signal);
 
-		if (!token) throw error(401, 'Not authorized');
+		if (!token) throw error(503, 'Spotify application is not configured');
 
 		const tracks = await mapWithConcurrency(
 			data.tracks,
@@ -79,6 +80,14 @@ export const load: PageServerLoad = async ({ params, fetch, request, setHeaders 
 		if (isSpotifySearchUnavailableError(err)) {
 			setHeaders({ 'X-Spotify-Search-Error-Reason': err.reason });
 			throw error(503, 'Spotify search is temporarily unavailable. Try again later.');
+		}
+		if (isSpotifyTokenAcquisitionError(err)) {
+			throw error(502, 'Spotify token service is temporarily unavailable. Try again later.');
+		}
+		if (err && typeof err === 'object' && 'status' in err && 'body' in err) {
+			const status = (err as { status: unknown }).status;
+			const message = (err as { body?: { message?: unknown } }).body?.message;
+			if (status === 503 && message === 'Spotify application is not configured') throw err;
 		}
 		console.error('Single-episode load failed', 'unexpected_error');
 		throw error(500, `Unable to load document from url: ${routeParamsToNtsUrl(show, episode)}`);

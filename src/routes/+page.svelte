@@ -188,8 +188,9 @@
 					>Does opening the Saved Catalogues dashboard use Spotify quota?</summary
 				>
 				<p class="font-base">
-					No. The dashboard reads only this browser’s saved data. Spotify and NTS are contacted only
-					when the relevant catalogue or playlist action requires it.
+					The dashboard itself reads only this browser’s saved data and uses no Spotify Search
+					quota. When you are logged in, the shared header may ask Spotify to verify your current
+					profile. NTS is contacted only when you explicitly check or open a catalogue.
 				</p>
 			</details>
 		</section>

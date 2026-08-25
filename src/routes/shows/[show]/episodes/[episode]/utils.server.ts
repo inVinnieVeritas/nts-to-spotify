@@ -1,4 +1,5 @@
 import type { CheerioAPI } from 'cheerio';
+import { parseOfficialNTSArtworkUrl } from '$lib/utils/artwork';
 
 export function getNTSData(cheerio: CheerioAPI) {
 	const title = cheerio('h1').first().text();
@@ -14,7 +15,8 @@ export function getNTSData(cheerio: CheerioAPI) {
 		.trim();
 
 	// Cover image
-	const cover = cheerio('meta[property="og:image"]').attr('content') || '';
+	const cover =
+		parseOfficialNTSArtworkUrl(cheerio('meta[property="og:image"]').attr('content')) || '';
 
 	// Genres
 	const genres: string[] = [];
