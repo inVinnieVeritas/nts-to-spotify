@@ -11,6 +11,7 @@ import {
 import { parseNTSShowCatalog, reconcileSavedCatalogWithNTS } from './catalog-update';
 import { updateCatalogProgress } from './catalog-progress.client';
 import { fetchWithTimeout, type Fetcher } from './request';
+import { parseOfficialNTSArtworkUrl } from './artwork';
 
 const CATALOGUE_CHECK_TIMEOUT_MS = 35_000;
 
@@ -29,18 +30,6 @@ export type SavedCatalogCard = {
 	creationPending: boolean;
 };
 
-const safeHttpsUrl = (value: unknown) => {
-	if (typeof value !== 'string' || value.length > 2_048) return undefined;
-	try {
-		const parsed = new URL(value);
-		return parsed.protocol === 'https:' && parsed.hostname && !parsed.username && !parsed.password
-			? value
-			: undefined;
-	} catch {
-		return undefined;
-	}
-};
-
 export const catalogDisplayName = (progress: CatalogProgress) => {
 	const storedName = progress.display?.showName.trim();
 	if (storedName) return storedName;
@@ -53,9 +42,9 @@ export const catalogDisplayName = (progress: CatalogProgress) => {
 };
 
 const catalogDisplayCover = (progress: CatalogProgress) =>
-	safeHttpsUrl(progress.display?.showCover) ||
+	parseOfficialNTSArtworkUrl(progress.display?.showCover) ||
 	Object.values(progress.episodes)
-		.map(({ cover }) => safeHttpsUrl(cover))
+		.map(({ cover }) => parseOfficialNTSArtworkUrl(cover))
 		.find((cover): cover is string => Boolean(cover));
 
 export const createSavedCatalogCard = (progress: CatalogProgress): SavedCatalogCard => {

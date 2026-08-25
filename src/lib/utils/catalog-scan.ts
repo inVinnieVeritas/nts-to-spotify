@@ -121,6 +121,46 @@ export const reconcileEpisodes = (
 	});
 };
 
+const chronologicalEpisodeSort = (left: EpisodeState, right: EpisodeState) => {
+	const dateDifference = Date.parse(left.broadcast) - Date.parse(right.broadcast);
+	return dateDifference || left.episodeAlias.localeCompare(right.episodeAlias);
+};
+
+export const getCatalogEpisodeDateBounds = <T extends Pick<NTSEpisodeSummary, 'broadcast'>>(
+	episodes: T[]
+) => {
+	const chronological = [...episodes].sort(
+		(left, right) => Date.parse(left.broadcast) - Date.parse(right.broadcast)
+	);
+	return { oldest: chronological[0], newest: chronological[chronological.length - 1] };
+};
+
+export const reconcileEpisodesPreservingSaved = (
+	catalog: NTSEpisodeSummary[],
+	progress?: CatalogProgress | null
+): EpisodeState[] => {
+	if (!isCatalogProgressCompatible(progress)) return reconcileEpisodes(catalog);
+
+	const uniqueCatalog = catalog.filter(
+		(episode, index, episodes) =>
+			episodes.findIndex(({ episodeAlias }) => episodeAlias === episode.episodeAlias) === index
+	);
+	const restored = reconcileEpisodes(uniqueCatalog, progress);
+	const currentAliases = new Set(restored.map(({ episodeAlias }) => episodeAlias));
+	const retained = Object.values(progress.episodes)
+		.filter(({ episodeAlias }) => !currentAliases.has(episodeAlias))
+		.map((episode) => ({
+			...episode,
+			status:
+				episode.status === 'scanning' || episode.status === 'rate-limited'
+					? ('pending' as const)
+					: episode.status,
+			...(episode.status === 'error' ? { error: episode.error } : { error: undefined })
+		}));
+
+	return [...restored, ...retained].sort(chronologicalEpisodeSort);
+};
+
 export const isCatalogProgressCompatible = (
 	progress?: CatalogProgress | null
 ): progress is CatalogProgress =>

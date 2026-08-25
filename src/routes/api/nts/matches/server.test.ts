@@ -399,4 +399,50 @@ describe('/api/nts/matches rate-limit response', () => {
 			consoleError.mockRestore();
 		}
 	});
+
+	it('returns a fixed configuration error before NTS acquisition or Spotify Search', async () => {
+		vi.mocked(getClientCredentials).mockResolvedValue(null);
+		await expect(
+			POST({
+				request: new Request('http://localhost/api/nts/matches', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ show: 'show', episode: 'episode' })
+				}),
+				fetch: vi.fn()
+			} as never)
+		).rejects.toMatchObject({
+			status: 503,
+			body: { message: 'Spotify application is not configured' }
+		});
+		expect(getNTSEpisodeTracklist).not.toHaveBeenCalled();
+	});
+
+	it('keeps configured token acquisition failures distinct and sanitized', async () => {
+		vi.mocked(getClientCredentials).mockRejectedValue({
+			name: 'SpotifyTokenAcquisitionError',
+			reason: 'authentication',
+			access_token: 'must-not-be-exposed',
+			responseBody: 'private-upstream-body'
+		});
+		let failure: unknown;
+		try {
+			await POST({
+				request: new Request('http://localhost/api/nts/matches', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ show: 'show', episode: 'episode' })
+				}),
+				fetch: vi.fn()
+			} as never);
+		} catch (cause) {
+			failure = cause;
+		}
+		expect(failure).toMatchObject({
+			status: 502,
+			body: { message: 'Spotify token service is temporarily unavailable' }
+		});
+		expect(JSON.stringify(failure)).not.toContain('must-not-be-exposed');
+		expect(JSON.stringify(failure)).not.toContain('private-upstream-body');
+	});
 });

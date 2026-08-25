@@ -1,10 +1,21 @@
-import { env } from '$env/dynamic/private';
 import { error } from '@sveltejs/kit';
 import type { RequestEvent } from '@sveltejs/kit';
 import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from '$lib/constants';
-import { fetchWithTimeout } from './request';
+import { getSpotifyConfiguration } from './spotify-config.server';
+import { secureCookieForUrl } from './oauth.server';
+import { requestSpotifyToken } from './spotify-token.server';
+import type { ValidatedSpotifyToken } from './spotify-token.server';
 
-const SPOTIFY_TOKEN_TIMEOUT_MS = 15_000;
+export const createTokenCookieData = (
+	data: ValidatedSpotifyToken,
+	existingRefreshToken?: string
+) => ({
+	access_token: data.accessToken,
+	expires_in: data.expiresIn,
+	...(data.refreshToken || existingRefreshToken
+		? { refresh_token: data.refreshToken ?? existingRefreshToken }
+		: {})
+});
 
 export const getAccessToken = async (event: RequestEvent) => {
 	const refresh = event.cookies.get(REFRESH_TOKEN_KEY);
@@ -24,9 +35,9 @@ const refreshAccessToken = async (
 ) => {
 	const data = await rotateAccessToken(refreshToken, signal);
 
-	setCookies(event, data);
+	setCookies(event, createTokenCookieData(data, refreshToken));
 
-	return data.access_token;
+	return data.accessToken;
 };
 
 export const setCookies = (
@@ -37,8 +48,11 @@ export const setCookies = (
 		refresh_token?: string;
 	}
 ) => {
+	const secure = secureCookieForUrl(event.url);
 	event.cookies.set(ACCESS_TOKEN_KEY, data.access_token, {
 		httpOnly: true,
+		sameSite: 'lax',
+		secure,
 		maxAge: data.expires_in,
 		path: '/'
 	});
@@ -46,80 +60,49 @@ export const setCookies = (
 	if (data.refresh_token) {
 		event.cookies.set(REFRESH_TOKEN_KEY, data.refresh_token, {
 			httpOnly: true,
+			sameSite: 'lax',
+			secure,
 			maxAge: 60 * 60 * 24 * 30,
 			path: '/'
 		});
 	}
 };
 
-type AccessTokenResponse = {
-	access_token: string;
-	token_type: string;
-	scope: string;
-	expires_in: number;
-};
-
-type RefreshTokenResponse = AccessTokenResponse & {
-	refresh_token: string;
-};
-
-export const startUserSession = async (event: RequestEvent, code: string) => {
-	const data = await fetchWithTimeout(
-		fetch,
-		'https://accounts.spotify.com/api/token',
-		{
-			method: 'POST',
-			body: new URLSearchParams({
-				grant_type: 'authorization_code',
-				code,
-				redirect_uri: `${event.url.origin}/login`
-			}),
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded',
-				Authorization: `Basic ${Buffer.from(
-					`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
-				).toString('base64')}`
-			}
-		},
-		SPOTIFY_TOKEN_TIMEOUT_MS,
-		async (res) => {
-			if (!res.ok) {
-				await res.body?.cancel();
-				throw error(401, 'Not authorized');
-			}
-			return (await res.json()) as RefreshTokenResponse;
-		},
-		event.request.signal
+export const startUserSession = async (
+	event: RequestEvent,
+	code: string,
+	request: typeof fetch = fetch
+) => {
+	const configuration = getSpotifyConfiguration();
+	if (!configuration) throw error(503, 'Spotify application is not configured');
+	const data = await requestSpotifyToken(
+		request,
+		configuration,
+		new URLSearchParams({
+			grant_type: 'authorization_code',
+			code,
+			redirect_uri: `${event.url.origin}/login`
+		}),
+		{ requireRefreshToken: true, signal: event.request.signal }
 	);
 
-	setCookies(event, data);
+	setCookies(event, createTokenCookieData(data));
 };
 
-export const rotateAccessToken = async (refreshToken: string, signal?: AbortSignal) => {
-	return fetchWithTimeout(
-		fetch,
-		'https://accounts.spotify.com/api/token',
-		{
-			method: 'POST',
-			body: new URLSearchParams({
-				grant_type: 'refresh_token',
-				refresh_token: refreshToken
-			}),
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded',
-				Authorization: `Basic ${Buffer.from(
-					`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`
-				).toString('base64')}`
-			}
-		},
-		SPOTIFY_TOKEN_TIMEOUT_MS,
-		async (res) => {
-			if (!res.ok) {
-				await res.body?.cancel();
-				throw error(401, 'Not authorized');
-			}
-			return (await res.json()) as AccessTokenResponse;
-		},
-		signal
+export const rotateAccessToken = async (
+	refreshToken: string,
+	signal?: AbortSignal,
+	request: typeof fetch = fetch
+) => {
+	const configuration = getSpotifyConfiguration();
+	if (!configuration) throw error(503, 'Spotify application is not configured');
+	return requestSpotifyToken(
+		request,
+		configuration,
+		new URLSearchParams({
+			grant_type: 'refresh_token',
+			refresh_token: refreshToken
+		}),
+		{ requireRefreshToken: false, signal }
 	);
 };

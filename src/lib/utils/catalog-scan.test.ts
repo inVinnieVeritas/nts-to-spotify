@@ -13,6 +13,7 @@ import {
 	formatCooldownDuration,
 	formatSpotifyCooldownMessage,
 	getCatalogEpisodeReviewTracks,
+	getCatalogEpisodeDateBounds,
 	getCatalogExportUris,
 	getCatalogReviewFilterCounts,
 	getCatalogSummaryCounts,
@@ -23,6 +24,7 @@ import {
 	parseSpotifyPlaylistId,
 	parseSpotifySessionMetrics,
 	reconcileEpisodes,
+	reconcileEpisodesPreservingSaved,
 	restoreCatalogCreationPending,
 	restoreCatalogLinkedPlaylistId,
 	restoreCatalogPlaylistOrder,
@@ -76,6 +78,37 @@ const savedProgress = (episodes: EpisodeState[]): CatalogProgress => ({
 });
 
 describe('catalogue progress restoration', () => {
+	it('derives date bounds from retained, reappearing and newly added episodes', () => {
+		const oldest = episode('oldest', '2025-01-01');
+		const middle = episode('middle', '2025-06-01');
+		const newest = episode('newest', '2025-12-01');
+		const future = episode('future', '2026-02-01');
+		const saved = savedProgress([
+			{ ...oldest, status: 'done', tracks: [] },
+			{ ...middle, status: 'done', tracks: [] },
+			{ ...newest, status: 'done', tracks: [] }
+		]);
+
+		const omittedOldest = reconcileEpisodesPreservingSaved([middle, newest], saved);
+		expect(getCatalogEpisodeDateBounds(omittedOldest)).toEqual({
+			oldest: expect.objectContaining({ episodeAlias: 'oldest' }),
+			newest: expect.objectContaining({ episodeAlias: 'newest' })
+		});
+		const omittedNewest = reconcileEpisodesPreservingSaved([oldest, middle], saved);
+		expect(getCatalogEpisodeDateBounds(omittedNewest)).toEqual({
+			oldest: expect.objectContaining({ episodeAlias: 'oldest' }),
+			newest: expect.objectContaining({ episodeAlias: 'newest' })
+		});
+		const reappearedAndExtended = reconcileEpisodesPreservingSaved(
+			[newest, oldest, middle, future],
+			saved
+		);
+		expect(getCatalogEpisodeDateBounds(reappearedAndExtended)).toEqual({
+			oldest: expect.objectContaining({ episodeAlias: 'oldest' }),
+			newest: expect.objectContaining({ episodeAlias: 'future' })
+		});
+	});
+
 	it('restores completed review choices and recovers interrupted scans as pending', () => {
 		const catalog = [episode('older', '2026-01-01'), episode('newer', '2026-02-01')];
 		const progress = savedProgress([
@@ -102,6 +135,38 @@ describe('catalogue progress restoration', () => {
 			expect.objectContaining({ episodeAlias: 'older', status: 'done', tracks: [reviewTrack] }),
 			expect.objectContaining({ episodeAlias: 'newer', status: 'pending', tracks: [] })
 		]);
+	});
+
+	it('retains an upstream-omitted completed episode through restoration and later saves', () => {
+		const omitted = episode('temporarily-omitted', '2026-01-01');
+		const present = episode('present', '2026-02-01');
+		const retainedTrack = JSON.parse(JSON.stringify(reviewTrack)) as typeof reviewTrack;
+		const progress = savedProgress([
+			{ ...omitted, status: 'done', tracks: [retainedTrack] },
+			{ ...present, status: 'done', tracks: [] }
+		]);
+
+		const restored = reconcileEpisodesPreservingSaved([present], progress);
+		expect(restored.map(({ episodeAlias }) => episodeAlias)).toEqual([
+			'temporarily-omitted',
+			'present'
+		]);
+		expect(restored[0]).toMatchObject({
+			status: 'done',
+			tracks: [{ checked: true, selectedMatch: 'spotify:track:manual' }]
+		});
+
+		restored[0].tracks[0].checked = false;
+		const subsequentSave = captureCatalogProgress('show', restored, progress.playlist);
+		expect(Object.keys(subsequentSave.episodes)).toEqual(['temporarily-omitted', 'present']);
+		expect(subsequentSave.episodes['temporarily-omitted'].tracks[0].checked).toBe(false);
+
+		const returned = reconcileEpisodesPreservingSaved([omitted, present], subsequentSave);
+		expect(returned.map(({ episodeAlias }) => episodeAlias)).toEqual([
+			'temporarily-omitted',
+			'present'
+		]);
+		expect(returned[0]).toMatchObject({ status: 'done', tracks: [{ checked: false }] });
 	});
 
 	it('rejects a stale restoration after the active show alias changes', () => {

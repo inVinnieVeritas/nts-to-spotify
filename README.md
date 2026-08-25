@@ -10,15 +10,18 @@ versions and remixes.
 ## Local setup
 
 1. Create a Spotify app in the Spotify developer dashboard.
-2. Add `http://localhost:5173/login` as a redirect URI.
+2. Add exactly `http://127.0.0.1:5173/login` as a redirect URI.
 3. Copy `.env.example` to `.env` and provide `SPOTIFY_CLIENT_ID` and
-   `SPOTIFY_CLIENT_SECRET`.
+   `SPOTIFY_CLIENT_SECRET`. Use credentials from your own Spotify app. Never share or reuse the
+   maintainer's credentials.
 4. Install dependencies and run the app:
 
 ```bash
 npm ci
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
+
+Open `http://127.0.0.1:5173` in your browser.
 
 Paste either a show URL such as `https://www.nts.live/shows/jim-o-rourke` or an individual
 episode URL into the search bar. A full catalogue scan can take several minutes because Spotify

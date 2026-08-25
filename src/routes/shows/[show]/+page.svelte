@@ -36,6 +36,7 @@
 		createGeneratedPlaylistText,
 		formatCooldownDuration,
 		formatSpotifyCooldownMessage,
+		getCatalogEpisodeDateBounds,
 		getCatalogEpisodeReviewTracks,
 		getCatalogExportUris,
 		getCatalogReviewFilterCounts,
@@ -48,6 +49,7 @@
 		parseCatalogSpotifyRateLimitReason,
 		parseSpotifySessionMetrics,
 		reconcileEpisodes,
+		reconcileEpisodesPreservingSaved,
 		restoreCatalogCreationPending,
 		restoreCatalogPlaylistOrder,
 		restoreCatalogLinkedPlaylistId,
@@ -804,19 +806,22 @@
 			) {
 				return;
 			}
-			episodes = reconcileEpisodes(pageData.episodes, saved);
+			episodes = reconcileEpisodesPreservingSaved(pageData.episodes, saved);
+			const reconciledBounds = getCatalogEpisodeDateBounds(episodes);
+			firstEpisode = reconciledBounds.oldest;
+			lastEpisode = reconciledBounds.newest;
 			if (isCatalogProgressCompatible(saved)) {
 				playlistOrder = restoreCatalogPlaylistOrder(saved);
 				const currentGenerated = createGeneratedPlaylistText(
 					pageData.name,
-					pageData.episodes,
+					episodes,
 					playlistOrder
 				);
 				const restoredText = updateGeneratedPlaylistTextForCatalog(
 					saved.playlist,
 					pageData.name,
 					Object.values(saved.episodes),
-					pageData.episodes,
+					episodes,
 					playlistOrder
 				);
 				dateStamp = currentGenerated.dateStamp;
