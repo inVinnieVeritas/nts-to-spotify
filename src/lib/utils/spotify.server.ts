@@ -11,12 +11,18 @@ import { fetchWithTimeout, type Fetcher } from './request';
 import { getSpotifyConfiguration } from './spotify-config.server';
 import { parseOfficialSpotifyArtworkUrl } from './artwork';
 import { requestSpotifyToken } from './spotify-token.server';
+import {
+	createDefaultSpotifyMatchCache,
+	createSpotifyPersistentCacheIdentity,
+	isConfidentSpotifyMatch,
+	type SpotifyMatchCacheStorage
+} from './spotify-match-cache.server';
 
 const SEARCH_TIMEOUT_MS = 20_000;
 export const SPOTIFY_SEARCH_INTERVAL_MS = 2_000;
 export const SPOTIFY_TRANSIENT_RETRY_DELAYS_MS = [2_000, 5_000] as const;
-// Successful final matches live only for this Node server session. FIFO eviction keeps memory
-// bounded and deterministic; neither keys nor values contain tokens or user-identifying data.
+// The first cache layer is process-local. FIFO eviction keeps memory bounded and deterministic;
+// neither keys nor values contain tokens or user-identifying data.
 export const SPOTIFY_SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
 export const SPOTIFY_SEARCH_CACHE_MAX_ENTRIES = 500;
 const DEFAULT_RETRY_AFTER_SECONDS = 1;
@@ -28,6 +34,7 @@ export type SpotifyRateLimitReason = 'quota-exceeded' | 'rate-limited';
 export type SpotifySessionMetrics = {
 	searchRequests: number;
 	cacheHits: number;
+	persistentCacheHits: number;
 	transientRetries: number;
 	rateLimitResponses: number;
 	quotaExceededResponses: number;
@@ -36,6 +43,7 @@ export type SpotifySessionMetrics = {
 const spotifySessionMetrics: SpotifySessionMetrics = {
 	searchRequests: 0,
 	cacheHits: 0,
+	persistentCacheHits: 0,
 	transientRetries: 0,
 	rateLimitResponses: 0,
 	quotaExceededResponses: 0
@@ -304,10 +312,19 @@ class SpotifySearchQueue {
 const spotifySearchQueue = new SpotifySearchQueue();
 
 const DO_NOT_CACHE = Symbol('do-not-cache-spotify-match');
-type SpotifyMatchCacheValue = MatchedTrack & { [DO_NOT_CACHE]?: true };
+const PERSISTENT_CACHE_HIT = Symbol('persistent-cache-hit');
+type SpotifyMatchCacheValue = MatchedTrack & {
+	[DO_NOT_CACHE]?: true;
+	[PERSISTENT_CACHE_HIT]?: true;
+};
 
 const preventSpotifyMatchCaching = (track: MatchedTrack): SpotifyMatchCacheValue => {
 	Object.defineProperty(track, DO_NOT_CACHE, { value: true });
+	return track;
+};
+
+const markPersistentSpotifyMatch = (track: MatchedTrack): SpotifyMatchCacheValue => {
+	Object.defineProperty(track, PERSISTENT_CACHE_HIT, { value: true });
 	return track;
 };
 
@@ -383,7 +400,9 @@ export class SpotifySearchSessionCache {
 			operation.promise.then(
 				(value) => {
 					if (finish()) {
-						if (countAsCoalescedHit) this.onHit();
+						if (countAsCoalescedHit && !(value as SpotifyMatchCacheValue)[PERSISTENT_CACHE_HIT]) {
+							this.onHit();
+						}
 						resolve(cloneMatchedTrack(value));
 					}
 				},
@@ -458,12 +477,18 @@ export const createSpotifySearchCacheKey = (
 	matcherVersion: number,
 	market?: string
 ) =>
-	[
-		String(matcherVersion),
+	JSON.stringify([
+		matcherVersion,
 		normalizeSpotifySearchKeyPart(market || ''),
 		normalizeSpotifySearchKeyPart(track.artist),
 		normalizeSpotifySearchKeyPart(track.title)
-	].join('\u0000');
+	]);
+
+let spotifyPersistentCache: SpotifyMatchCacheStorage | null = createDefaultSpotifyMatchCache();
+
+export const setSpotifyMatchCacheStorageForTests = (storage: SpotifyMatchCacheStorage | null) => {
+	spotifyPersistentCache = storage;
+};
 
 export const getClientCredentials = async (request: Fetcher = fetch, signal?: AbortSignal) => {
 	const configuration = getSpotifyConfiguration();
@@ -482,29 +507,6 @@ export const getClientCredentials = async (request: Fetcher = fetch, signal?: Ab
 		expiresAt: Date.now() + Math.max(0, data.expiresIn - 60) * 1000
 	};
 	return cachedToken.value;
-};
-
-const normalize = (value: string) =>
-	value
-		.normalize('NFKD')
-		.replace(/[\u0300-\u036f]/g, '')
-		.toLowerCase()
-		.replace(/&/g, 'and')
-		.replace(/[^a-z0-9]+/g, ' ')
-		.trim();
-
-const isConfidentMatch = (track: BasicTrack, match: Match) => {
-	if (normalize(track.title) !== normalize(match.title)) return false;
-	const requestedArtist = normalize(track.artist);
-	return match.artist
-		.split(',')
-		.map(normalize)
-		.some(
-			(artist) =>
-				artist === requestedArtist ||
-				(requestedArtist.length >= 5 &&
-					(artist.includes(requestedArtist) || requestedArtist.includes(artist)))
-		);
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -761,7 +763,7 @@ const performSpotifyTrackSearch = async (
 			...track,
 			matches,
 			fallback,
-			confident: !fallback && matches.length > 0 && isConfidentMatch(track, matches[0])
+			confident: !fallback && matches.length > 0 && isConfidentSpotifyMatch(track, matches[0])
 		};
 		return cacheable ? matchedTrack : preventSpotifyMatchCaching(matchedTrack);
 	}
@@ -777,9 +779,26 @@ export const searchSpotifyTrack = async (
 ): Promise<MatchedTrack> => {
 	// Searches currently use application credentials and do not send a market. The key helper keeps
 	// an explicit market dimension for a future market-aware caller to thread through.
+	const identity = createSpotifyPersistentCacheIdentity(track, SPOTIFY_MATCHER_VERSION);
 	const result = await spotifySearchCache.getOrCreate(
 		createSpotifySearchCacheKey(track, SPOTIFY_MATCHER_VERSION),
-		(sharedSignal) => performSpotifyTrackSearch(track, token, request, sharedSignal),
+		async (sharedSignal) => {
+			const persistent = spotifyPersistentCache
+				? await spotifyPersistentCache.get(identity).catch(() => null)
+				: null;
+			throwIfAborted(sharedSignal);
+			if (persistent) {
+				spotifySessionMetrics.persistentCacheHits += 1;
+				return markPersistentSpotifyMatch(persistent);
+			}
+			const searched = await performSpotifyTrackSearch(track, token, request, sharedSignal);
+			if (!(searched as SpotifyMatchCacheValue)[DO_NOT_CACHE]) {
+				void spotifyPersistentCache
+					?.set(identity, cloneMatchedTrack(searched))
+					.catch(() => undefined);
+			}
+			return searched;
+		},
 		signal
 	);
 	return { ...result, artist: track.artist, title: track.title };
@@ -791,9 +810,11 @@ export const resetSpotifyServerSessionForTests = () => {
 	spotifySearchQueue.resetForTests();
 	spotifySessionMetrics.searchRequests = 0;
 	spotifySessionMetrics.cacheHits = 0;
+	spotifySessionMetrics.persistentCacheHits = 0;
 	spotifySessionMetrics.transientRetries = 0;
 	spotifySessionMetrics.rateLimitResponses = 0;
 	spotifySessionMetrics.quotaExceededResponses = 0;
+	spotifyPersistentCache = null;
 };
 
 export const mapWithConcurrency = async <T, R>(

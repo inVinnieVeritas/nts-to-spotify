@@ -395,6 +395,7 @@ describe('Spotify rate limiting', () => {
 		expect(getSpotifySessionMetrics()).toEqual({
 			searchRequests: 1,
 			cacheHits: 0,
+			persistentCacheHits: 0,
 			transientRetries: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 1
@@ -415,6 +416,18 @@ describe('Spotify server-session search cache', () => {
 		);
 		expect(createSpotifySearchCacheKey({ artist: 'Artist', title: 'Track' }, 1, 'BE')).not.toBe(
 			createSpotifySearchCacheKey({ artist: 'Artist', title: 'Track' }, 1, 'US')
+		);
+	});
+
+	it('serializes dimensions without adjacent-field collisions and normalizes NFKC equivalents', () => {
+		expect(createSpotifySearchCacheKey({ artist: 'a', title: 'b\u0000c' }, 1)).not.toBe(
+			createSpotifySearchCacheKey({ artist: 'a\u0000b', title: 'c' }, 1)
+		);
+		expect(createSpotifySearchCacheKey({ artist: '\u212bRTIST', title: '\uff34rack' }, 1)).toBe(
+			createSpotifySearchCacheKey({ artist: '\u00c5rtist', title: 'Track' }, 1)
+		);
+		expect(createSpotifySearchCacheKey({ artist: '', title: '\u0000' }, 1)).not.toBe(
+			createSpotifySearchCacheKey({ artist: '\u0000', title: '' }, 1)
 		);
 	});
 
@@ -689,6 +702,7 @@ describe('Spotify server-session search cache', () => {
 		expect(getSpotifySessionMetrics()).toEqual({
 			searchRequests: 2,
 			cacheHits: 0,
+			persistentCacheHits: 0,
 			transientRetries: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 0
@@ -737,6 +751,7 @@ describe('Spotify server-session search cache', () => {
 			searchRequests: 2,
 			transientRetries: 1,
 			cacheHits: 0,
+			persistentCacheHits: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 0
 		});
@@ -760,6 +775,7 @@ describe('Spotify server-session search cache', () => {
 			searchRequests: 3,
 			transientRetries: 2,
 			cacheHits: 0,
+			persistentCacheHits: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 0
 		});

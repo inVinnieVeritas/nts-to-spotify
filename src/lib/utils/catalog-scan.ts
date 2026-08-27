@@ -44,6 +44,7 @@ export type CatalogSpotifyRateLimitReason = 'quota-exceeded' | 'rate-limited';
 export type SpotifySessionMetrics = {
 	searchRequests: number;
 	cacheHits: number;
+	persistentCacheHits: number;
 	transientRetries: number;
 	rateLimitResponses: number;
 	quotaExceededResponses: number;
@@ -556,6 +557,7 @@ export const parseSpotifySessionMetrics = (payload: unknown): SpotifySessionMetr
 	if (
 		!validMetric(candidate.searchRequests) ||
 		!validMetric(candidate.cacheHits) ||
+		(candidate.persistentCacheHits !== undefined && !validMetric(candidate.persistentCacheHits)) ||
 		(candidate.transientRetries !== undefined && !validMetric(candidate.transientRetries)) ||
 		!validMetric(candidate.rateLimitResponses) ||
 		!validMetric(candidate.quotaExceededResponses)
@@ -565,6 +567,7 @@ export const parseSpotifySessionMetrics = (payload: unknown): SpotifySessionMetr
 	return {
 		searchRequests: candidate.searchRequests,
 		cacheHits: candidate.cacheHits,
+		persistentCacheHits: candidate.persistentCacheHits ?? 0,
 		transientRetries: candidate.transientRetries ?? 0,
 		rateLimitResponses: candidate.rateLimitResponses,
 		quotaExceededResponses: candidate.quotaExceededResponses

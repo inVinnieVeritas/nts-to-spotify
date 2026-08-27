@@ -61,6 +61,7 @@ describe('/api/nts/matches rate-limit response', () => {
 			spotifySessionMetrics: {
 				searchRequests: 1,
 				cacheHits: 0,
+				persistentCacheHits: 0,
 				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 1
@@ -177,6 +178,7 @@ describe('/api/nts/matches rate-limit response', () => {
 			spotifySessionMetrics: {
 				searchRequests: 1,
 				cacheHits: 0,
+				persistentCacheHits: 0,
 				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 0
@@ -210,6 +212,7 @@ describe('/api/nts/matches rate-limit response', () => {
 			spotifySessionMetrics: {
 				searchRequests: 3,
 				cacheHits: 0,
+				persistentCacheHits: 0,
 				transientRetries: 2,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 0
@@ -253,6 +256,7 @@ describe('/api/nts/matches rate-limit response', () => {
 			spotifySessionMetrics: {
 				searchRequests: 2,
 				cacheHits: 0,
+				persistentCacheHits: 0,
 				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 0

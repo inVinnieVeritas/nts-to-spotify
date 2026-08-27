@@ -930,7 +930,9 @@
 				{#if spotifySessionMetrics}
 					<p class="font-small-beast">
 						This server session: {spotifySessionMetrics.searchRequests} Spotify searches · {spotifySessionMetrics.cacheHits}
-						cached/coalesced results · {spotifySessionMetrics.transientRetries} transient retries
+						cached/coalesced results · {spotifySessionMetrics.persistentCacheHits} persistent cache results
+						· {spotifySessionMetrics.transientRetries}
+						transient retries
 					</p>
 					<p class="font-tiny">This is usage observed by this app, not Spotify quota remaining.</p>
 				{/if}
