@@ -33,8 +33,12 @@ export type SpotifyRateLimitReason = 'quota-exceeded' | 'rate-limited';
 
 export type SpotifySessionMetrics = {
 	searchRequests: number;
+	primarySearchRequests: number;
+	fallbackSearchRequests: number;
 	cacheHits: number;
 	persistentCacheHits: number;
+	primaryPersistentCacheHits: number;
+	fallbackPersistentCacheHits: number;
 	transientRetries: number;
 	rateLimitResponses: number;
 	quotaExceededResponses: number;
@@ -42,8 +46,12 @@ export type SpotifySessionMetrics = {
 
 const spotifySessionMetrics: SpotifySessionMetrics = {
 	searchRequests: 0,
+	primarySearchRequests: 0,
+	fallbackSearchRequests: 0,
 	cacheHits: 0,
 	persistentCacheHits: 0,
+	primaryPersistentCacheHits: 0,
+	fallbackPersistentCacheHits: 0,
 	transientRetries: 0,
 	rateLimitResponses: 0,
 	quotaExceededResponses: 0
@@ -607,11 +615,14 @@ const requestSpotifySearchAttempt = async (
 	url: string,
 	token: string,
 	request: Fetcher,
+	kind: 'primary' | 'fallback',
 	isRetry: boolean,
 	signal?: AbortSignal
 ) =>
 	spotifySearchQueue.enqueue(async () => {
 		spotifySessionMetrics.searchRequests += 1;
+		if (kind === 'fallback') spotifySessionMetrics.fallbackSearchRequests += 1;
+		else spotifySessionMetrics.primarySearchRequests += 1;
 		if (isRetry) spotifySessionMetrics.transientRetries += 1;
 		let observedRateLimitSeconds: number | undefined;
 		let observedHttpFailure: ObservedSpotifyHttpFailure | undefined;
@@ -707,11 +718,12 @@ const requestSpotifySearch = async (
 	url: string,
 	token: string,
 	request: Fetcher,
+	kind: 'primary' | 'fallback',
 	signal?: AbortSignal
 ) => {
 	for (let attempt = 0; ; attempt += 1) {
 		try {
-			return await requestSpotifySearchAttempt(url, token, request, attempt > 0, signal);
+			return await requestSpotifySearchAttempt(url, token, request, kind, attempt > 0, signal);
 		} catch (cause) {
 			if (
 				!isSpotifySearchUnavailableError(cause) ||
@@ -741,7 +753,13 @@ const performSpotifyTrackSearch = async (
 
 		let result: Awaited<ReturnType<typeof requestSpotifySearch>>;
 		try {
-			result = await requestSpotifySearch(url, token, request, signal);
+			result = await requestSpotifySearch(
+				url,
+				token,
+				request,
+				fallback ? 'fallback' : 'primary',
+				signal
+			);
 		} catch (cause) {
 			if (
 				!fallback &&
@@ -789,6 +807,8 @@ export const searchSpotifyTrack = async (
 			throwIfAborted(sharedSignal);
 			if (persistent) {
 				spotifySessionMetrics.persistentCacheHits += 1;
+				if (persistent.fallback) spotifySessionMetrics.fallbackPersistentCacheHits += 1;
+				else spotifySessionMetrics.primaryPersistentCacheHits += 1;
 				return markPersistentSpotifyMatch(persistent);
 			}
 			const searched = await performSpotifyTrackSearch(track, token, request, sharedSignal);
@@ -809,8 +829,12 @@ export const resetSpotifyServerSessionForTests = () => {
 	spotifySearchCache.clear();
 	spotifySearchQueue.resetForTests();
 	spotifySessionMetrics.searchRequests = 0;
+	spotifySessionMetrics.primarySearchRequests = 0;
+	spotifySessionMetrics.fallbackSearchRequests = 0;
 	spotifySessionMetrics.cacheHits = 0;
 	spotifySessionMetrics.persistentCacheHits = 0;
+	spotifySessionMetrics.primaryPersistentCacheHits = 0;
+	spotifySessionMetrics.fallbackPersistentCacheHits = 0;
 	spotifySessionMetrics.transientRetries = 0;
 	spotifySessionMetrics.rateLimitResponses = 0;
 	spotifySessionMetrics.quotaExceededResponses = 0;

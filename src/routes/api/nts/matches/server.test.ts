@@ -19,6 +19,15 @@ const DUPLICATED_ENSEMBLE_ARTIST = Array.from(
 	() => 'Brown Ensemble, Fizzled Out Players'
 ).join(', ');
 
+const expectMetricSums = (metrics: Record<string, number>) => {
+	expect(metrics.primarySearchRequests + metrics.fallbackSearchRequests).toBe(
+		metrics.searchRequests
+	);
+	expect(metrics.primaryPersistentCacheHits + metrics.fallbackPersistentCacheHits).toBe(
+		metrics.persistentCacheHits
+	);
+};
+
 describe('/api/nts/matches rate-limit response', () => {
 	beforeEach(() => {
 		vi.useRealTimers();
@@ -60,8 +69,12 @@ describe('/api/nts/matches rate-limit response', () => {
 			reason: 'quota-exceeded',
 			spotifySessionMetrics: {
 				searchRequests: 1,
+				primarySearchRequests: 1,
+				fallbackSearchRequests: 0,
 				cacheHits: 0,
 				persistentCacheHits: 0,
+				primaryPersistentCacheHits: 0,
+				fallbackPersistentCacheHits: 0,
 				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 1
@@ -120,8 +133,20 @@ describe('/api/nts/matches rate-limit response', () => {
 			await POST({ request: makeRequest(), fetch: spotifyFetch } as never)
 		).json();
 
-		expect(firstBody.spotifySessionMetrics).toMatchObject({ searchRequests: 1, cacheHits: 0 });
-		expect(secondBody.spotifySessionMetrics).toMatchObject({ searchRequests: 1, cacheHits: 1 });
+		expect(firstBody.spotifySessionMetrics).toMatchObject({
+			searchRequests: 1,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 0,
+			cacheHits: 0
+		});
+		expect(secondBody.spotifySessionMetrics).toMatchObject({
+			searchRequests: 1,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 0,
+			cacheHits: 1
+		});
+		expectMetricSums(firstBody.spotifySessionMetrics);
+		expectMetricSums(secondBody.spotifySessionMetrics);
 		expect(spotifyFetch).toHaveBeenCalledOnce();
 	});
 
@@ -177,8 +202,12 @@ describe('/api/nts/matches rate-limit response', () => {
 			error: 'spotify_response_invalid',
 			spotifySessionMetrics: {
 				searchRequests: 1,
+				primarySearchRequests: 1,
+				fallbackSearchRequests: 0,
 				cacheHits: 0,
 				persistentCacheHits: 0,
+				primaryPersistentCacheHits: 0,
+				fallbackPersistentCacheHits: 0,
 				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 0
@@ -211,8 +240,12 @@ describe('/api/nts/matches rate-limit response', () => {
 			reason: 'upstream',
 			spotifySessionMetrics: {
 				searchRequests: 3,
+				primarySearchRequests: 3,
+				fallbackSearchRequests: 0,
 				cacheHits: 0,
 				persistentCacheHits: 0,
+				primaryPersistentCacheHits: 0,
+				fallbackPersistentCacheHits: 0,
 				transientRetries: 2,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 0
@@ -255,8 +288,12 @@ describe('/api/nts/matches rate-limit response', () => {
 			upstreamStatus: 400,
 			spotifySessionMetrics: {
 				searchRequests: 2,
+				primarySearchRequests: 1,
+				fallbackSearchRequests: 1,
 				cacheHits: 0,
 				persistentCacheHits: 0,
+				primaryPersistentCacheHits: 0,
+				fallbackPersistentCacheHits: 0,
 				transientRetries: 0,
 				rateLimitResponses: 0,
 				quotaExceededResponses: 0

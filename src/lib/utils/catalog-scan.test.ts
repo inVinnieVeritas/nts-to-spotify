@@ -12,6 +12,7 @@ import {
 	createLegacyGeneratedPlaylistText,
 	formatCooldownDuration,
 	formatSpotifyCooldownMessage,
+	formatSpotifySessionMetricLines,
 	getCatalogEpisodeReviewTracks,
 	getCatalogEpisodeDateBounds,
 	getCatalogExportUris,
@@ -580,45 +581,46 @@ describe('catalogue cooldown display', () => {
 		).toBe(1);
 	});
 
-	it('accepts complete non-negative server metrics and ignores missing or malformed values', () => {
-		expect(
-			parseSpotifySessionMetrics({
-				spotifySessionMetrics: {
-					searchRequests: 123,
-					cacheHits: 18,
-					persistentCacheHits: 7,
-					transientRetries: 4,
-					rateLimitResponses: 2,
-					quotaExceededResponses: 1
-				}
-			})
-		).toEqual({
+	it('parses, validates, and formats detailed server metrics with both sum invariants', () => {
+		const metrics = {
 			searchRequests: 123,
+			primarySearchRequests: 70,
+			fallbackSearchRequests: 53,
 			cacheHits: 18,
 			persistentCacheHits: 7,
+			primaryPersistentCacheHits: 4,
+			fallbackPersistentCacheHits: 3,
 			transientRetries: 4,
 			rateLimitResponses: 2,
 			quotaExceededResponses: 1
-		});
+		};
+		const parsed = parseSpotifySessionMetrics({ spotifySessionMetrics: metrics });
+		expect(parsed).toEqual(metrics);
+		expect(formatSpotifySessionMetricLines(parsed!)).toEqual([
+			'This server session: 123 Spotify searches',
+			'70 primary · 53 fallback · 4 transient retries',
+			'18 cached/coalesced results · 7 persistent cache results',
+			'Persistent cache: 4 primary · 3 fallback'
+		]);
 		expect(parseSpotifySessionMetrics({})).toBeNull();
 		expect(
 			parseSpotifySessionMetrics({
-				spotifySessionMetrics: {
-					searchRequests: 3,
-					cacheHits: 1,
-					rateLimitResponses: 0,
-					quotaExceededResponses: 0
-				}
+				spotifySessionMetrics: { ...metrics, fallbackSearchRequests: 52 }
 			})
-		).toMatchObject({ transientRetries: 0 });
+		).toBeNull();
 		expect(
 			parseSpotifySessionMetrics({
-				spotifySessionMetrics: {
-					searchRequests: -1,
-					cacheHits: 18,
-					rateLimitResponses: 2,
-					quotaExceededResponses: 1
-				}
+				spotifySessionMetrics: { ...metrics, fallbackPersistentCacheHits: 2 }
+			})
+		).toBeNull();
+		expect(
+			parseSpotifySessionMetrics({
+				spotifySessionMetrics: { ...metrics, primarySearchRequests: Number.MAX_SAFE_INTEGER }
+			})
+		).toBeNull();
+		expect(
+			parseSpotifySessionMetrics({
+				spotifySessionMetrics: { ...metrics, primaryPersistentCacheHits: -1 }
 			})
 		).toBeNull();
 	});

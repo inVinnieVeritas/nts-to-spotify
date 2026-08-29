@@ -43,8 +43,12 @@ export type CatalogSpotifyRateLimitReason = 'quota-exceeded' | 'rate-limited';
 
 export type SpotifySessionMetrics = {
 	searchRequests: number;
+	primarySearchRequests: number;
+	fallbackSearchRequests: number;
 	cacheHits: number;
 	persistentCacheHits: number;
+	primaryPersistentCacheHits: number;
+	fallbackPersistentCacheHits: number;
 	transientRetries: number;
 	rateLimitResponses: number;
 	quotaExceededResponses: number;
@@ -556,23 +560,46 @@ export const parseSpotifySessionMetrics = (payload: unknown): SpotifySessionMetr
 	const candidate = metrics as Record<string, unknown>;
 	if (
 		!validMetric(candidate.searchRequests) ||
+		!validMetric(candidate.primarySearchRequests) ||
+		!validMetric(candidate.fallbackSearchRequests) ||
 		!validMetric(candidate.cacheHits) ||
-		(candidate.persistentCacheHits !== undefined && !validMetric(candidate.persistentCacheHits)) ||
+		!validMetric(candidate.persistentCacheHits) ||
+		!validMetric(candidate.primaryPersistentCacheHits) ||
+		!validMetric(candidate.fallbackPersistentCacheHits) ||
 		(candidate.transientRetries !== undefined && !validMetric(candidate.transientRetries)) ||
 		!validMetric(candidate.rateLimitResponses) ||
-		!validMetric(candidate.quotaExceededResponses)
+		!validMetric(candidate.quotaExceededResponses) ||
+		!Number.isSafeInteger(candidate.primarySearchRequests + candidate.fallbackSearchRequests) ||
+		candidate.primarySearchRequests + candidate.fallbackSearchRequests !==
+			candidate.searchRequests ||
+		!Number.isSafeInteger(
+			candidate.primaryPersistentCacheHits + candidate.fallbackPersistentCacheHits
+		) ||
+		candidate.primaryPersistentCacheHits + candidate.fallbackPersistentCacheHits !==
+			candidate.persistentCacheHits
 	) {
 		return null;
 	}
 	return {
 		searchRequests: candidate.searchRequests,
+		primarySearchRequests: candidate.primarySearchRequests,
+		fallbackSearchRequests: candidate.fallbackSearchRequests,
 		cacheHits: candidate.cacheHits,
-		persistentCacheHits: candidate.persistentCacheHits ?? 0,
+		persistentCacheHits: candidate.persistentCacheHits,
+		primaryPersistentCacheHits: candidate.primaryPersistentCacheHits,
+		fallbackPersistentCacheHits: candidate.fallbackPersistentCacheHits,
 		transientRetries: candidate.transientRetries ?? 0,
 		rateLimitResponses: candidate.rateLimitResponses,
 		quotaExceededResponses: candidate.quotaExceededResponses
 	};
 };
+
+export const formatSpotifySessionMetricLines = (metrics: SpotifySessionMetrics) => [
+	`This server session: ${metrics.searchRequests} Spotify searches`,
+	`${metrics.primarySearchRequests} primary · ${metrics.fallbackSearchRequests} fallback · ${metrics.transientRetries} transient retries`,
+	`${metrics.cacheHits} cached/coalesced results · ${metrics.persistentCacheHits} persistent cache results`,
+	`Persistent cache: ${metrics.primaryPersistentCacheHits} primary · ${metrics.fallbackPersistentCacheHits} fallback`
+];
 
 export const getCatalogExportUris = (
 	episodes: EpisodeState[],
