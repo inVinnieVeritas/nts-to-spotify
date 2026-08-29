@@ -46,6 +46,17 @@ const storageSpy = (): SpotifyMatchCacheStorage & {
 	flush: vi.fn(async () => undefined)
 });
 
+const expectMetricInvariants = () => {
+	const metrics = getSpotifySessionMetrics();
+	expect(metrics.primarySearchRequests + metrics.fallbackSearchRequests).toBe(
+		metrics.searchRequests
+	);
+	expect(metrics.primaryPersistentCacheHits + metrics.fallbackPersistentCacheHits).toBe(
+		metrics.persistentCacheHits
+	);
+	return metrics;
+};
+
 beforeEach(() => resetSpotifyServerSessionForTests());
 
 afterEach(async () => {
@@ -95,6 +106,8 @@ describe('Spotify persistent search integration', () => {
 			searchRequests: 0,
 			cacheHits: 0,
 			persistentCacheHits: 1,
+			primaryPersistentCacheHits: 1,
+			fallbackPersistentCacheHits: 0,
 			transientRetries: 0
 		});
 		const memoryHit = await searchSpotifyTrack(
@@ -107,8 +120,11 @@ describe('Spotify persistent search integration', () => {
 			searchRequests: 0,
 			cacheHits: 1,
 			persistentCacheHits: 1,
+			primaryPersistentCacheHits: 1,
+			fallbackPersistentCacheHits: 0,
 			transientRetries: 0
 		});
+		expectMetricInvariants();
 	});
 
 	it('persists a fully validated legitimate empty result', async () => {
@@ -134,7 +150,12 @@ describe('Spotify persistent search integration', () => {
 			fallback: true
 		});
 		expect(restartedRequest).not.toHaveBeenCalled();
-		expect(getSpotifySessionMetrics()).toMatchObject({ persistentCacheHits: 1, searchRequests: 0 });
+		expect(expectMetricInvariants()).toMatchObject({
+			persistentCacheHits: 1,
+			primaryPersistentCacheHits: 0,
+			fallbackPersistentCacheHits: 1,
+			searchRequests: 0
+		});
 	});
 
 	it('keeps a persistent entry valid when one coalesced caller cancels', async () => {
@@ -182,8 +203,11 @@ describe('Spotify persistent search integration', () => {
 			searchRequests: 0,
 			cacheHits: 0,
 			persistentCacheHits: 1,
+			primaryPersistentCacheHits: 1,
+			fallbackPersistentCacheHits: 0,
 			transientRetries: 0
 		});
+		expectMetricInvariants();
 	});
 
 	it('does not count or populate a persistent hit when the sole caller cancels during loading', async () => {

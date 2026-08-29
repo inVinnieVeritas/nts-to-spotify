@@ -36,6 +36,7 @@
 		createGeneratedPlaylistText,
 		formatCooldownDuration,
 		formatSpotifyCooldownMessage,
+		formatSpotifySessionMetricLines,
 		getCatalogEpisodeDateBounds,
 		getCatalogEpisodeReviewTracks,
 		getCatalogExportUris,
@@ -928,13 +929,14 @@
 					<p class="font-small-beast">{progressLabel}</p>
 				</div>
 				{#if spotifySessionMetrics}
-					<p class="font-small-beast">
-						This server session: {spotifySessionMetrics.searchRequests} Spotify searches · {spotifySessionMetrics.cacheHits}
-						cached/coalesced results · {spotifySessionMetrics.persistentCacheHits} persistent cache results
-						· {spotifySessionMetrics.transientRetries}
-						transient retries
-					</p>
-					<p class="font-tiny">This is usage observed by this app, not Spotify quota remaining.</p>
+					<div class="search-metrics" aria-label="Spotify Search usage metrics">
+						{#each formatSpotifySessionMetricLines(spotifySessionMetrics) as metricLine}
+							<p class="font-small-beast">{metricLine}</p>
+						{/each}
+						<p class="font-tiny">
+							This is usage observed by this app, not Spotify quota remaining.
+						</p>
+					</div>
 				{/if}
 				{#if cooldownRemaining > 0}
 					<p class="font-base">
@@ -1212,6 +1214,15 @@
 	}
 
 	.progress-transfer-message {
+		margin: 0;
+	}
+
+	.search-metrics {
+		display: grid;
+		gap: 4px;
+	}
+
+	.search-metrics p {
 		margin: 0;
 	}
 

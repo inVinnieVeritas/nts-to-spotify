@@ -69,6 +69,17 @@ const matchedTrack = (title: string): MatchedTrack => ({
 	fallback: false
 });
 
+const expectMetricInvariants = () => {
+	const metrics = getSpotifySessionMetrics();
+	expect(metrics.primarySearchRequests + metrics.fallbackSearchRequests).toBe(
+		metrics.searchRequests
+	);
+	expect(metrics.primaryPersistentCacheHits + metrics.fallbackPersistentCacheHits).toBe(
+		metrics.persistentCacheHits
+	);
+	return metrics;
+};
+
 describe('Spotify search response parsing', () => {
 	it('never caches malformed client-credentials token responses', async () => {
 		resetSpotifyServerSessionForTests();
@@ -394,8 +405,12 @@ describe('Spotify rate limiting', () => {
 		expect(request).toHaveBeenCalledOnce();
 		expect(getSpotifySessionMetrics()).toEqual({
 			searchRequests: 1,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 0,
 			cacheHits: 0,
 			persistentCacheHits: 0,
+			primaryPersistentCacheHits: 0,
+			fallbackPersistentCacheHits: 0,
 			transientRetries: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 1
@@ -447,7 +462,12 @@ describe('Spotify server-session search cache', () => {
 		release?.();
 		await Promise.all([first, second]);
 		expect(request).toHaveBeenCalledOnce();
-		expect(getSpotifySessionMetrics()).toMatchObject({ searchRequests: 1, cacheHits: 1 });
+		expect(expectMetricInvariants()).toMatchObject({
+			searchRequests: 1,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 0,
+			cacheHits: 1
+		});
 	});
 
 	it('does not count failed coalesced callers as successful cache hits', async () => {
@@ -482,7 +502,12 @@ describe('Spotify server-session search cache', () => {
 		expect(cached).toMatchObject({ artist: ' artist ', title: ' track ' });
 		expect(cached.matches[0].title).toBe('Track');
 		expect(request).toHaveBeenCalledOnce();
-		expect(getSpotifySessionMetrics()).toMatchObject({ searchRequests: 1, cacheHits: 1 });
+		expect(expectMetricInvariants()).toMatchObject({
+			searchRequests: 1,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 0,
+			cacheHits: 1
+		});
 	});
 
 	it('caches successful empty final results', async () => {
@@ -497,7 +522,12 @@ describe('Spotify server-session search cache', () => {
 			await searchSpotifyTrack({ artist: 'artist', title: 'missing' }, 'other-token', request)
 		).toMatchObject({ matches: [], fallback: true });
 		expect(request).toHaveBeenCalledTimes(2);
-		expect(getSpotifySessionMetrics()).toMatchObject({ searchRequests: 2, cacheHits: 1 });
+		expect(expectMetricInvariants()).toMatchObject({
+			searchRequests: 2,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 1,
+			cacheHits: 1
+		});
 	});
 
 	it('does not cache a sanitized result that skipped malformed candidates', async () => {
@@ -550,6 +580,8 @@ describe('Spotify server-session search cache', () => {
 		expect(request).toHaveBeenCalledTimes(2);
 		expect(getSpotifySessionMetrics()).toMatchObject({
 			searchRequests: 2,
+			primarySearchRequests: 2,
+			fallbackSearchRequests: 0,
 			transientRetries: 0,
 			rateLimitResponses: 2,
 			quotaExceededResponses: 0
@@ -591,6 +623,8 @@ describe('Spotify server-session search cache', () => {
 		expect(request).toHaveBeenCalledTimes(2);
 		expect(getSpotifySessionMetrics()).toMatchObject({
 			searchRequests: 2,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 1,
 			transientRetries: 0,
 			cacheHits: 0
 		});
@@ -701,8 +735,12 @@ describe('Spotify server-session search cache', () => {
 		expect(request).toHaveBeenCalledTimes(2);
 		expect(getSpotifySessionMetrics()).toEqual({
 			searchRequests: 2,
+			primarySearchRequests: 2,
+			fallbackSearchRequests: 0,
 			cacheHits: 0,
 			persistentCacheHits: 0,
+			primaryPersistentCacheHits: 0,
+			fallbackPersistentCacheHits: 0,
 			transientRetries: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 0
@@ -749,11 +787,41 @@ describe('Spotify server-session search cache', () => {
 		expect(request).toHaveBeenCalledTimes(2);
 		expect(getSpotifySessionMetrics()).toEqual({
 			searchRequests: 2,
+			primarySearchRequests: 2,
+			fallbackSearchRequests: 0,
 			transientRetries: 1,
 			cacheHits: 0,
 			persistentCacheHits: 0,
+			primaryPersistentCacheHits: 0,
+			fallbackPersistentCacheHits: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 0
+		});
+	});
+
+	it('counts a transient fallback retry as another fallback dispatch', async () => {
+		vi.useFakeTimers();
+		const request = vi
+			.fn()
+			.mockResolvedValueOnce(searchResponse([]))
+			.mockResolvedValueOnce(new Response('{}', { status: 503 }))
+			.mockResolvedValueOnce(searchResponse()) as unknown as Fetcher;
+		const pending = searchSpotifyTrack(
+			{ artist: 'Artist', title: 'Fallback retry' },
+			'token',
+			request
+		);
+
+		await vi.advanceTimersByTimeAsync(
+			SPOTIFY_SEARCH_INTERVAL_MS + SPOTIFY_TRANSIENT_RETRY_DELAYS_MS[0]
+		);
+		await expect(pending).resolves.toMatchObject({ fallback: true });
+		expect(request).toHaveBeenCalledTimes(3);
+		expect(expectMetricInvariants()).toMatchObject({
+			searchRequests: 3,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 2,
+			transientRetries: 1
 		});
 	});
 
@@ -773,9 +841,13 @@ describe('Spotify server-session search cache', () => {
 		expect(request).toHaveBeenCalledTimes(3);
 		expect(getSpotifySessionMetrics()).toEqual({
 			searchRequests: 3,
+			primarySearchRequests: 3,
+			fallbackSearchRequests: 0,
 			transientRetries: 2,
 			cacheHits: 0,
 			persistentCacheHits: 0,
+			primaryPersistentCacheHits: 0,
+			fallbackPersistentCacheHits: 0,
 			rateLimitResponses: 0,
 			quotaExceededResponses: 0
 		});
@@ -785,6 +857,36 @@ describe('Spotify server-session search cache', () => {
 		await vi.advanceTimersByTimeAsync(SPOTIFY_SEARCH_INTERVAL_MS);
 		await expect(repeated).resolves.toMatchObject({ title: 'Exhausted' });
 		expect(request).toHaveBeenCalledTimes(4);
+	});
+
+	it('does not count a caller cancelled while its search is waiting to dispatch', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const request = vi.fn(async () => {
+			await gate;
+			return searchResponse();
+		}) as unknown as Fetcher;
+		const first = searchSpotifyTrack({ artist: 'Artist', title: 'Running' }, 'token', request);
+		const controller = new AbortController();
+		const cancelled = searchSpotifyTrack(
+			{ artist: 'Artist', title: 'Queued cancellation' },
+			'token',
+			request,
+			controller.signal
+		);
+
+		controller.abort();
+		await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+		release?.();
+		await expect(first).resolves.toMatchObject({ title: 'Running' });
+		expect(request).toHaveBeenCalledOnce();
+		expect(expectMetricInvariants()).toMatchObject({
+			searchRequests: 1,
+			primarySearchRequests: 1,
+			fallbackSearchRequests: 0
+		});
 	});
 
 	it('keeps parser-invalid responses typed separately and non-cacheable', async () => {
