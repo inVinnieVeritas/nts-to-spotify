@@ -180,7 +180,13 @@ export const restoreCatalogRetryState = (
 	}
 
 	const cooldownUntil = progress?.retry?.cooldownUntil;
-	if (!Number.isFinite(cooldownUntil) || (cooldownUntil as number) <= now) {
+	if (
+		!Number.isSafeInteger(now) ||
+		now < 0 ||
+		!Number.isSafeInteger(cooldownUntil) ||
+		(cooldownUntil as number) <= now ||
+		!Number.isSafeInteger((cooldownUntil as number) - now)
+	) {
 		return { cooldownUntil: 0, pausedByRateLimit: false };
 	}
 

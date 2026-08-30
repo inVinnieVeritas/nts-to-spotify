@@ -190,6 +190,19 @@ describe('catalogue progress restoration', () => {
 			cooldownUntil: 0,
 			pausedByRateLimit: false
 		});
+		for (const cooldownUntil of [
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			Number.MAX_SAFE_INTEGER + 1,
+			1.5
+		]) {
+			expect(
+				restoreCatalogRetryState(
+					{ ...progress, retry: { cooldownUntil, pausedByRateLimit: true } },
+					now
+				)
+			).toEqual({ cooldownUntil: 0, pausedByRateLimit: false });
+		}
 	});
 
 	it('restores a saved playlist order choice', () => {

@@ -75,6 +75,12 @@
 		loadCatalogProgress,
 		saveCatalogProgress
 	} from '$lib/utils/catalog-progress.client';
+	import {
+		canStartSpotifySearch,
+		shouldInterruptForGlobalSpotifySearchCooldown,
+		SpotifySearchCooldownController,
+		type SpotifySearchCooldownState
+	} from '$lib/utils/spotify-search-cooldown.client';
 	import type { PageData } from './$types';
 
 	export let data: PageData;
@@ -125,13 +131,16 @@
 	let persistenceAvailable = true;
 	let cooldownUntil = 0;
 	let cooldownRemaining = 0;
+	let catalogCooldownReason: CatalogSpotifyRateLimitReason = 'rate-limited';
 	let cooldownReason: CatalogSpotifyRateLimitReason = 'rate-limited';
+	let globalCooldown: SpotifySearchCooldownState | null = null;
 	let pausedByRateLimit = false;
 	let spotifySessionMetrics: SpotifySessionMetrics | null = null;
 	let cancelRequested = false;
 	let automaticRateLimitCount = 0;
 	let scanController: AbortController | undefined;
 	let cooldownTimer: ReturnType<typeof setInterval> | undefined;
+	let unsubscribeGlobalCooldown: (() => void) | undefined;
 	let mounted = false;
 	let destroyed = false;
 	let skipDestroyPersistence = false;
@@ -146,6 +155,7 @@
 	let showGeneration = 0;
 	let reviewFilter: CatalogReviewFilter = 'all';
 	const activeEpisodeControllers = new Map<number, AbortController>();
+	const globalCooldownController = new SpotifySearchCooldownController();
 
 	let episodes: EpisodeState[] = reconcileEpisodes(data.episodes);
 
@@ -288,6 +298,28 @@
 		if (parsed) spotifySessionMetrics = parsed;
 	};
 
+	const effectiveCooldownState = (): {
+		cooldownUntil: number;
+		category: CatalogSpotifyRateLimitReason;
+	} | null => {
+		const now = Date.now();
+		const localActive = cooldownUntil > now;
+		const currentGlobalCooldown = globalCooldown;
+		const globalActive = currentGlobalCooldown && currentGlobalCooldown.cooldownUntil > now;
+		if (!localActive && !globalActive) return null;
+		if (
+			currentGlobalCooldown &&
+			globalActive &&
+			(!localActive || currentGlobalCooldown.cooldownUntil >= cooldownUntil)
+		) {
+			return {
+				cooldownUntil: currentGlobalCooldown.cooldownUntil,
+				category: currentGlobalCooldown.category
+			};
+		}
+		return { cooldownUntil, category: catalogCooldownReason };
+	};
+
 	const scanEpisode = async (
 		index: number,
 		parentSignal: AbortSignal,
@@ -297,6 +329,8 @@
 		if (generation !== showGeneration || showAlias !== activeShowAlias) {
 			return { type: 'cancelled' };
 		}
+
+		if (!canStartSpotifySearch(globalCooldown)) return { type: 'cancelled' };
 
 		const scope = createAbortScope(parentSignal, BROWSER_EPISODE_TIMEOUT_MS);
 		activeEpisodeControllers.set(index, scope.controller);
@@ -333,9 +367,15 @@
 						? (payload as { reason: unknown }).reason
 						: undefined
 				);
-				cooldownUntil = Math.max(cooldownUntil, retryNow + retryAfterSeconds * 1000);
+				const receivedCooldownUntil = retryNow + retryAfterSeconds * 1000;
+				cooldownUntil = Math.max(cooldownUntil, receivedCooldownUntil);
+				catalogCooldownReason = reason;
 				cooldownReason = reason;
-				cooldownRemaining = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
+				globalCooldown = globalCooldownController.extend(receivedCooldownUntil, reason);
+				const activeCooldown = effectiveCooldownState();
+				cooldownRemaining = activeCooldown
+					? Math.max(1, Math.ceil((activeCooldown.cooldownUntil - Date.now()) / 1000))
+					: 0;
 				episodes[index].status = 'rate-limited';
 				episodes[index].error = 'Waiting for Spotify';
 				episodes = episodes;
@@ -409,19 +449,43 @@
 	};
 
 	const waitForCooldown = async (signal: AbortSignal) => {
-		while (cooldownUntil > Date.now()) {
-			cooldownRemaining = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000));
-			await abortableDelay(Math.min(1000, cooldownUntil - Date.now()), signal);
+		let activeCooldown = effectiveCooldownState();
+		while (activeCooldown) {
+			cooldownRemaining = Math.max(
+				1,
+				Math.ceil((activeCooldown.cooldownUntil - Date.now()) / 1000)
+			);
+			await abortableDelay(Math.min(1000, activeCooldown.cooldownUntil - Date.now()), signal);
+			activeCooldown = effectiveCooldownState();
 		}
 		cooldownRemaining = 0;
 	};
 
 	const updateCooldownRemaining = () => {
 		const cooldownWasActive = cooldownRemaining > 0;
-		cooldownRemaining =
-			cooldownUntil > Date.now() ? Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000)) : 0;
+		globalCooldown = globalCooldownController.clearExpired();
+		const activeCooldown = effectiveCooldownState();
+		cooldownRemaining = activeCooldown
+			? Math.max(1, Math.ceil((activeCooldown.cooldownUntil - Date.now()) / 1000))
+			: 0;
+		if (activeCooldown) cooldownReason = activeCooldown.category;
 		if (cooldownWasActive && cooldownRemaining === 0 && pausedByRateLimit) {
 			scanMessage = 'Scan paused. Resume is now available.';
+		}
+	};
+
+	const applyGlobalCooldown = (state: SpotifySearchCooldownState | null) => {
+		const shouldInterrupt = shouldInterruptForGlobalSpotifySearchCooldown(
+			state,
+			cooldownUntil,
+			scanning
+		);
+		globalCooldown = state;
+		updateCooldownRemaining();
+		if (shouldInterrupt) {
+			pausedByRateLimit = true;
+			scanController?.abort();
+			abortActiveEpisodes();
 		}
 	};
 
@@ -610,6 +674,7 @@
 						playlistOrder
 					).dateStamp;
 					cooldownUntil = restoredProgress.retry.cooldownUntil;
+					catalogCooldownReason = 'rate-limited';
 					pausedByRateLimit = restoredProgress.retry.pausedByRateLimit;
 					updateCooldownRemaining();
 					persistenceAvailable = true;
@@ -687,8 +752,10 @@
 			dateStamp = defaults.stamp;
 			cooldownUntil = resetState.retry.cooldownUntil;
 			cooldownRemaining = 0;
+			catalogCooldownReason = 'rate-limited';
 			cooldownReason = 'rate-limited';
 			pausedByRateLimit = resetState.retry.pausedByRateLimit;
+			updateCooldownRemaining();
 			automaticRateLimitCount = 0;
 			scanMessage = '';
 			persistenceAvailable = true;
@@ -793,6 +860,7 @@
 		persistenceAvailable = true;
 		cooldownUntil = 0;
 		cooldownRemaining = 0;
+		catalogCooldownReason = 'rate-limited';
 		cooldownReason = 'rate-limited';
 		pausedByRateLimit = false;
 		cancelRequested = false;
@@ -800,7 +868,10 @@
 		let generatedMetadataChanged = false;
 
 		try {
-			const saved = await loadCatalogProgress(showAlias);
+			const [saved] = await Promise.all([
+				loadCatalogProgress(showAlias),
+				globalCooldownController.initialize()
+			]);
 			if (
 				destroyed ||
 				!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
@@ -837,6 +908,7 @@
 			}
 			const retry = restoreCatalogRetryState(saved);
 			cooldownUntil = retry.cooldownUntil;
+			catalogCooldownReason = 'rate-limited';
 			cooldownReason = 'rate-limited';
 			pausedByRateLimit = retry.pausedByRateLimit;
 			updateCooldownRemaining();
@@ -870,6 +942,7 @@
 
 	onMount(() => {
 		mounted = true;
+		unsubscribeGlobalCooldown = globalCooldownController.subscribe(applyGlobalCooldown);
 		void initializeShow(data);
 		cooldownTimer = setInterval(updateCooldownRemaining, 1000);
 	});
@@ -880,6 +953,8 @@
 		destroyed = true;
 		showGeneration += 1;
 		if (cooldownTimer) clearInterval(cooldownTimer);
+		unsubscribeGlobalCooldown?.();
+		globalCooldownController.destroy();
 		for (const episode of episodes) {
 			if (episode.status === 'scanning' || episode.status === 'rate-limited') {
 				episode.status = 'pending';
@@ -938,15 +1013,15 @@
 						</p>
 					</div>
 				{/if}
-				{#if cooldownRemaining > 0}
-					<p class="font-base">
-						{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
+			{/if}
+			{#if cooldownRemaining > 0}
+				<p class="font-base">
+					{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
+				</p>
+				{#if cooldownReason === 'quota-exceeded'}
+					<p class="font-small-beast">
+						Spotify does not expose the remaining quota or its numerical limit.
 					</p>
-					{#if cooldownReason === 'quota-exceeded'}
-						<p class="font-small-beast">
-							Spotify does not expose the remaining quota or its numerical limit.
-						</p>
-					{/if}
 				{/if}
 			{/if}
 			{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
@@ -1093,8 +1168,11 @@
 
 						{#if episode.status === 'error' && !scanning}
 							<div class="retry">
-								<Button size="sm" variant="outline" on:click={() => scanCatalog([episodeIndex])}
-									>Retry</Button
+								<Button
+									size="sm"
+									variant="outline"
+									disabled={cooldownRemaining > 0}
+									on:click={() => scanCatalog([episodeIndex])}>Retry</Button
 								>
 							</div>
 						{/if}

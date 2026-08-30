@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { Button, Divider, LoginWithSpotify, Logo, Panel } from '$components';
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import {
 		applySavedCatalogUpdateOutcome,
 		createSavedCatalogCards,
@@ -11,6 +11,12 @@
 		type SavedCatalogCard
 	} from '$lib/utils/catalog-dashboard.client';
 	import { deleteCatalogProgress, listCatalogProgress } from '$lib/utils/catalog-progress.client';
+	import {
+		formatSpotifySearchCooldownDashboardNotice,
+		SpotifySearchCooldownController,
+		spotifySearchCooldownRemainingSeconds,
+		type SpotifySearchCooldownState
+	} from '$lib/utils/spotify-search-cooldown.client';
 
 	const me = $page.data.user;
 	let savedCatalogues: SavedCatalogCard[] = [];
@@ -18,6 +24,12 @@
 	let savedCataloguesWarning = '';
 	let savedCataloguesError = '';
 	let deletingAlias: string | undefined;
+	let globalCooldown: SpotifySearchCooldownState | null = null;
+	let globalCooldownRemaining = 0;
+	$: globalCooldownNotice = formatSpotifySearchCooldownDashboardNotice(globalCooldown);
+	let cooldownTimer: ReturnType<typeof setInterval> | undefined;
+	let unsubscribeGlobalCooldown: (() => void) | undefined;
+	const globalCooldownController = new SpotifySearchCooldownController();
 	let catalogueCheckStates: Record<
 		string,
 		{
@@ -39,16 +51,23 @@
 		savedCataloguesWarning = '';
 		try {
 			const result = await listCatalogProgress();
+			await globalCooldownController.initialize(result.records);
 			savedCatalogues = createSavedCatalogCards(result.records);
 			if (result.skippedCount > 0) {
 				savedCataloguesWarning = 'Some saved catalogue records could not be displayed.';
 			}
 		} catch {
+			await globalCooldownController.initialize([]);
 			savedCatalogues = [];
 			savedCataloguesError = 'Saved catalogues are unavailable in this browser.';
 		} finally {
 			savedCataloguesLoading = false;
 		}
+	};
+
+	const updateGlobalCooldown = (state = globalCooldownController.clearExpired()) => {
+		globalCooldown = state;
+		globalCooldownRemaining = spotifySearchCooldownRemainingSeconds(state);
 	};
 
 	const downloadBackup = (card: SavedCatalogCard) => {
@@ -112,7 +131,15 @@
 	};
 
 	onMount(() => {
+		unsubscribeGlobalCooldown = globalCooldownController.subscribe(updateGlobalCooldown);
 		void loadSavedCatalogues();
+		cooldownTimer = setInterval(() => updateGlobalCooldown(), 1000);
+	});
+
+	onDestroy(() => {
+		if (cooldownTimer) clearInterval(cooldownTimer);
+		unsubscribeGlobalCooldown?.();
+		globalCooldownController.destroy();
 	});
 </script>
 
@@ -203,6 +230,11 @@
 
 		<section class="saved-catalogues" aria-labelledby="saved-catalogues-heading">
 			<h2 id="saved-catalogues-heading" class="font-title">SAVED CATALOGUES</h2>
+			{#if globalCooldownNotice && globalCooldownRemaining > 0}
+				<div class="catalogue-warning font-base" role="status">
+					<p>{globalCooldownNotice}</p>
+				</div>
+			{/if}
 			{#if savedCataloguesLoading}
 				<p class="font-base" role="status">Loading saved catalogues…</p>
 			{:else}
