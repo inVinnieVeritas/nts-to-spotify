@@ -76,6 +76,24 @@
 		saveCatalogProgress
 	} from '$lib/utils/catalog-progress.client';
 	import {
+		CATALOG_SCAN_SESSION_CHECKPOINT_INTERVAL_MS,
+		catalogScanOutcomeLabel,
+		checkpointCatalogScanSession,
+		emptyCatalogScanTiming,
+		finalizeCatalogScanSession,
+		formatCatalogScanClock,
+		formatCatalogScanDuration,
+		formatCatalogScanSessionSummary,
+		liveCatalogScanDuration,
+		recordCatalogMatchingRequestDuration,
+		recordCatalogScanEpisodeOutcome,
+		restoreCatalogScanTiming,
+		startCatalogScanSession,
+		type CatalogScanSessionOutcome,
+		type CatalogScanTiming,
+		type FinalizedCatalogScanSession
+	} from '$lib/utils/catalog-scan-session';
+	import {
 		canStartSpotifySearch,
 		shouldInterruptForGlobalSpotifySearchCooldown,
 		SpotifySearchCooldownController,
@@ -154,10 +172,68 @@
 	let activeShowCover = data.cover;
 	let showGeneration = 0;
 	let reviewFilter: CatalogReviewFilter = 'all';
+	let scanTiming: CatalogScanTiming = emptyCatalogScanTiming();
+	let scanMonotonicStartedAt: number | undefined;
+	let scanSessionStartPersistence: Promise<void> | undefined;
+	let lastScanCheckpointMonotonic = 0;
+	let liveScanDurationMs = 0;
+	let latestScanSession: FinalizedCatalogScanSession | undefined;
 	const activeEpisodeControllers = new Map<number, AbortController>();
 	const globalCooldownController = new SpotifySearchCooldownController();
 
 	let episodes: EpisodeState[] = reconcileEpisodes(data.episodes);
+
+	const monotonicNow = () => globalThis.performance?.now?.() ?? Date.now();
+	const activeScanDuration = () =>
+		scanTiming.active && scanMonotonicStartedAt !== undefined
+			? liveCatalogScanDuration(scanMonotonicStartedAt, monotonicNow())
+			: (scanTiming.active?.activeDurationMs ?? 0);
+	const scanTimingCheckpoint = () =>
+		checkpointCatalogScanSession(scanTiming, Date.now(), activeScanDuration());
+	const refreshScanSessionPresentation = () => {
+		liveScanDurationMs = activeScanDuration();
+		latestScanSession = scanTiming.history[0];
+	};
+
+	const formatScanStartedAt = (timestamp: number) =>
+		new Intl.DateTimeFormat(undefined, {
+			dateStyle: 'medium',
+			timeStyle: 'short'
+		}).format(new Date(timestamp));
+	const finalizeActiveScanSession = (outcome: CatalogScanSessionOutcome) => {
+		const finalized = finalizeCatalogScanSession(
+			scanTiming,
+			outcome,
+			Date.now(),
+			activeScanDuration()
+		);
+		scanTiming = finalized.timing;
+		scanMonotonicStartedAt = undefined;
+		liveScanDurationMs = 0;
+		latestScanSession = finalized.timing.history[0];
+		return finalized.session;
+	};
+	const beginActiveScanSession = () => {
+		const startedAt = Date.now();
+		scanTiming = startCatalogScanSession(scanTiming, startedAt);
+		scanMonotonicStartedAt = monotonicNow();
+		lastScanCheckpointMonotonic = scanMonotonicStartedAt;
+		liveScanDurationMs = 0;
+		latestScanSession = scanTiming.history[0];
+		const pendingPersistence = persistProgress(true);
+		scanSessionStartPersistence = pendingPersistence;
+		void pendingPersistence.then(
+			() => {
+				if (scanSessionStartPersistence === pendingPersistence)
+					scanSessionStartPersistence = undefined;
+			},
+			() => {
+				if (scanSessionStartPersistence === pendingPersistence)
+					scanSessionStartPersistence = undefined;
+			}
+		);
+		return pendingPersistence;
+	};
 
 	const snapshotWriter = createLatestSnapshotWriter(
 		saveCatalogProgress,
@@ -184,7 +260,8 @@
 			{
 				showName: activeShowName,
 				...(activeShowCover ? { showCover: activeShowCover } : {})
-			}
+			},
+			scanTimingCheckpoint()
 		);
 
 	const persistProgress = (waitForSave = false) => {
@@ -339,6 +416,16 @@
 		episodes[index].error = undefined;
 		episodes = episodes;
 		void persistProgress();
+		const requestStartedAt = monotonicNow();
+		let requestMeasured = false;
+		const finishRequestMeasurement = () => {
+			if (requestMeasured) return;
+			requestMeasured = true;
+			scanTiming = recordCatalogMatchingRequestDuration(
+				scanTiming,
+				liveCatalogScanDuration(requestStartedAt, monotonicNow())
+			);
+		};
 
 		try {
 			const response = await fetch('/api/nts/matches', {
@@ -355,6 +442,7 @@
 			}
 			if (response.status === 429) {
 				const payload = await response.json().catch(() => null);
+				finishRequestMeasurement();
 				updateSpotifySessionMetrics(payload);
 				const retryNow = Date.now();
 				const retryAfterSeconds = parseCatalogRetryAfter(
@@ -389,6 +477,7 @@
 			}
 			if (response.status === 502 || response.status === 503) {
 				const payload = await response.json().catch(() => null);
+				finishRequestMeasurement();
 				updateSpotifySessionMetrics(payload);
 				if (isSystemicSpotifyResponseFailure(payload)) {
 					episodes[index].status = 'pending';
@@ -398,12 +487,16 @@
 					return { type: 'systemic-spotify-failure' };
 				}
 			}
-			if (!response.ok) throw new Error(`Request failed (${response.status})`);
+			if (!response.ok) {
+				finishRequestMeasurement();
+				throw new Error(`Request failed (${response.status})`);
+			}
 
 			const result = (await response.json()) as {
 				tracks: MatchedTrack[];
 				spotifySessionMetrics?: unknown;
 			};
+			finishRequestMeasurement();
 			updateSpotifySessionMetrics(result);
 			if (generation !== showGeneration || showAlias !== activeShowAlias) {
 				return { type: 'cancelled' };
@@ -416,9 +509,11 @@
 			episodes[index].status = 'done';
 			episodes[index].error = undefined;
 			episodes = episodes;
+			scanTiming = recordCatalogScanEpisodeOutcome(scanTiming, 'successful');
 			await persistProgress(true);
 			return { type: 'done' };
 		} catch (cause) {
+			finishRequestMeasurement();
 			if (generation !== showGeneration || showAlias !== activeShowAlias) {
 				return { type: 'cancelled' };
 			}
@@ -434,9 +529,11 @@
 				? 'Episode scan timed out.'
 				: 'Could not scan this episode.';
 			episodes = episodes;
+			scanTiming = recordCatalogScanEpisodeOutcome(scanTiming, 'failed');
 			void persistProgress();
 			return { type: 'failed' };
 		} finally {
+			finishRequestMeasurement();
 			scope.cleanup();
 			if (activeEpisodeControllers.get(index) === scope.controller) {
 				activeEpisodeControllers.delete(index);
@@ -459,6 +556,11 @@
 			activeCooldown = effectiveCooldownState();
 		}
 		cooldownRemaining = 0;
+		let sessionPersistence = scanSessionStartPersistence;
+		if (scanning && !signal.aborted && !scanTiming.active) {
+			sessionPersistence = beginActiveScanSession();
+		}
+		if (sessionPersistence) await sessionPersistence;
 	};
 
 	const updateCooldownRemaining = () => {
@@ -489,6 +591,20 @@
 		}
 	};
 
+	const updatePageTimers = () => {
+		updateCooldownRemaining();
+		if (!scanning || !scanTiming.active || scanMonotonicStartedAt === undefined) return;
+		const currentMonotonic = monotonicNow();
+		liveScanDurationMs = liveCatalogScanDuration(scanMonotonicStartedAt, currentMonotonic);
+		if (
+			currentMonotonic - lastScanCheckpointMonotonic >=
+			CATALOG_SCAN_SESSION_CHECKPOINT_INTERVAL_MS
+		) {
+			lastScanCheckpointMonotonic = currentMonotonic;
+			void persistProgress();
+		}
+	};
+
 	const scanCatalog = async (requestedIndexes?: number[]) => {
 		if (scanning || !restored || progressTransferBusy) return;
 		updateCooldownRemaining();
@@ -506,12 +622,16 @@
 		pausedByRateLimit = false;
 		automaticRateLimitCount = 0;
 		scanMessage = '';
+		const sessionPersistence = beginActiveScanSession();
 		const currentScanController = new AbortController();
 		scanController = currentScanController;
 		const currentGeneration = showGeneration;
 		const currentShowAlias = activeShowAlias;
 		let systemicSpotifyFailure = false;
+		let workerFailure = false;
 		const systemicallyAffectedIndexes = new Set<number>();
+		await sessionPersistence;
+		if (currentGeneration !== showGeneration || currentShowAlias !== activeShowAlias) return;
 		await runCatalogWorkers({
 			indexes: queue,
 			concurrency: 2,
@@ -522,10 +642,11 @@
 			onRateLimit: (_index, outcome) => {
 				automaticRateLimitCount += 1;
 				abortActiveEpisodes();
+				finalizeActiveScanSession('spotify-cooldown');
+				void persistProgress();
 
 				if (outcome.requiresManualResume || automaticRateLimitCount >= MAX_AUTOMATIC_RATE_LIMITS) {
 					pausedByRateLimit = true;
-					void persistProgress();
 					currentScanController.abort();
 				}
 			},
@@ -538,7 +659,9 @@
 				abortActiveEpisodes();
 				currentScanController.abort();
 			}
-		}).catch(() => undefined);
+		}).catch((cause) => {
+			if (!isAbortError(cause)) workerFailure = true;
+		});
 		if (currentGeneration !== showGeneration || currentShowAlias !== activeShowAlias) return;
 		for (const [index, episode] of episodes.entries()) {
 			if (
@@ -554,6 +677,15 @@
 		episodes = episodes;
 		scanning = false;
 		updateCooldownRemaining();
+		const sessionHadEpisodeFailures = (scanTiming.active?.failedEpisodes ?? 0) > 0;
+		const sessionOutcome: CatalogScanSessionOutcome = cancelRequested
+			? 'cancelled'
+			: pausedByRateLimit
+				? 'spotify-cooldown'
+				: systemicSpotifyFailure || workerFailure || sessionHadEpisodeFailures
+					? 'failed'
+					: 'completed';
+		finalizeActiveScanSession(sessionOutcome);
 		if (cancelRequested) scanMessage = 'Scan cancelled. Completed episodes were saved.';
 		else if (systemicSpotifyFailure)
 			scanMessage = 'Spotify search is unavailable. Scan paused; pending episodes can be retried.';
@@ -668,6 +800,10 @@
 					publicPlaylist = restoredProgress.progress.playlist.public;
 					linkedPlaylistId = restoreCatalogLinkedPlaylistId(restoredProgress.progress);
 					playlistCreationPending = restoreCatalogCreationPending(restoredProgress.progress);
+					scanTiming = emptyCatalogScanTiming();
+					scanMonotonicStartedAt = undefined;
+					liveScanDurationMs = 0;
+					latestScanSession = undefined;
 					dateStamp = createGeneratedPlaylistText(
 						data.name,
 						data.episodes,
@@ -757,6 +893,10 @@
 			pausedByRateLimit = resetState.retry.pausedByRateLimit;
 			updateCooldownRemaining();
 			automaticRateLimitCount = 0;
+			scanTiming = resetState.scanTiming;
+			scanMonotonicStartedAt = undefined;
+			liveScanDurationMs = 0;
+			latestScanSession = undefined;
 			scanMessage = '';
 			persistenceAvailable = true;
 			skipDestroyPersistence = true;
@@ -830,11 +970,25 @@
 		downloadCatalogReviewCsv(activeShowName, activeShowAlias, episodes);
 
 	const initializeShow = async (pageData: PageData) => {
+		const previousShowWasRestored = restored;
 		scanController?.abort();
 		abortActiveEpisodes();
 		activeEpisodeControllers.clear();
 		showGeneration += 1;
 		const generation = showGeneration;
+		if (scanTiming.active) {
+			for (const episode of episodes) {
+				if (episode.status === 'scanning' || episode.status === 'rate-limited') {
+					episode.status = 'pending';
+					episode.error = undefined;
+				}
+			}
+			episodes = episodes;
+			scanning = false;
+			finalizeActiveScanSession('interrupted');
+			if (previousShowWasRestored) await persistProgress(true);
+		}
+		if (destroyed || generation !== showGeneration) return;
 		const showAlias = pageData.showAlias;
 		activeShowAlias = showAlias;
 		activeShowName = pageData.name;
@@ -865,7 +1019,13 @@
 		pausedByRateLimit = false;
 		cancelRequested = false;
 		automaticRateLimitCount = 0;
+		scanTiming = emptyCatalogScanTiming();
+		scanMonotonicStartedAt = undefined;
+		lastScanCheckpointMonotonic = 0;
+		liveScanDurationMs = 0;
+		latestScanSession = undefined;
 		let generatedMetadataChanged = false;
+		let scanTimingChanged = false;
 
 		try {
 			const [saved] = await Promise.all([
@@ -879,6 +1039,10 @@
 				return;
 			}
 			episodes = reconcileEpisodesPreservingSaved(pageData.episodes, saved);
+			const restoredTiming = restoreCatalogScanTiming(saved?.scanTiming, true);
+			scanTiming = restoredTiming.timing;
+			scanTimingChanged = restoredTiming.changed;
+			refreshScanSessionPresentation();
 			const reconciledBounds = getCatalogEpisodeDateBounds(episodes);
 			firstEpisode = reconciledBounds.oldest;
 			lastEpisode = reconciledBounds.newest;
@@ -935,7 +1099,7 @@
 				shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
 			) {
 				restored = true;
-				if (generatedMetadataChanged) void persistProgress();
+				if (generatedMetadataChanged || scanTimingChanged) void persistProgress();
 			}
 		}
 	};
@@ -944,7 +1108,7 @@
 		mounted = true;
 		unsubscribeGlobalCooldown = globalCooldownController.subscribe(applyGlobalCooldown);
 		void initializeShow(data);
-		cooldownTimer = setInterval(updateCooldownRemaining, 1000);
+		cooldownTimer = setInterval(updatePageTimers, 1000);
 	});
 
 	$: if (mounted && data.showAlias !== activeShowAlias) void initializeShow(data);
@@ -963,6 +1127,8 @@
 		}
 		scanController?.abort();
 		abortActiveEpisodes();
+		scanning = false;
+		finalizeActiveScanSession('interrupted');
 		if (!skipDestroyPersistence) void persistProgress();
 	});
 </script>
@@ -1003,6 +1169,12 @@
 					{/if}
 					<p class="font-small-beast">{progressLabel}</p>
 				</div>
+				{#if scanning && scanTiming.active}
+					<p class="scan-session-line font-small-beast" role="status">
+						Current scan: {formatCatalogScanClock(liveScanDurationMs)} · {scanTiming.active
+							.processedEpisodes} episodes processed
+					</p>
+				{/if}
 				{#if spotifySessionMetrics}
 					<div class="search-metrics" aria-label="Spotify Search usage metrics">
 						{#each formatSpotifySessionMetricLines(spotifySessionMetrics) as metricLine}
@@ -1025,6 +1197,51 @@
 				{/if}
 			{/if}
 			{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
+			{#if latestScanSession}
+				<div class="scan-session-summary">
+					<p class="font-small-beast">
+						Last scan: {formatCatalogScanSessionSummary(latestScanSession)}
+					</p>
+					{#if latestScanSession.longestMatchingRequestMs > 0}
+						<p class="font-small-beast">
+							Longest matching request (client-observed): {formatCatalogScanDuration(
+								latestScanSession.longestMatchingRequestMs
+							)}
+						</p>
+					{/if}
+				</div>
+			{/if}
+			{#if scanTiming.history.length > 0}
+				<details class="scan-history">
+					<summary class="font-small-beast">Scan history ({scanTiming.history.length})</summary>
+					<ol>
+						{#each scanTiming.history as session (session.id)}
+							<li>
+								<p class="font-small-beast">
+									<strong>{formatScanStartedAt(session.startedAt)}</strong> · {formatCatalogScanDuration(
+										session.activeDurationMs
+									)} · {catalogScanOutcomeLabel(session.outcome)}
+								</p>
+								<p class="font-tiny">
+									{session.processedEpisodes} processed · {session.successfulEpisodes} successful ·
+									{session.failedEpisodes} failed
+								</p>
+								{#if session.longestMatchingRequestMs > 0}
+									<p class="font-tiny">
+										Longest matching request: {formatCatalogScanDuration(
+											session.longestMatchingRequestMs
+										)}
+									</p>
+								{/if}
+							</li>
+						{/each}
+					</ol>
+					<p class="font-tiny">
+						Matching-request durations are observed by this browser and are not guaranteed server
+						execution times.
+					</p>
+				</details>
+			{/if}
 			{#if !persistenceAvailable}
 				<p class="font-small-beast">Progress persistence is unavailable.</p>
 			{/if}
@@ -1302,6 +1519,42 @@
 
 	.search-metrics p {
 		margin: 0;
+	}
+
+	.scan-session-line,
+	.scan-session-summary p,
+	.scan-history p {
+		margin: 0;
+	}
+
+	.scan-session-summary {
+		display: grid;
+		gap: 4px;
+	}
+
+	.scan-history {
+		margin-top: 10px;
+	}
+
+	.scan-history summary {
+		cursor: pointer;
+		width: fit-content;
+	}
+
+	.scan-history summary:focus-visible {
+		outline: 2px solid currentColor;
+		outline-offset: 3px;
+	}
+
+	.scan-history ol {
+		display: grid;
+		gap: 10px;
+		margin: 10px 0;
+		padding-left: 24px;
+	}
+
+	.scan-history li {
+		padding-left: 4px;
 	}
 
 	.review-filters {

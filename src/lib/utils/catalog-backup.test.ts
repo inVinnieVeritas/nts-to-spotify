@@ -120,6 +120,30 @@ describe('catalogue progress backup', () => {
 		expect(parseCatalogBackup(JSON.stringify(legacy), 'show').progress.display).toBeUndefined();
 	});
 
+	it('keeps scan timing local and preserves the existing backup format', () => {
+		const progress = makeProgress();
+		progress.updatedAt = EXPORTED_AT_MS;
+		progress.scanTiming = {
+			history: [
+				{
+					id: 'local-session',
+					startedAt: EXPORTED_AT_MS - 10_000,
+					endedAt: EXPORTED_AT_MS,
+					activeDurationMs: 10_000,
+					outcome: 'completed',
+					processedEpisodes: 1,
+					successfulEpisodes: 1,
+					failedEpisodes: 0,
+					longestMatchingRequestMs: 5_000
+				}
+			]
+		};
+
+		const serialized = serializeCatalogBackup(progress, new Date(EXPORTED_AT));
+		expect(serialized).not.toContain('scanTiming');
+		expect(parseCatalogBackup(serialized, 'show').progress.scanTiming).toBeUndefined();
+	});
+
 	it('accepts legacy backups without linkage state and rejects invalid linked IDs', () => {
 		const legacy = JSON.parse(jsonEnvelope()) as {
 			progress: { playlist: { linkedPlaylistId?: string; creationPending?: boolean } };

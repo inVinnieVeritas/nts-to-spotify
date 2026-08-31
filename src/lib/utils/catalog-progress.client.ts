@@ -4,6 +4,7 @@ import {
 	CATALOG_BACKUP_VERSION,
 	parseCatalogBackup
 } from './catalog-backup';
+import { restoreCatalogScanTiming } from './catalog-scan-session';
 
 const DATABASE_NAME = 'nts-to-spotify';
 const DATABASE_VERSION = 1;
@@ -159,20 +160,25 @@ const waitForQueuedCatalogProgressOperations = async (timeoutMs = INDEXED_DB_TIM
 
 const validateStoredCatalogProgress = (value: unknown, now: number) => {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-	const showAlias = (value as Record<string, unknown>).showAlias;
+	const record = value as Record<string, unknown>;
+	const showAlias = record.showAlias;
 	if (typeof showAlias !== 'string' || showAlias.length === 0) return undefined;
 	try {
-		return parseCatalogBackup(
+		const { scanTiming: storedScanTiming, ...backupCompatibleProgress } = record;
+		const progress = parseCatalogBackup(
 			JSON.stringify({
 				format: CATALOG_BACKUP_FORMAT,
 				version: CATALOG_BACKUP_VERSION,
 				exportedAt: new Date(now).toISOString(),
 				showAlias,
-				progress: value
+				progress: backupCompatibleProgress
 			}),
 			showAlias,
 			now
 		).progress;
+		const scanTiming = restoreCatalogScanTiming(storedScanTiming).timing;
+		if (scanTiming.active || scanTiming.history.length > 0) progress.scanTiming = scanTiming;
+		return progress;
 	} catch {
 		return undefined;
 	}

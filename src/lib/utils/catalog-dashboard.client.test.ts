@@ -138,6 +138,27 @@ describe('saved catalogue dashboard summaries', () => {
 		expect(catalogDisplayName(legacy)).toBe('The Breakfast Show');
 		expect(createSavedCatalogCard(legacy).showCover).toBeUndefined();
 	});
+
+	it('shows only the most recent validated scan-session summary', () => {
+		const recent = {
+			id: 'recent-session',
+			startedAt: Date.UTC(2026, 7, 20, 12),
+			endedAt: Date.UTC(2026, 7, 20, 12, 5),
+			activeDurationMs: 300_000,
+			outcome: 'spotify-cooldown' as const,
+			processedEpisodes: 3,
+			successfulEpisodes: 3,
+			failedEpisodes: 0,
+			longestMatchingRequestMs: 90_000
+		};
+		const older = { ...recent, id: 'older-session', endedAt: recent.endedAt - 60_000 };
+		const card = createSavedCatalogCard(
+			savedProgress({ scanTiming: { history: [older, recent] } })
+		);
+
+		expect(card.lastScanSession).toEqual(recent);
+		expect(card).not.toHaveProperty('scanHistory');
+	});
 });
 
 describe('saved catalogue dashboard actions', () => {

@@ -1,5 +1,6 @@
 import type { MatchedTrack, NTSEpisodeSummary, URI } from '$lib/types';
 import { isAbortError } from './abort';
+import { emptyCatalogScanTiming, type CatalogScanTiming } from './catalog-scan-session';
 import { getTrackPartMismatchWarning } from './part-mismatch';
 
 export const CATALOG_PROGRESS_SCHEMA_VERSION = 2;
@@ -88,6 +89,7 @@ export type CatalogProgress = {
 	playlist: PlaylistDraft;
 	retry?: CatalogRetryState;
 	display?: CatalogDisplayMetadata;
+	scanTiming?: CatalogScanTiming;
 };
 
 export type CatalogDisplayMetadata = {
@@ -265,7 +267,8 @@ export const createCatalogResetState = (
 	episodes: reconcileEpisodes(catalog),
 	playlistOrder: 'latest-first' as const,
 	retry: { cooldownUntil: 0, pausedByRateLimit: false },
-	playlist: { ...playlist, public: false, order: 'latest-first' as const }
+	playlist: { ...playlist, public: false, order: 'latest-first' as const },
+	scanTiming: emptyCatalogScanTiming()
 });
 
 const shortPlaylistDate = (date: string) => {
@@ -393,7 +396,8 @@ export const createCatalogProgress = (
 	episodes: EpisodeState[],
 	playlist: PlaylistDraft,
 	retry: CatalogRetryState = { cooldownUntil: 0, pausedByRateLimit: false },
-	display?: CatalogDisplayMetadata
+	display?: CatalogDisplayMetadata,
+	scanTiming?: CatalogScanTiming
 ): CatalogProgress => ({
 	schemaVersion: CATALOG_PROGRESS_SCHEMA_VERSION,
 	matcherVersion: SPOTIFY_MATCHER_VERSION,
@@ -402,7 +406,8 @@ export const createCatalogProgress = (
 	episodes: Object.fromEntries(episodes.map((episode) => [episode.episodeAlias, episode])),
 	playlist,
 	retry,
-	...(display ? { display } : {})
+	...(display ? { display } : {}),
+	...(scanTiming ? { scanTiming } : {})
 });
 
 export const captureCatalogProgress = (
@@ -410,10 +415,11 @@ export const captureCatalogProgress = (
 	episodes: EpisodeState[],
 	playlist: PlaylistDraft,
 	retry?: CatalogRetryState,
-	display?: CatalogDisplayMetadata
+	display?: CatalogDisplayMetadata,
+	scanTiming?: CatalogScanTiming
 ): CatalogProgress =>
 	JSON.parse(
-		JSON.stringify(createCatalogProgress(showAlias, episodes, playlist, retry, display))
+		JSON.stringify(createCatalogProgress(showAlias, episodes, playlist, retry, display, scanTiming))
 	) as CatalogProgress;
 
 export const getResumableEpisodeIndexes = (episodes: EpisodeState[]) =>
