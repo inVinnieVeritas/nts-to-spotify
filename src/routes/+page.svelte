@@ -11,6 +11,7 @@
 		type SavedCatalogCard
 	} from '$lib/utils/catalog-dashboard.client';
 	import { deleteCatalogProgress, listCatalogProgress } from '$lib/utils/catalog-progress.client';
+	import { formatCatalogScanSessionSummary } from '$lib/utils/catalog-scan-session';
 	import {
 		formatSpotifySearchCooldownDashboardNotice,
 		SpotifySearchCooldownController,
@@ -263,6 +264,11 @@
 									duplicates removed
 								</p>
 								<p class="font-small-beast">Last saved {formatSavedAt(catalogue.updatedAt)}</p>
+								{#if catalogue.lastScanSession}
+									<p class="font-small-beast">
+										Last scan: {formatCatalogScanSessionSummary(catalogue.lastScanSession)}
+									</p>
+								{/if}
 								<p class="font-base">
 									{catalogue.linkedPlaylistUrl
 										? 'Spotify playlist linked'

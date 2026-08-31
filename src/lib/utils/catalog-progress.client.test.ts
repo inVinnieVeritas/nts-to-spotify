@@ -263,6 +263,34 @@ describe('catalogue progress listing', () => {
 		expect(original.playlist.title).toBe('Title');
 	});
 
+	it('preserves valid local scan timing while discarding malformed entries individually', async () => {
+		const validSession = {
+			id: 'valid-session',
+			startedAt: Date.UTC(2026, 0, 1),
+			endedAt: Date.UTC(2026, 0, 1, 0, 1),
+			activeDurationMs: 60_000,
+			outcome: 'completed',
+			processedEpisodes: 2,
+			successfulEpisodes: 2,
+			failedEpisodes: 0,
+			longestMatchingRequestMs: 30_000
+		};
+		const stored = {
+			...listedProgress('timed', Date.UTC(2026, 0, 2)),
+			scanTiming: {
+				history: [validSession, { ...validSession, id: '../invalid' }],
+				active: { id: 'malformed' }
+			}
+		};
+		const { factory } = listFactory([stored]);
+
+		const result = await listCatalogProgress({ factory, timeoutMs: 20 });
+		expect(result.skippedCount).toBe(0);
+		expect(result.records[0].scanTiming).toEqual({ history: [validSession] });
+		result.records[0].scanTiming!.history[0].outcome = 'failed';
+		expect(validSession.outcome).toBe('completed');
+	});
+
 	it('does not make Spotify or NTS fetches while listing', async () => {
 		const fetchSpy = vi.spyOn(globalThis, 'fetch');
 		const { factory } = listFactory([listedProgress('offline', Date.UTC(2026, 0, 1))]);

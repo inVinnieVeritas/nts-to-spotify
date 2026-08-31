@@ -12,6 +12,10 @@ import { parseNTSShowCatalog, reconcileSavedCatalogWithNTS } from './catalog-upd
 import { updateCatalogProgress } from './catalog-progress.client';
 import { fetchWithTimeout, type Fetcher } from './request';
 import { parseOfficialNTSArtworkUrl } from './artwork';
+import {
+	getLatestCatalogScanSession,
+	type FinalizedCatalogScanSession
+} from './catalog-scan-session';
 
 const CATALOGUE_CHECK_TIMEOUT_MS = 35_000;
 
@@ -28,6 +32,7 @@ export type SavedCatalogCard = {
 	updatedAt: number;
 	linkedPlaylistUrl?: string;
 	creationPending: boolean;
+	lastScanSession?: FinalizedCatalogScanSession;
 };
 
 export const catalogDisplayName = (progress: CatalogProgress) => {
@@ -58,6 +63,7 @@ export const createSavedCatalogCard = (progress: CatalogProgress): SavedCatalogC
 	const uniqueSelected = uniqueSpotifyUris(selectedOccurrences);
 	const linkedPlaylistId = restoreCatalogLinkedPlaylistId(progress);
 	const showCover = catalogDisplayCover(progress);
+	const lastScanSession = getLatestCatalogScanSession(progress.scanTiming);
 	return {
 		record: progress,
 		showAlias: progress.showAlias,
@@ -70,7 +76,8 @@ export const createSavedCatalogCard = (progress: CatalogProgress): SavedCatalogC
 		duplicateTracks: selectedOccurrences.length - uniqueSelected.length,
 		updatedAt: progress.updatedAt,
 		...(linkedPlaylistId ? { linkedPlaylistUrl: spotifyPlaylistUrl(linkedPlaylistId) } : {}),
-		creationPending: restoreCatalogCreationPending(progress)
+		creationPending: restoreCatalogCreationPending(progress),
+		...(lastScanSession ? { lastScanSession } : {})
 	};
 };
 

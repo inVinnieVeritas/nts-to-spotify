@@ -378,7 +378,8 @@ describe('catalogue progress restoration', () => {
 				public: false,
 				order: 'latest-first'
 			},
-			retry: { cooldownUntil: 0, pausedByRateLimit: false }
+			retry: { cooldownUntil: 0, pausedByRateLimit: false },
+			scanTiming: { history: [] }
 		});
 		expect(state.playlist).not.toHaveProperty('linkedPlaylistId');
 		expect(state.playlist).not.toHaveProperty('creationPending');
