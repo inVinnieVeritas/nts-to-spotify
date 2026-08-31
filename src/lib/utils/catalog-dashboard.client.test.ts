@@ -1,13 +1,21 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	applySavedCatalogUpdateOutcome,
 	catalogDisplayName,
+	checkSavedCatalogWithFeedback,
 	createSavedCatalogCard,
 	createSavedCatalogCards,
 	createSavedCatalogUpdateChecker,
 	deleteSavedCatalogProgressIfConfirmed,
 	downloadSavedCatalogProgress,
-	fetchSavedCatalogCurrentNTS
+	fetchSavedCatalogCurrentNTS,
+	formatSavedCatalogCheckFeedback,
+	isSavedCatalogCheckActive,
+	setSavedCatalogCheckFeedback,
+	type SavedCatalogCheckFeedback,
+	type SavedCatalogCheckFeedbackMap
 } from './catalog-dashboard.client';
 import type { NTSShowCatalog } from '$lib/types';
 import type { CatalogProgress, EpisodeState, ReviewTrack } from './catalog-scan';
@@ -363,5 +371,160 @@ describe('saved catalogue update checks', () => {
 		expect(fetcher).toHaveBeenCalledOnce();
 		expect(fetcher.mock.calls[0][0]).toBe('/api/nts/catalogue');
 		expect(fetcher.mock.calls[0][1]).toMatchObject({ method: 'POST' });
+	});
+
+	it('publishes checking immediately, disables only that check state, and re-enables it after no changes', async () => {
+		let release: (() => void) | undefined;
+		const pending = new Promise<void>((resolve) => (release = resolve));
+		const checker = createSavedCatalogUpdateChecker({
+			loadCurrentCatalog: async () => {
+				await pending;
+				return currentCatalog(['existing']);
+			},
+			updateProgress: async (_showAlias, update) =>
+				update(savedProgress({ episodes: { existing: episode('existing', 'done') } }))
+		});
+		let feedback: SavedCatalogCheckFeedback | undefined;
+
+		const checking = checkSavedCatalogWithFeedback(
+			'jim-o-rourke',
+			checker,
+			(_showAlias, next) => (feedback = next)
+		);
+
+		expect(feedback).toEqual({ type: 'checking' });
+		expect(isSavedCatalogCheckActive(feedback)).toBe(true);
+		expect(formatSavedCatalogCheckFeedback(feedback)).toBe('Checking NTS for new episodes…');
+		release?.();
+		await expect(checking).resolves.toMatchObject({ type: 'up-to-date' });
+		expect(isSavedCatalogCheckActive(feedback)).toBe(false);
+		expect(formatSavedCatalogCheckFeedback(feedback)).toBe(
+			'Checked NTS just now. No new episodes found.'
+		);
+	});
+
+	it.each([
+		{ aliases: ['existing', 'new-one'], count: 1, message: '1 new episode found.' },
+		{
+			aliases: ['existing', 'new-one', 'new-two'],
+			count: 2,
+			message: '2 new episodes found.'
+		}
+	])(
+		'reports accurate singular and plural results for $count additions',
+		async ({ aliases, message }) => {
+			const current = savedProgress({ episodes: { existing: episode('existing', 'done') } });
+			const checker = createSavedCatalogUpdateChecker({
+				loadCurrentCatalog: async () => currentCatalog(aliases),
+				updateProgress: async (_showAlias, update) => update(current)
+			});
+			let feedback: SavedCatalogCheckFeedback | undefined;
+
+			await checkSavedCatalogWithFeedback(
+				'jim-o-rourke',
+				checker,
+				(_showAlias, next) => (feedback = next)
+			);
+
+			expect(formatSavedCatalogCheckFeedback(feedback)).toBe(message);
+		}
+	);
+
+	it('returns a fixed sanitized failure message and re-enables checking', async () => {
+		const checker = createSavedCatalogUpdateChecker({
+			loadCurrentCatalog: async () => {
+				throw Object.assign(new Error('PRIVATE_UPSTREAM_BODY'), {
+					token: 'PRIVATE_TOKEN',
+					url: 'https://nts.example/private'
+				});
+			}
+		});
+		let feedback: SavedCatalogCheckFeedback | undefined;
+
+		await checkSavedCatalogWithFeedback(
+			'jim-o-rourke',
+			checker,
+			(_showAlias, next) => (feedback = next)
+		);
+
+		expect(feedback).toEqual({ type: 'check-failed' });
+		expect(isSavedCatalogCheckActive(feedback)).toBe(false);
+		expect(formatSavedCatalogCheckFeedback(feedback)).toBe(
+			'Could not check NTS. Please try again.'
+		);
+		expect(formatSavedCatalogCheckFeedback({ type: 'save-failed' })).toBe(
+			'Could not check NTS. Please try again.'
+		);
+		expect(formatSavedCatalogCheckFeedback(feedback)).not.toMatch(/PRIVATE|https:/);
+	});
+
+	it('keeps simultaneous feedback independent for different saved catalogue cards', async () => {
+		let releaseFirst: (() => void) | undefined;
+		const firstPending = new Promise<void>((resolve) => (releaseFirst = resolve));
+		const checker = createSavedCatalogUpdateChecker({
+			loadCurrentCatalog: async (showAlias) => {
+				if (showAlias === 'first-show') await firstPending;
+				return { ...currentCatalog([]), showAlias };
+			},
+			updateProgress: async (showAlias) => savedProgress({ showAlias, episodes: {} })
+		});
+		let states: SavedCatalogCheckFeedbackMap = {};
+		const setFeedback = (showAlias: string, feedback: SavedCatalogCheckFeedback) => {
+			states = setSavedCatalogCheckFeedback(states, showAlias, feedback);
+		};
+
+		const first = checkSavedCatalogWithFeedback('first-show', checker, setFeedback);
+		await checkSavedCatalogWithFeedback('second-show', checker, setFeedback);
+
+		expect(states).toEqual({
+			'first-show': { type: 'checking' },
+			'second-show': { type: 'up-to-date' }
+		});
+		releaseFirst?.();
+		await first;
+		expect(states['first-show']).toEqual({ type: 'up-to-date' });
+	});
+
+	it('replaces prior feedback cleanly on a repeated check without dispatching Spotify Search', async () => {
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		let releaseSecond: (() => void) | undefined;
+		const secondPending = new Promise<void>((resolve) => (releaseSecond = resolve));
+		let loadCount = 0;
+		let current = savedProgress({ episodes: { existing: episode('existing', 'done') } });
+		const checker = createSavedCatalogUpdateChecker({
+			loadCurrentCatalog: async () => {
+				loadCount += 1;
+				if (loadCount === 2) await secondPending;
+				return currentCatalog(loadCount === 1 ? ['existing', 'new'] : ['existing', 'new']);
+			},
+			updateProgress: async (_showAlias, update) => (current = update(current))
+		});
+		let feedback: SavedCatalogCheckFeedback | undefined;
+		const setFeedback = (_showAlias: string, next: SavedCatalogCheckFeedback) => {
+			feedback = next;
+		};
+
+		await checkSavedCatalogWithFeedback('jim-o-rourke', checker, setFeedback);
+		expect(formatSavedCatalogCheckFeedback(feedback)).toBe('1 new episode found.');
+		const repeated = checkSavedCatalogWithFeedback('jim-o-rourke', checker, setFeedback);
+		expect(formatSavedCatalogCheckFeedback(feedback)).toBe('Checking NTS for new episodes…');
+		releaseSecond?.();
+		await repeated;
+		expect(formatSavedCatalogCheckFeedback(feedback)).toBe(
+			'Checked NTS just now. No new episodes found.'
+		);
+		expect(fetchSpy).not.toHaveBeenCalled();
+		fetchSpy.mockRestore();
+	});
+
+	it('renders each card result in an explicit polite live region', () => {
+		const component = readFileSync(
+			fileURLToPath(new URL('../../routes/+page.svelte', import.meta.url)),
+			'utf8'
+		);
+		expect(component).toContain('role="status"');
+		expect(component).toContain('aria-live="polite"');
+		expect(component).toContain('aria-atomic="true"');
+		expect(component).toContain('isSavedCatalogCheckActive(');
 	});
 });
