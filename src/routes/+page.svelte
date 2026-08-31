@@ -4,10 +4,15 @@
 	import { onDestroy, onMount } from 'svelte';
 	import {
 		applySavedCatalogUpdateOutcome,
+		checkSavedCatalogWithFeedback,
 		createSavedCatalogCards,
 		createSavedCatalogUpdateChecker,
 		deleteSavedCatalogProgressIfConfirmed,
 		downloadSavedCatalogProgress,
+		formatSavedCatalogCheckFeedback,
+		isSavedCatalogCheckActive,
+		setSavedCatalogCheckFeedback,
+		type SavedCatalogCheckFeedbackMap,
 		type SavedCatalogCard
 	} from '$lib/utils/catalog-dashboard.client';
 	import { deleteCatalogProgress, listCatalogProgress } from '$lib/utils/catalog-progress.client';
@@ -31,13 +36,7 @@
 	let cooldownTimer: ReturnType<typeof setInterval> | undefined;
 	let unsubscribeGlobalCooldown: (() => void) | undefined;
 	const globalCooldownController = new SpotifySearchCooldownController();
-	let catalogueCheckStates: Record<
-		string,
-		{
-			type: 'checking' | 'up-to-date' | 'updated' | 'check-failed' | 'save-failed';
-			addedCount?: number;
-		}
-	> = {};
+	let catalogueCheckStates: SavedCatalogCheckFeedbackMap = {};
 	const catalogueUpdateChecker = createSavedCatalogUpdateChecker();
 
 	const formatSavedAt = (timestamp: number) =>
@@ -103,32 +102,19 @@
 	const checkForNewEpisodes = async (card: SavedCatalogCard) => {
 		if (deletingAlias === card.showAlias || catalogueUpdateChecker.isChecking(card.showAlias))
 			return;
-		catalogueCheckStates = {
-			...catalogueCheckStates,
-			[card.showAlias]: { type: 'checking' }
-		};
-		const outcome = await catalogueUpdateChecker.check(card.showAlias);
+		const outcome = await checkSavedCatalogWithFeedback(
+			card.showAlias,
+			catalogueUpdateChecker,
+			(showAlias, feedback) => {
+				catalogueCheckStates = setSavedCatalogCheckFeedback(
+					catalogueCheckStates,
+					showAlias,
+					feedback
+				);
+			}
+		);
 		if (outcome.type === 'already-checking') return;
 		savedCatalogues = applySavedCatalogUpdateOutcome(savedCatalogues, outcome);
-		catalogueCheckStates = {
-			...catalogueCheckStates,
-			[card.showAlias]:
-				outcome.type === 'updated'
-					? { type: 'updated', addedCount: outcome.addedCount }
-					: { type: outcome.type }
-		};
-	};
-
-	const catalogCheckMessage = (showAlias: string) => {
-		const state = catalogueCheckStates[showAlias];
-		if (!state) return '';
-		if (state.type === 'checking') return 'Checking NTS…';
-		if (state.type === 'up-to-date') return 'Up to date';
-		if (state.type === 'check-failed') return 'Check failed. Try again.';
-		if (state.type === 'save-failed') return 'New episodes found but could not be saved.';
-		return state.addedCount === 1
-			? '1 new episode added'
-			: `${state.addedCount || 0} new episodes added`;
 	};
 
 	onMount(() => {
@@ -286,22 +272,22 @@
 											'check-failed' ||
 											catalogueCheckStates[catalogue.showAlias].type === 'save-failed'}
 										class="font-base"
-										role={catalogueCheckStates[catalogue.showAlias].type === 'check-failed' ||
-										catalogueCheckStates[catalogue.showAlias].type === 'save-failed'
-											? 'alert'
-											: 'status'}
+										role="status"
+										aria-live="polite"
+										aria-atomic="true"
 									>
-										{catalogCheckMessage(catalogue.showAlias)}
+										{formatSavedCatalogCheckFeedback(catalogueCheckStates[catalogue.showAlias])}
 									</p>
 								{/if}
 								<div class="catalogue-actions">
 									<Button
 										type="button"
 										variant="outline"
-										disabled={catalogueCheckStates[catalogue.showAlias]?.type === 'checking' ||
-											deletingAlias === catalogue.showAlias}
+										disabled={isSavedCatalogCheckActive(
+											catalogueCheckStates[catalogue.showAlias]
+										) || deletingAlias === catalogue.showAlias}
 										on:click={() => checkForNewEpisodes(catalogue)}
-										>{catalogueCheckStates[catalogue.showAlias]?.type === 'checking'
+										>{isSavedCatalogCheckActive(catalogueCheckStates[catalogue.showAlias])
 											? 'Checking NTS…'
 											: 'Check for new episodes'}</Button
 									>

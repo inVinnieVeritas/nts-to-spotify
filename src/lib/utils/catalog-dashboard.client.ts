@@ -117,6 +117,44 @@ export type SavedCatalogUpdateCheckOutcome =
 	| { type: 'save-failed' }
 	| { type: 'already-checking' };
 
+export type SavedCatalogCheckFeedback =
+	| { type: 'checking' }
+	| { type: 'up-to-date' }
+	| { type: 'updated'; addedCount: number }
+	| { type: 'check-failed' }
+	| { type: 'save-failed' };
+
+export type SavedCatalogCheckFeedbackMap = Record<string, SavedCatalogCheckFeedback>;
+
+export const setSavedCatalogCheckFeedback = (
+	states: SavedCatalogCheckFeedbackMap,
+	showAlias: string,
+	feedback: SavedCatalogCheckFeedback
+): SavedCatalogCheckFeedbackMap => ({ ...states, [showAlias]: feedback });
+
+export const isSavedCatalogCheckActive = (feedback?: SavedCatalogCheckFeedback) =>
+	feedback?.type === 'checking';
+
+export const formatSavedCatalogCheckFeedback = (feedback?: SavedCatalogCheckFeedback) => {
+	if (!feedback) return '';
+	if (feedback.type === 'checking') return 'Checking NTS for new episodes…';
+	if (feedback.type === 'up-to-date') return 'Checked NTS just now. No new episodes found.';
+	if (feedback.type === 'check-failed' || feedback.type === 'save-failed') {
+		return 'Could not check NTS. Please try again.';
+	}
+	return feedback.addedCount === 1
+		? '1 new episode found.'
+		: `${feedback.addedCount} new episodes found.`;
+};
+
+const feedbackForSavedCatalogUpdateOutcome = (
+	outcome: SavedCatalogUpdateCheckOutcome
+): SavedCatalogCheckFeedback | undefined => {
+	if (outcome.type === 'already-checking') return undefined;
+	if (outcome.type === 'updated') return { type: 'updated', addedCount: outcome.addedCount };
+	return { type: outcome.type };
+};
+
 export const applySavedCatalogUpdateOutcome = (
 	cards: SavedCatalogCard[],
 	outcome: SavedCatalogUpdateCheckOutcome
@@ -199,4 +237,22 @@ export const createSavedCatalogUpdateChecker = ({
 			}
 		}
 	};
+};
+
+export const checkSavedCatalogWithFeedback = async (
+	showAlias: string,
+	checker: ReturnType<typeof createSavedCatalogUpdateChecker>,
+	onFeedback: (showAlias: string, feedback: SavedCatalogCheckFeedback) => void
+) => {
+	if (checker.isChecking(showAlias)) return { type: 'already-checking' } as const;
+	onFeedback(showAlias, { type: 'checking' });
+	let outcome: SavedCatalogUpdateCheckOutcome;
+	try {
+		outcome = await checker.check(showAlias);
+	} catch {
+		outcome = { type: 'check-failed' };
+	}
+	const feedback = feedbackForSavedCatalogUpdateOutcome(outcome);
+	if (feedback) onFeedback(showAlias, feedback);
+	return outcome;
 };
