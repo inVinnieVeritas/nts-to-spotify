@@ -144,6 +144,23 @@ describe('catalogue progress backup', () => {
 		expect(parseCatalogBackup(serialized, 'show').progress.scanTiming).toBeUndefined();
 	});
 
+	it('intentionally omits local resumable playlist synchronization metadata', () => {
+		const progress = makeProgress() as CatalogProgress & { playlistSync?: unknown };
+		progress.updatedAt = EXPORTED_AT_MS;
+		progress.playlistSync = {
+			version: 1,
+			operationId: 'operation_1234567890',
+			playlistId: PLAYLIST_ID,
+			confirmedPosition: 800,
+			snapshotId: 'local-snapshot'
+		};
+
+		const serialized = serializeCatalogBackup(progress, new Date(EXPORTED_AT));
+		expect(serialized).not.toContain('playlistSync');
+		expect(serialized).not.toContain('local-snapshot');
+		expect(parseCatalogBackup(serialized, 'show').progress).not.toHaveProperty('playlistSync');
+	});
+
 	it('accepts legacy backups without linkage state and rejects invalid linked IDs', () => {
 		const legacy = JSON.parse(jsonEnvelope()) as {
 			progress: { playlist: { linkedPlaylistId?: string; creationPending?: boolean } };

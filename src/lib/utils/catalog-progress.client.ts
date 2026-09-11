@@ -5,10 +5,17 @@ import {
 	parseCatalogBackup
 } from './catalog-backup';
 import { restoreCatalogScanTiming } from './catalog-scan-session';
+import {
+	isCatalogPlaylistSyncRecord,
+	PLAYLIST_SYNC_LEASE_MS,
+	restoreCatalogPlaylistSyncRecord,
+	type CatalogPlaylistSyncRecord
+} from './playlist-sync.client';
 
 const DATABASE_NAME = 'nts-to-spotify';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'catalog-progress';
+const PLAYLIST_SYNC_KEY_PREFIX = '\u0000playlist-sync:';
 export const INDEXED_DB_TIMEOUT_MS = 5_000;
 
 type DatabaseOptions = {
@@ -22,6 +29,25 @@ export type CatalogProgressListResult = {
 };
 
 const operationQueues = new Map<string, Promise<void>>();
+
+const playlistSyncKey = (showAlias: string) => `${PLAYLIST_SYNC_KEY_PREFIX}${showAlias}`;
+const storedPlaylistSyncRecord = (record: CatalogPlaylistSyncRecord) => ({
+	...record,
+	showAlias: playlistSyncKey(record.catalogueAlias)
+});
+const catalogPlaylistSyncRecordFromStored = (
+	value: unknown,
+	showAlias: string,
+	now = Date.now(),
+	recover = true
+) => {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+	const { showAlias: storageAlias, ...record } = value as Record<string, unknown>;
+	if (storageAlias !== playlistSyncKey(showAlias)) return undefined;
+	if (!recover && isCatalogPlaylistSyncRecord(record, showAlias, now))
+		return structuredClone(record);
+	return restoreCatalogPlaylistSyncRecord(record, showAlias, now);
+};
 
 export const coordinateCatalogProgressOperation = <T>(
 	showAlias: string,
@@ -228,6 +254,17 @@ const listCatalogProgressUncoordinated = async (
 		const records: CatalogProgress[] = [];
 		let skippedCount = 0;
 		for (const value of values) {
+			if (
+				value &&
+				typeof value === 'object' &&
+				!Array.isArray(value) &&
+				typeof (value as Record<string, unknown>).showAlias === 'string' &&
+				((value as Record<string, unknown>).showAlias as string).startsWith(
+					PLAYLIST_SYNC_KEY_PREFIX
+				)
+			) {
+				continue;
+			}
 			const validated = validateStoredCatalogProgress(value, now);
 			if (validated) records.push(validated);
 			else skippedCount += 1;
@@ -288,6 +325,295 @@ export const saveCatalogProgress = (progress: CatalogProgress, options: Database
 	coordinateCatalogProgressOperation(progress.showAlias, () =>
 		saveCatalogProgressUncoordinated(progress, options)
 	);
+
+const loadCatalogPlaylistSyncUncoordinated = async (
+	showAlias: string,
+	options: DatabaseOptions = {}
+) => {
+	const database = await openDatabase(options);
+	try {
+		return await new Promise<CatalogPlaylistSyncRecord | undefined>((resolve, reject) => {
+			const transaction = database.transaction(STORE_NAME, 'readonly');
+			const request = transaction.objectStore(STORE_NAME).get(playlistSyncKey(showAlias));
+			let result: CatalogPlaylistSyncRecord | undefined;
+			let settled = false;
+			const timeout = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				try {
+					transaction.abort();
+				} catch {
+					// The transaction may already be inactive.
+				}
+				reject(new CatalogPersistenceTimeoutError('Loading playlist synchronization timed out'));
+			}, options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+			const fail = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				reject(transaction.error || request.error);
+			};
+			request.onerror = fail;
+			request.onsuccess = () => {
+				result = catalogPlaylistSyncRecordFromStored(request.result, showAlias);
+			};
+			transaction.onerror = fail;
+			transaction.onabort = fail;
+			transaction.oncomplete = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				resolve(result ? structuredClone(result) : undefined);
+			};
+		});
+	} finally {
+		database.close();
+	}
+};
+
+export const loadCatalogPlaylistSync = (showAlias: string, options: DatabaseOptions = {}) =>
+	coordinateCatalogProgressOperation(showAlias, () =>
+		loadCatalogPlaylistSyncUncoordinated(showAlias, options)
+	);
+
+const writeCatalogPlaylistSyncUncoordinated = async (
+	record: CatalogPlaylistSyncRecord,
+	options: DatabaseOptions = {}
+) => {
+	if (!isCatalogPlaylistSyncRecord(record, record.catalogueAlias)) {
+		throw new Error('Invalid catalogue playlist synchronization record');
+	}
+	const database = await openDatabase(options);
+	try {
+		await new Promise<void>((resolve, reject) => {
+			const transaction = database.transaction(STORE_NAME, 'readwrite');
+			let settled = false;
+			const timeout = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				try {
+					transaction.abort();
+				} catch {
+					// The transaction may already be inactive.
+				}
+				reject(new CatalogPersistenceTimeoutError('Saving playlist synchronization timed out'));
+			}, options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+			const fail = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				reject(transaction.error);
+			};
+			transaction.onerror = fail;
+			transaction.onabort = fail;
+			transaction.oncomplete = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				resolve();
+			};
+			transaction.objectStore(STORE_NAME).put(storedPlaylistSyncRecord(record));
+		});
+	} finally {
+		database.close();
+	}
+};
+
+export const saveCatalogPlaylistSync = (
+	record: CatalogPlaylistSyncRecord,
+	options: DatabaseOptions = {}
+) =>
+	coordinateCatalogProgressOperation(record.catalogueAlias, () =>
+		writeCatalogPlaylistSyncUncoordinated(record, options)
+	);
+
+export type CatalogPlaylistSyncLeaseResult = {
+	acquired: boolean;
+	record?: CatalogPlaylistSyncRecord;
+};
+
+const claimCatalogPlaylistSyncLeaseUncoordinated = async (
+	candidate: CatalogPlaylistSyncRecord,
+	leaseOwner: string,
+	now: number,
+	leaseMs: number,
+	options: DatabaseOptions,
+	release = false
+): Promise<CatalogPlaylistSyncLeaseResult> => {
+	if (
+		!isCatalogPlaylistSyncRecord(candidate, candidate.catalogueAlias, now) ||
+		!Number.isSafeInteger(now) ||
+		now < 0 ||
+		!Number.isSafeInteger(leaseMs) ||
+		leaseMs <= 0 ||
+		leaseMs > PLAYLIST_SYNC_LEASE_MS ||
+		!Number.isSafeInteger(now + leaseMs)
+	) {
+		throw new Error('Invalid playlist synchronization lease');
+	}
+	const database = await openDatabase(options);
+	try {
+		return await new Promise<CatalogPlaylistSyncLeaseResult>((resolve, reject) => {
+			const transaction = database.transaction(STORE_NAME, 'readwrite');
+			const store = transaction.objectStore(STORE_NAME);
+			const request = store.get(playlistSyncKey(candidate.catalogueAlias));
+			let result: CatalogPlaylistSyncLeaseResult | undefined;
+			let operationError: unknown;
+			let settled = false;
+			const timeout = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				try {
+					transaction.abort();
+				} catch {
+					// The transaction may already be inactive.
+				}
+				reject(new CatalogPersistenceTimeoutError('Claiming playlist synchronization timed out'));
+			}, options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+			const fail = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				reject(operationError || transaction.error || request.error);
+			};
+			request.onerror = fail;
+			request.onsuccess = () => {
+				try {
+					const current = catalogPlaylistSyncRecordFromStored(
+						request.result,
+						candidate.catalogueAlias,
+						now,
+						false
+					);
+					const startsNewOperation = Boolean(
+						current &&
+						current.operationId !== candidate.operationId &&
+						(current.phase === 'completed' ||
+							(current.phase === 'blocked' && current.reason === 'external-change')) &&
+						candidate.phase === 'interrupted' &&
+						candidate.confirmedPosition === 0 &&
+						candidate.restartRequired === true &&
+						candidate.playlistId === current.playlistId
+					);
+					// Never replace unreadable existing coordination state, nor accept an
+					// old revision or operation even after its lease has been released.
+					if (
+						(request.result !== undefined && !current) ||
+						(current &&
+							((current.operationId !== candidate.operationId && !startsNewOperation) ||
+								current.revision !== candidate.revision)) ||
+						(current &&
+							['uncertain', 'blocked'].includes(current.phase) &&
+							current.reason === 'uncertain' &&
+							!['uncertain', 'blocked'].includes(candidate.phase)) ||
+						(current && current.playlistId && candidate.playlistId !== current.playlistId) ||
+						(current &&
+							current.targetFingerprint !== candidate.targetFingerprint &&
+							current.phase !== 'creating' &&
+							current.phase !== 'completed' &&
+							!(current.phase === 'blocked' && current.reason === 'external-change')) ||
+						(!current && (candidate.revision !== 0 || release)) ||
+						(release && current?.leaseOwner !== leaseOwner)
+					) {
+						result = { acquired: false, record: current };
+						return;
+					}
+					if (
+						current?.leaseOwner &&
+						current.leaseOwner !== leaseOwner &&
+						(current.leaseUntil ?? 0) > now
+					) {
+						result = { acquired: false, record: current };
+						return;
+					}
+					const next = {
+						...candidate,
+						revision: candidate.revision + 1,
+						...(release
+							? { leaseOwner: undefined, leaseUntil: undefined }
+							: { leaseOwner, leaseUntil: now + leaseMs }),
+						updatedAt: now
+					};
+					if (!isCatalogPlaylistSyncRecord(next, candidate.catalogueAlias, now)) {
+						throw new Error('Invalid claimed playlist synchronization record');
+					}
+					store.put(storedPlaylistSyncRecord(next));
+					result = { acquired: true, record: next };
+				} catch (cause) {
+					operationError = cause;
+					transaction.abort();
+				}
+			};
+			transaction.onerror = fail;
+			transaction.onabort = fail;
+			transaction.oncomplete = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				resolve(result ?? { acquired: false });
+			};
+		});
+	} finally {
+		database.close();
+	}
+};
+
+export const claimCatalogPlaylistSyncLease = (
+	candidate: CatalogPlaylistSyncRecord,
+	leaseOwner: string,
+	now: number,
+	leaseMs: number,
+	options: DatabaseOptions = {},
+	release = false
+) =>
+	coordinateCatalogProgressOperation(candidate.catalogueAlias, () =>
+		claimCatalogPlaylistSyncLeaseUncoordinated(
+			candidate,
+			leaseOwner,
+			now,
+			leaseMs,
+			options,
+			release
+		)
+	);
+
+export const deleteCatalogPlaylistSync = (showAlias: string, options: DatabaseOptions = {}) =>
+	coordinateCatalogProgressOperation(showAlias, async () => {
+		const database = await openDatabase(options);
+		try {
+			await new Promise<void>((resolve, reject) => {
+				const transaction = database.transaction(STORE_NAME, 'readwrite');
+				let settled = false;
+				const timeout = setTimeout(() => {
+					if (settled) return;
+					settled = true;
+					try {
+						transaction.abort();
+					} catch {
+						// The transaction may already be inactive.
+					}
+					reject(new CatalogPersistenceTimeoutError('Deleting playlist synchronization timed out'));
+				}, options.timeoutMs ?? INDEXED_DB_TIMEOUT_MS);
+				const fail = () => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timeout);
+					reject(transaction.error);
+				};
+				transaction.onerror = fail;
+				transaction.onabort = fail;
+				transaction.oncomplete = () => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timeout);
+					resolve();
+				};
+				transaction.objectStore(STORE_NAME).delete(playlistSyncKey(showAlias));
+			});
+		} finally {
+			database.close();
+		}
+	});
 
 const updateCatalogProgressUncoordinated = async (
 	showAlias: string,
@@ -393,7 +719,9 @@ const deleteCatalogProgressUncoordinated = async (
 				clearTimeout(timeout);
 				resolve();
 			};
-			transaction.objectStore(STORE_NAME).delete(showAlias);
+			const store = transaction.objectStore(STORE_NAME);
+			store.delete(showAlias);
+			store.delete(playlistSyncKey(showAlias));
 		});
 	} finally {
 		database.close();

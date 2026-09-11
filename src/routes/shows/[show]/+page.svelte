@@ -71,10 +71,13 @@
 	} from '$lib/utils/catalog-scan';
 	import {
 		createLatestSnapshotWriter,
+		deleteCatalogPlaylistSync,
 		deleteCatalogProgress,
+		loadCatalogPlaylistSync,
 		loadCatalogProgress,
 		saveCatalogProgress
 	} from '$lib/utils/catalog-progress.client';
+	import type { CatalogPlaylistSyncRecord } from '$lib/utils/playlist-sync.client';
 	import {
 		CATALOG_SCAN_SESSION_CHECKPOINT_INTERVAL_MS,
 		catalogScanOutcomeLabel,
@@ -143,6 +146,7 @@
 	let playlistOrder: PlaylistOrder = 'latest-first';
 	let linkedPlaylistId: string | undefined;
 	let playlistCreationPending = false;
+	let playlistSyncRecord: CatalogPlaylistSyncRecord | undefined;
 	let scanning = false;
 	let scanMessage = '';
 	let restored = false;
@@ -346,10 +350,18 @@
 		);
 	};
 	const forgetPlaylist = async () => {
-		return durablePlaylistTransition(
+		const forgotten = await durablePlaylistTransition(
 			{ creationPending: false },
 			{ linkedPlaylistId, creationPending: playlistCreationPending }
 		);
+		if (!forgotten) return false;
+		try {
+			await deleteCatalogPlaylistSync(activeShowAlias);
+			playlistSyncRecord = undefined;
+			return true;
+		} catch {
+			return false;
+		}
 	};
 	const changePlaylistOrder = (event: Event) => {
 		const nextOrder: PlaylistOrder =
@@ -822,6 +834,10 @@
 					progressTransferMessage = 'Progress restored from backup.';
 				}
 			});
+			if (replacementSucceeded) {
+				await deleteCatalogPlaylistSync(importAlias);
+				playlistSyncRecord = undefined;
+			}
 		} catch (cause) {
 			if (
 				shouldApplyCatalogRestoration(
@@ -885,6 +901,7 @@
 			publicPlaylist = resetState.playlist.public;
 			linkedPlaylistId = undefined;
 			playlistCreationPending = false;
+			playlistSyncRecord = undefined;
 			dateStamp = defaults.stamp;
 			cooldownUntil = resetState.retry.cooldownUntil;
 			cooldownRemaining = 0;
@@ -1005,6 +1022,7 @@
 		playlistOrder = 'latest-first';
 		linkedPlaylistId = undefined;
 		playlistCreationPending = false;
+		playlistSyncRecord = undefined;
 		reviewFilter = 'all';
 		episodes = reconcileEpisodes(pageData.episodes);
 		scanning = false;
@@ -1028,8 +1046,9 @@
 		let scanTimingChanged = false;
 
 		try {
-			const [saved] = await Promise.all([
+			const [saved, savedPlaylistSync] = await Promise.all([
 				loadCatalogProgress(showAlias),
+				loadCatalogPlaylistSync(showAlias),
 				globalCooldownController.initialize()
 			]);
 			if (
@@ -1070,6 +1089,7 @@
 				linkedPlaylistId = restoreCatalogLinkedPlaylistId(saved);
 				playlistCreationPending = restoreCatalogCreationPending(saved);
 			}
+			playlistSyncRecord = savedPlaylistSync;
 			const retry = restoreCatalogRetryState(saved);
 			cooldownUntil = retry.cooldownUntil;
 			catalogCooldownReason = 'rate-limited';
@@ -1427,25 +1447,32 @@
 		</div>
 	</article>
 
-	<ImportToSpotify
-		catalogueMode
-		disabled={!scanComplete || scanning}
-		creationPending={playlistCreationPending}
-		prepareCatalogueCreation={preparePlaylistCreation}
-		persistCatalogueLink={persistLinkedPlaylist}
-		clearCatalogueCreationPending={clearPlaylistCreationPending}
-		forgetCatalogueLink={forgetPlaylist}
-		data={{
-			title: playlistTitle,
-			description: playlistDescription,
-			date: dateStamp,
-			cover: data.cover,
-			tracks: selectedTracks,
-			public: publicPlaylist,
-			linkedPlaylistId,
-			previewKey: playlistPreviewKey
-		}}
-	/>
+	{#key activeShowAlias}
+		<ImportToSpotify
+			catalogueMode
+			disabled={!scanComplete || scanning}
+			creationPending={playlistCreationPending}
+			showAlias={activeShowAlias}
+			syncRecord={playlistSyncRecord}
+			onSyncRecordChange={(record) => {
+				if (!record || record.catalogueAlias === activeShowAlias) playlistSyncRecord = record;
+			}}
+			prepareCatalogueCreation={preparePlaylistCreation}
+			persistCatalogueLink={persistLinkedPlaylist}
+			clearCatalogueCreationPending={clearPlaylistCreationPending}
+			forgetCatalogueLink={forgetPlaylist}
+			data={{
+				title: playlistTitle,
+				description: playlistDescription,
+				date: dateStamp,
+				cover: data.cover,
+				tracks: selectedTracks,
+				public: publicPlaylist,
+				linkedPlaylistId,
+				previewKey: playlistPreviewKey
+			}}
+		/>
+	{/key}
 </Panel>
 
 <style lang="postcss">

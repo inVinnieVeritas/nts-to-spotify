@@ -41,6 +41,12 @@ const playlistMetadata = (ownerId = USER_ID) => ({
 
 const requestFor = (overrides: Record<string, unknown> = {}) => {
 	const linked = typeof overrides.playlistId === 'string';
+	const operation =
+		typeof overrides.operation === 'string'
+			? overrides.operation
+			: linked
+				? 'apply-batch'
+				: 'create';
 	const values = {
 		name: 'Catalogue playlist',
 		description: 'Ordered catalogue tracks',
@@ -48,7 +54,7 @@ const requestFor = (overrides: Record<string, unknown> = {}) => {
 		public: false,
 		...overrides
 	};
-	const applying = linked && overrides.operation !== 'preview' && overrides.operation !== 'verify';
+	const applying = operation === 'apply-batch';
 	const generatedFingerprint = applying
 		? fingerprintSpotifyPlaylistPreview(CURRENT_PLAYLIST, {
 				name: String(values.name).trim(),
@@ -57,19 +63,25 @@ const requestFor = (overrides: Record<string, unknown> = {}) => {
 				public: values.public as boolean
 			})
 		: undefined;
+	const body =
+		operation === 'create'
+			? {
+					operation,
+					name: values.name,
+					description: values.description,
+					public: values.public,
+					...overrides
+				}
+			: {
+					...values,
+					operation,
+					...(applying ? { previewFingerprint: generatedFingerprint } : {}),
+					...overrides
+				};
 	return new Request('http://localhost/api/spotify/playlist', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			...values,
-			...(applying
-				? {
-						operation: 'apply',
-						previewFingerprint: generatedFingerprint
-					}
-				: {}),
-			...overrides
-		})
+		body: JSON.stringify(body)
 	});
 };
 
@@ -85,6 +97,9 @@ const successfulFetcher = () =>
 		}
 		if (url.includes('/items?')) return jsonResponse({ items: [], total: 0 });
 		if (url === 'https://api.spotify.com/v1/me/playlists') return jsonResponse({ id: PLAYLIST_ID });
+		if (url.endsWith('/items') && (init?.method === 'PUT' || init?.method === 'POST')) {
+			return jsonResponse({ snapshot_id: 'snapshot-after' }, init.method === 'POST' ? 201 : 200);
+		}
 		return emptyResponse(init?.method === 'POST' ? 201 : 200);
 	});
 
@@ -127,98 +142,214 @@ describe('/api/spotify/playlist synchronization', () => {
 		vi.mocked(getAccessToken).mockResolvedValue('user-token');
 	});
 
-	it('creates one playlist and preserves order through deduplication and 100-track batches', async () => {
-		const ordered = Array.from({ length: 205 }, (_value, index) => trackUri(index));
-		const supplied = [...ordered.slice(0, 101), ordered[0], ...ordered.slice(101)];
+	it('creates only an empty playlist and returns its ID before any item mutation', async () => {
 		const fetcher = successfulFetcher();
+		const metricsBefore = getSpotifySessionMetrics();
 		const response = await POST({
-			request: requestFor({ tracks: supplied }),
+			request: new Request('http://localhost/api/spotify/playlist', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					operation: 'create',
+					name: 'Amanda Siegel',
+					description: 'Archive',
+					public: false
+				})
+			}),
 			fetch: fetcher
 		} as never);
-		const body = await response.json();
-		const createRequests = fetcher.mock.calls.filter(
-			([url]) => String(url) === 'https://api.spotify.com/v1/me/playlists'
-		);
-		const trackRequests = fetcher.mock.calls.filter(([url]) => String(url).endsWith('/items'));
-		const batches = trackRequests.map(
-			([_url, init]) => JSON.parse(String(init?.body)) as { uris: string[] }
-		);
 
-		expect(body).toEqual({
+		expect(await response.json()).toEqual({
 			playlistId: PLAYLIST_ID,
 			url: `https://open.spotify.com/playlist/${PLAYLIST_ID}`,
 			mode: 'created',
-			trackCount: 205
+			trackCount: 0
 		});
-		expect(createRequests).toHaveLength(1);
-		expect(createRequests[0][1]?.method).toBe('POST');
-		expect(trackRequests.map(([_url, init]) => init?.method)).toEqual(['POST', 'POST', 'POST']);
-		expect(batches.map(({ uris }) => uris.length)).toEqual([100, 100, 5]);
-		expect(batches.flatMap(({ uris }) => uris)).toEqual(ordered);
-	});
-
-	it.each([
-		[0, []],
-		[1, [1]],
-		[99, [99]],
-		[100, [100]],
-		[101, [100, 1]],
-		[200, [100, 100]],
-		[201, [100, 100, 1]]
-	])('uses current endpoints and valid creation batches for %i tracks', async (count, sizes) => {
-		const fetcher = successfulFetcher();
-		const response = await POST({
-			request: requestFor({
-				tracks: Array.from({ length: count }, (_value, index) => trackUri(index))
-			}),
-			fetch: fetcher
-		} as never);
-		const calls = fetcher.mock.calls.map(([url, init]) => [String(url), init?.method ?? 'GET']);
-		const itemCalls = fetcher.mock.calls.filter(([url]) => String(url).endsWith('/items'));
-
-		expect(response.status).toBe(200);
-		expect(calls.slice(0, 2)).toEqual([
-			['https://api.spotify.com/v1/me', 'GET'],
-			['https://api.spotify.com/v1/me/playlists', 'POST']
+		expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+			'https://api.spotify.com/v1/me',
+			'https://api.spotify.com/v1/me/playlists'
 		]);
-		expect(
-			itemCalls.every(
-				([url, init]) =>
-					String(url) === `https://api.spotify.com/v1/playlists/${PLAYLIST_ID}/items` &&
-					init?.method === 'POST'
-			)
-		).toBe(true);
-		expect(
-			itemCalls.map(
-				([_url, init]) => (JSON.parse(String(init?.body)) as { uris: string[] }).uris.length
-			)
-		).toEqual(sizes);
+		expect(getSpotifySessionMetrics()).toEqual(metricsBefore);
 	});
 
-	it('applies an update only when the freshly read Spotify state matches the preview fingerprint', async () => {
-		const currentItems = [trackUri(9), trackUri(8)];
-		const currentState = { ...CURRENT_PLAYLIST, items: currentItems };
+	it('applies only the first bounded replacement batch and returns a validated snapshot', async () => {
+		const tracks = Array.from({ length: 1508 }, (_value, index) => trackUri(index));
 		const target = {
 			name: 'Catalogue playlist',
 			description: 'Ordered catalogue tracks',
-			public: false,
-			tracks: [trackUri(1), trackUri(2)]
+			tracks,
+			public: false
 		};
-		const fetcher = playlistReadFetcher(currentItems);
+		const fingerprint = fingerprintSpotifyPlaylistPreview(CURRENT_PLAYLIST, target);
+		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url.endsWith('/v1/me')) return jsonResponse({ id: USER_ID });
+			if (url.includes('?fields=id,owner(id),snapshot_id,name,description,public')) {
+				return jsonResponse(playlistMetadata());
+			}
+			if (url.includes('?fields=id,owner(id)')) {
+				return jsonResponse({ id: PLAYLIST_ID, owner: { id: USER_ID } });
+			}
+			if (url.includes('/items?')) return jsonResponse({ items: [], total: 0 });
+			if (url.endsWith('/items') && init?.method === 'PUT') {
+				return jsonResponse({ snapshot_id: 'snapshot-after-first-batch' });
+			}
+			return emptyResponse();
+		});
+		const response = await POST({
+			request: new Request('http://localhost/api/spotify/playlist', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					operation: 'apply-batch',
+					playlistId: PLAYLIST_ID,
+					previewFingerprint: fingerprint,
+					...target
+				})
+			}),
+			fetch: fetcher
+		} as never);
+		const itemMutations = fetcher.mock.calls.filter(([url]) => String(url).endsWith('/items'));
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			playlistId: PLAYLIST_ID,
+			url: `https://open.spotify.com/playlist/${PLAYLIST_ID}`,
+			mode: 'batch',
+			confirmedPosition: 100,
+			totalTrackCount: 1508,
+			snapshotId: 'snapshot-after-first-batch'
+		});
+		expect(itemMutations).toHaveLength(1);
+		expect(JSON.parse(String(itemMutations[0][1]?.body)).uris).toEqual(tracks.slice(0, 100));
+	});
+
+	it('verifies ownership and the acknowledged snapshot before one append mutation', async () => {
+		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url.endsWith('/v1/me')) return jsonResponse({ id: USER_ID });
+			if (url.includes('?fields=id,owner(id),snapshot_id')) {
+				return jsonResponse({
+					...playlistMetadata(),
+					snapshot_id: 'snapshot-before'
+				});
+			}
+			if (url.endsWith('/items') && init?.method === 'POST') {
+				return jsonResponse({ snapshot_id: 'snapshot-after' }, 201);
+			}
+			return emptyResponse();
+		});
+		const body = {
+			operation: 'append',
+			playlistId: PLAYLIST_ID,
+			operationId: 'operation_1234567890',
+			targetFingerprint: 'a'.repeat(64),
+			expectedSnapshotId: 'snapshot-before',
+			position: 100,
+			totalTrackCount: 108,
+			tracks: Array.from({ length: 8 }, (_value, index) => trackUri(100 + index)),
+			name: CURRENT_PLAYLIST.name,
+			description: CURRENT_PLAYLIST.description,
+			public: CURRENT_PLAYLIST.public
+		};
+		const response = await POST({
+			request: new Request('http://localhost/api/spotify/playlist', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			}),
+			fetch: fetcher
+		} as never);
+
+		expect(await response.json()).toMatchObject({
+			mode: 'batch',
+			confirmedPosition: 108,
+			snapshotId: 'snapshot-after'
+		});
+		expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/items'))).toHaveLength(1);
+	});
+
+	it('rejects a changed snapshot before append and performs no mutation', async () => {
+		const fetcher = vi.fn(async (input: RequestInfo | URL) =>
+			String(input).endsWith('/v1/me')
+				? jsonResponse({ id: USER_ID })
+				: jsonResponse({
+						...playlistMetadata(),
+						snapshot_id: 'externally-changed'
+					})
+		);
+		const response = await POST({
+			request: new Request('http://localhost/api/spotify/playlist', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					operation: 'append',
+					playlistId: PLAYLIST_ID,
+					operationId: 'operation_1234567890',
+					targetFingerprint: 'a'.repeat(64),
+					expectedSnapshotId: 'expected',
+					position: 100,
+					totalTrackCount: 101,
+					tracks: [trackUri(100)],
+					name: CURRENT_PLAYLIST.name,
+					description: CURRENT_PLAYLIST.description,
+					public: CURRENT_PLAYLIST.public
+				})
+			}),
+			fetch: fetcher
+		} as never);
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toEqual({ error: 'playlist_changed_since_sync' });
+		expect(fetcher).toHaveBeenCalledTimes(2);
+	});
+
+	it('confirms an acknowledged playlist state using reads only', async () => {
+		const fetcher = successfulFetcher();
 		const response = await POST({
 			request: requestFor({
+				operation: 'settle',
 				playlistId: PLAYLIST_ID,
-				previewFingerprint: fingerprintSpotifyPlaylistPreview(currentState, target),
-				tracks: target.tracks
+				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+				name: CURRENT_PLAYLIST.name,
+				description: CURRENT_PLAYLIST.description,
+				public: CURRENT_PLAYLIST.public
 			}),
 			fetch: fetcher
 		} as never);
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toMatchObject({ mode: 'updated', trackCount: 2 });
-		expect(
-			fetcher.mock.calls.filter(([url, init]) => String(url).endsWith('/items') && init?.method)
-		).toHaveLength(1);
+		expect(await response.json()).toEqual({
+			mode: 'settled',
+			playlistId: PLAYLIST_ID,
+			snapshotId: CURRENT_PLAYLIST.snapshotId
+		});
+		expect(fetcher.mock.calls).toHaveLength(2);
+		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
+	});
+
+	it('reports a bounded settlement delay without mutating Spotify', async () => {
+		const fetcher = playlistReadFetcher([], { snapshot_id: 'still-propagating' });
+		const response = await POST({
+			request: requestFor({
+				operation: 'settle',
+				playlistId: PLAYLIST_ID,
+				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+				name: CURRENT_PLAYLIST.name,
+				description: CURRENT_PLAYLIST.description,
+				public: CURRENT_PLAYLIST.public
+			}),
+			fetch: fetcher
+		} as never);
+
+		expect(response.status).toBe(409);
+		expect(response.headers.get('Retry-After')).toBe('5');
+		expect(await response.json()).toEqual({
+			error: 'playlist_settling',
+			retryAfterSeconds: 5
+		});
+		expect(fetcher.mock.calls).toHaveLength(2);
+		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
 	});
 
 	it('returns 409 without mutation when Spotify changed after the preview', async () => {
@@ -530,90 +661,6 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(getSpotifySessionMetrics()).toEqual(before);
 	});
 
-	it.each([
-		[0, [0]],
-		[1, [1]],
-		[99, [99]],
-		[100, [100]],
-		[101, [100, 1]],
-		[200, [100, 100]],
-		[201, [100, 100, 1]]
-	])('replaces and appends at exact boundaries for %i tracks', async (count, sizes) => {
-		const fetcher = successfulFetcher();
-		const response = await POST({
-			request: requestFor({
-				playlistId: PLAYLIST_ID,
-				tracks: Array.from({ length: count }, (_value, index) => trackUri(index))
-			}),
-			fetch: fetcher
-		} as never);
-		const itemCalls = fetcher.mock.calls.filter(([url]) => String(url).endsWith('/items'));
-
-		expect(response.status).toBe(200);
-		expect(itemCalls.map(([_url, init]) => init?.method)).toEqual([
-			'PUT',
-			...Array(Math.max(0, sizes.length - 1)).fill('POST')
-		]);
-		expect(
-			itemCalls.map(
-				([_url, init]) => (JSON.parse(String(init?.body)) as { uris: string[] }).uris.length
-			)
-		).toEqual(sizes);
-	});
-
-	it('verifies ownership and idempotently replaces the exact ordered linked playlist contents', async () => {
-		const tracks = Array.from({ length: 205 }, (_value, index) => trackUri(index));
-		const fetcher = successfulFetcher();
-		const synchronize = () =>
-			POST({
-				request: requestFor({ playlistId: PLAYLIST_ID, tracks }),
-				fetch: fetcher
-			} as never);
-
-		for (let attempt = 0; attempt < 2; attempt += 1) {
-			const response = await synchronize();
-			expect(await response.json()).toEqual({
-				playlistId: PLAYLIST_ID,
-				url: `https://open.spotify.com/playlist/${PLAYLIST_ID}`,
-				mode: 'updated',
-				trackCount: 205
-			});
-		}
-
-		const playlistCreates = fetcher.mock.calls.filter(
-			([url]) => String(url) === 'https://api.spotify.com/v1/me/playlists'
-		);
-		const ownershipRequests = fetcher.mock.calls.filter(([url]) =>
-			String(url).endsWith('?fields=id,owner(id)')
-		);
-		const trackRequests = fetcher.mock.calls.filter(([url]) => String(url).endsWith('/items'));
-		const detailRequests = fetcher.mock.calls.filter(
-			([url, init]) => String(url).endsWith(`/playlists/${PLAYLIST_ID}`) && init?.method === 'PUT'
-		);
-		const firstAttemptBatches = trackRequests
-			.slice(0, 3)
-			.map(([_url, init]) => JSON.parse(String(init?.body)) as { uris: string[] });
-
-		expect(playlistCreates).toHaveLength(0);
-		expect(ownershipRequests).toHaveLength(2);
-		expect(detailRequests.map(([_url, init]) => JSON.parse(String(init?.body)))).toEqual([
-			{ name: 'Catalogue playlist', description: 'Ordered catalogue tracks', public: false },
-			{ name: 'Catalogue playlist', description: 'Ordered catalogue tracks', public: false }
-		]);
-		expect(trackRequests.slice(0, 3).map(([_url, init]) => init?.method)).toEqual([
-			'PUT',
-			'POST',
-			'POST'
-		]);
-		expect(firstAttemptBatches.map(({ uris }) => uris.length)).toEqual([100, 100, 5]);
-		expect(firstAttemptBatches.flatMap(({ uris }) => uris)).toEqual(tracks);
-		expect(
-			trackRequests.slice(3).map(([_url, init]) => ({ method: init?.method, body: init?.body }))
-		).toEqual(
-			trackRequests.slice(0, 3).map(([_url, init]) => ({ method: init?.method, body: init?.body }))
-		);
-	});
-
 	it('rejects an ownership mismatch before any mutation', async () => {
 		const fetcher = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
 			const url = String(input);
@@ -724,164 +771,6 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(cancelled).toBe(true);
 		expect(getAccessToken).not.toHaveBeenCalled();
 	});
-
-	it('returns a sanitized retryable incomplete result when a later update batch fails', async () => {
-		const privateUri = trackUri(200);
-		const tracks = Array.from({ length: 201 }, (_value, index) => trackUri(index));
-		let trackRequest = 0;
-		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-			const url = String(input);
-			if (url.endsWith('/v1/me')) return jsonResponse({ id: USER_ID });
-			if (url.includes('?fields=id,owner(id)')) {
-				return jsonResponse(playlistMetadata());
-			}
-			if (url.includes('/items?')) return jsonResponse({ items: [], total: 0 });
-			if (url.endsWith('/items')) {
-				trackRequest += 1;
-				return trackRequest === 3
-					? jsonResponse({ error: 'PRIVATE_RAW_RESPONSE', uri: privateUri }, 503)
-					: emptyResponse(init?.method === 'POST' ? 201 : 200);
-			}
-			return emptyResponse();
-		});
-		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-		const response = await POST({
-			request: requestFor({ playlistId: PLAYLIST_ID, tracks }),
-			fetch: fetcher
-		} as never);
-		const body = await response.json();
-
-		expect(response.status).toBe(503);
-		expect(body).toEqual({
-			error: 'playlist_sync_incomplete',
-			incomplete: true,
-			playlistId: PLAYLIST_ID,
-			url: `https://open.spotify.com/playlist/${PLAYLIST_ID}`
-		});
-		expect(JSON.stringify(body)).not.toContain('PRIVATE');
-		expect(JSON.stringify(body)).not.toContain(privateUri);
-		expect(JSON.stringify(consoleError.mock.calls)).not.toContain('PRIVATE');
-		expect(JSON.stringify(consoleError.mock.calls)).not.toContain(privateUri);
-		expect(consoleError).not.toHaveBeenCalled();
-	});
-
-	it('retains a newly created playlist ID when its track upload is incomplete', async () => {
-		const tracks = Array.from({ length: 101 }, (_value, index) => trackUri(index));
-		let itemRequest = 0;
-		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-			const url = String(input);
-			if (url.endsWith('/v1/me')) return jsonResponse({ id: USER_ID });
-			if (url === 'https://api.spotify.com/v1/me/playlists') {
-				return jsonResponse({ id: PLAYLIST_ID }, 201);
-			}
-			if (url.endsWith('/items')) {
-				itemRequest += 1;
-				return itemRequest === 2
-					? emptyResponse(503)
-					: emptyResponse(init?.method === 'POST' ? 201 : 200);
-			}
-			return emptyResponse();
-		});
-		const response = await POST({ request: requestFor({ tracks }), fetch: fetcher } as never);
-
-		expect(response.status).toBe(503);
-		expect(await response.json()).toEqual({
-			error: 'playlist_sync_incomplete',
-			incomplete: true,
-			playlistId: PLAYLIST_ID,
-			url: `https://open.spotify.com/playlist/${PLAYLIST_ID}`
-		});
-		expect(
-			fetcher.mock.calls.filter(
-				([url]) => String(url) === 'https://api.spotify.com/v1/me/playlists'
-			)
-		).toHaveLength(1);
-	});
-
-	it('retries a partial update deterministically from the first replacement batch', async () => {
-		const tracks = Array.from({ length: 201 }, (_value, index) => trackUri(index));
-		let itemRequest = 0;
-		let failed = false;
-		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-			const url = String(input);
-			if (url.endsWith('/v1/me')) return jsonResponse({ id: USER_ID });
-			if (url.includes('?fields=id,owner(id)')) {
-				return jsonResponse(playlistMetadata());
-			}
-			if (url.includes('/items?')) return jsonResponse({ items: [], total: 0 });
-			if (url.endsWith('/items')) {
-				itemRequest += 1;
-				if (!failed && itemRequest === 3) {
-					failed = true;
-					return jsonResponse({}, 503);
-				}
-				return emptyResponse(init?.method === 'POST' ? 201 : 200);
-			}
-			return emptyResponse();
-		});
-		const synchronize = () =>
-			POST({
-				request: requestFor({ playlistId: PLAYLIST_ID, tracks }),
-				fetch: fetcher
-			} as never);
-
-		expect((await synchronize()).status).toBe(503);
-		expect((await synchronize()).status).toBe(200);
-		const successfulRetry = fetcher.mock.calls
-			.filter(([url]) => String(url).endsWith('/items'))
-			.slice(-3);
-		expect(successfulRetry.map(([_url, init]) => init?.method)).toEqual(['PUT', 'POST', 'POST']);
-		expect(
-			successfulRetry.flatMap(
-				([_url, init]) => (JSON.parse(String(init?.body)) as { uris: string[] }).uris
-			)
-		).toEqual(tracks);
-	});
-
-	it.each(['metadata', 'replacement', 'append'])(
-		'maps a linked-playlist 404 during %s to not found',
-		async (stage) => {
-			let itemCall = 0;
-			const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-				const url = String(input);
-				if (url.endsWith('/v1/me')) return jsonResponse({ id: USER_ID });
-				if (url.includes('?fields=id,owner(id)')) {
-					return jsonResponse(playlistMetadata());
-				}
-				if (url.includes('/items?')) return jsonResponse({ items: [], total: 0 });
-				if (url === `https://api.spotify.com/v1/playlists/${PLAYLIST_ID}`) {
-					return stage === 'metadata' ? emptyResponse(404) : emptyResponse(200);
-				}
-				if (url.endsWith('/items')) {
-					itemCall += 1;
-					if (stage === 'replacement' && itemCall === 1) return emptyResponse(404);
-					if (stage === 'append' && itemCall === 2) return emptyResponse(404);
-					return emptyResponse(init?.method === 'POST' ? 201 : 200);
-				}
-				return emptyResponse();
-			});
-			const response = await POST({
-				request: requestFor({
-					playlistId: PLAYLIST_ID,
-					tracks: Array.from({ length: 101 }, (_value, index) => trackUri(index))
-				}),
-				fetch: fetcher
-			} as never);
-
-			expect(response.status).toBe(404);
-			expect(await response.json()).toEqual({
-				error: 'playlist_not_found',
-				incomplete: true,
-				playlistId: PLAYLIST_ID,
-				url: `https://open.spotify.com/playlist/${PLAYLIST_ID}`
-			});
-			expect(
-				fetcher.mock.calls.some(
-					([url]) => String(url) === 'https://api.spotify.com/v1/me/playlists'
-				)
-			).toBe(false);
-		}
-	);
 
 	it('treats invalid JSON after creation dispatch as an ambiguous outcome', async () => {
 		const fetcher = vi.fn(async (input: RequestInfo | URL) => {
