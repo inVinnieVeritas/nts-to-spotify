@@ -7,56 +7,250 @@ episodes progressively, and keeps uncertain Spotify matches unchecked for manual
 creating the playlist it removes exact duplicate Spotify track URIs while preserving alternate
 versions and remixes.
 
-## Local setup
+## Supported local edition
 
-1. Create a Spotify app in the Spotify developer dashboard.
-2. Add exactly `http://127.0.0.1:5173/login` as a redirect URI.
-3. Copy `.env.example` to `.env` and provide `SPOTIFY_CLIENT_ID` and
-   `SPOTIFY_CLIENT_SECRET`. Use credentials from your own Spotify app. Never share or reuse the
-   maintainer's credentials.
-4. Install dependencies and run the app:
+The supported local edition runs as a production Node server for the person using the computer.
+It binds only to `127.0.0.1:5173` by default, is not exposed to the local network, and does not
+open a browser automatically.
+
+Use Node 24 LTS when possible. Node 20.19+ and 22.13+ remain compatible fallbacks, although older
+compatible Node releases may not be able to use the operating system certificate store.
+
+The local URL is `http://127.0.0.1:5173/`.
+
+Keep that host and port stable. Browser IndexedDB and localStorage are isolated by origin, so
+using `localhost`, another address, or another port will show a different set of browser data.
+
+## Create a personal Spotify application
+
+1. Sign in to the Spotify developer dashboard and create an application for your own use.
+2. Add this exact redirect URI: `http://127.0.0.1:5173/login`.
+3. Copy the application's client ID and client secret into your local `.env` file.
+
+Spotify does not treat `localhost` as interchangeable with `127.0.0.1`. Never share your
+client secret, completed `.env`, browser cookies, or downloaded progress backups.
+
+## Windows one-time setup
+
+Clone or unpack the project into a directory owned by your Windows account. Do not install it in
+a shared or administrator-only directory. Run:
+
+```bat
+setup-local.cmd
+```
+
+The setup checks Node and npm, uses the operating system certificate store when Node supports it,
+creates `.env` from `.env.example` only when it is absent, runs `npm ci`, and creates the
+production build. It never overwrites an existing `.env` or changes environment settings outside
+that setup process.
+
+Open `.env` in a text editor and provide both entries:
+
+```dotenv
+SPOTIFY_CLIENT_ID=
+SPOTIFY_CLIENT_SECRET=
+```
+
+## Windows normal startup
+
+After setup, run:
+
+```bat
+start-local.cmd
+```
+
+Then open `http://127.0.0.1:5173/`. Press `Ctrl+C` in the server window to request shutdown.
+Starting the app never installs dependencies, rebuilds it, or opens a browser.
+
+The launcher runs adapter-node in the same foreground Node process. Native Windows console
+interrupts and POSIX SIGINT/SIGTERM request the adapter's bounded 30-second connection drain;
+there is no child-process signal forwarding. A 35-second final deadline ends a process that
+has not exited. Forced termination, closing the terminal, or a deadline expiry can leave a
+Spotify operation uncertain: use the existing reconciliation flow, not an assumption that
+Spotify cancelled it. Do not stop the server while an import is active if avoidable.
+
+Windows wrappers support local paths containing spaces and `!`, including callers using delayed
+expansion. UNC installation paths are rejected. They stop if their directory cannot be selected.
+Remove inherited `NODE_OPTIONS` and `NODE_TLS_REJECT_UNAUTHORIZED` before using the wrappers;
+they configure supported system-CA behavior themselves. Do not start Node with untrusted runtime
+options: Node processes those before any JavaScript launcher can validate them.
+
+## Linux and macOS
+
+Use the same production launcher:
+
+```bash
+cp .env.example .env
+# Edit .env and add your personal Spotify credentials.
+npm ci
+npm run build
+npm run start:local
+```
+
+Press `Ctrl+C` to request shutdown. The launcher augments Node's default TLS roots with system
+roots using the runtime certificate APIs (Node 22.19+ or 24.5+). On older compatible versions,
+it warns and retains default TLS verification. Current Node 24 LTS is recommended.
+
+## Development workflow
+
+The Vite development workflow remains available:
 
 ```bash
 npm ci
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-Open `http://127.0.0.1:5173` in your browser.
+Development mode is not the supported production experience. To exercise the production build,
+use `npm run build` followed by `npm run start:local`.
+
+For a generic hosted Node environment, `npm start` starts the adapter-node output and expects
+the host to inject runtime environment variables. It does not load the local `.env` file.
+
+## Safe local overrides
+
+The launcher accepts a different loopback port for controlled testing:
+
+```bash
+npm run start:local -- --port 5174
+```
+
+Configuration is parsed as data with Node's built-in parser. Only the two Spotify credential
+fields are imported; runtime and alternate-listener controls are rejected. Host, port and origin
+come only from the validated launcher options, not from `.env` or inherited server settings.
+
+It will still bind only to `127.0.0.1` and derives the origin from the selected port. If the
+port changes, register the matching Spotify callback and remember that the browser will use a
+different storage origin. An explicit `--origin` is accepted only when it exactly matches the
+loopback host and selected port. LAN addresses and `localhost` are rejected.
+
+## Using the importer
 
 Paste either a show URL such as `https://www.nts.live/shows/jim-o-rourke` or an individual
 episode URL into the search bar. A full catalogue scan can take several minutes because Spotify
-requests are deliberately rate-limited and uncertain matches require review.
+requests are deliberately paced and uncertain matches require review.
 
-## Local Spotify match cache
+## Catalogue backup and restore
 
-Successful Spotify matches are cached in `.data/spotify-match-cache` on the local Node
-installation. This reduces repeated searches across scans and restarts, but it neither increases
-nor reveals Spotify quota. The cache contains public match metadata, not credentials. Deleting
-that directory clears only the match cache and does not delete catalogue progress. Serverless
-hosts may not preserve local files; a durable hosted adapter remains future deployment work.
+Catalogue progress is stored in this browser. Use **Download backup** on a catalogue page or the
+Saved Catalogues dashboard after important reviews and playlist updates. Use **Restore progress**
+on the matching show page to import the JSON backup.
+
+A backup contains catalogue results, review choices, playlist settings, and compatible linked
+playlist state. It deliberately excludes Spotify credentials, tokens, cookies, server cache data,
+and local synchronization diagnostics. Treat backups as personal data because they describe your
+catalogue and review choices.
+
+## What persists locally
+
+- **IndexedDB:** catalogue progress, completed matches, review decisions, playlist settings, and
+  resumable playlist synchronization state for this browser origin.
+- **localStorage:** the browser-origin-wide Spotify Search cooldown.
+- **HTTP-only cookies:** Spotify access and refresh tokens. Logging out clears authentication but
+  does not delete catalogue progress.
+- **`.data/spotify-match-cache`:** public Spotify match metadata used to avoid repeated searches
+  across local server restarts.
+- **Server memory:** short-lived queues, coalesced searches, and server-session metrics, which
+  reset when Node stops.
+
+Cache usage reduces repeated searches; it does not increase or reveal Spotify quota.
 
 The cache directory must be owned and writable only by the operating-system account running the
-application. Shared or adversarially writable project directories are unsupported; public hosting
-must keep both application and cache directories inaccessible to untrusted writers. The cache
-contains no credentials or private Spotify account data. Node cannot provide fully handle-relative
-filesystem operations on every supported platform, so the cache fails closed on detected links or
-path replacement but does not claim protection against continuous same-user path replacement.
+application. Shared or adversarially writable project directories are unsupported. Deleting
+`.data/spotify-match-cache` clears only the public match cache; it does not remove browser
+catalogue progress or Spotify playlists. Node cannot provide fully handle-relative filesystem
+operations on every supported platform, so the cache fails closed on detected links or path
+replacement but does not claim protection against continuous same-user path replacement.
+
+## Troubleshooting
+
+### Port 5173 is already in use
+
+The launcher stops instead of silently selecting another port. Stop the application that owns
+the port, or deliberately use `--port` and register the corresponding Spotify redirect URI.
+Do not stop unrelated Node processes.
+
+### Spotify reports a redirect mismatch
+
+Confirm that the dashboard registration and browser address both use
+`http://127.0.0.1:5173/login`. Do not substitute `localhost`, omit the port, or add a trailing
+slash.
+
+### Windows certificate errors
+
+Install a current Node 24 LTS release. The launcher enables Node's Windows system certificate
+store in the server process when supported. Never work around certificate errors with
+`NODE_TLS_REJECT_UNAUTHORIZED=0` or another TLS-verification bypass. If a managed network still
+fails, ask its administrator to install the required CA correctly.
+
+### A native dependency is locked
+
+Stop only development or production servers using this installation, close terminals that are
+running project tools, and retry the explicit `npm ci`. Do not run dependency installation on
+every startup and do not delete unrelated Node processes.
+
+### Configuration or build is missing
+
+Run `setup-local.cmd` on Windows or the documented `npm ci` and `npm run build` commands on
+Linux/macOS. The launcher reports missing or empty configuration without printing credential
+values.
+
+### The cache directory is not writable
+
+Move the whole installation to a directory owned by your user account. The local edition is not
+designed to write under administrator-only application directories.
+
+## Updating an existing installation
+
+1. Download current catalogue backups while the server is still available.
+2. Stop the local server with `Ctrl+C` after active operations finish.
+3. Update the source using the distribution method you originally chose.
+4. Run `npm ci`.
+5. Run `npm run build`.
+6. Start the server normally at the same host and port.
+
+Do not replace or commit `.env` or `.data/`. Browser catalogue records remain associated with
+the original browser origin.
+
+## Security and privacy
+
+The local edition is intended for one person on one computer. Loopback binding prevents direct
+LAN access, but it does not protect against malicious software running under the same operating
+system account. The local `.env`, browser profile, backups, and cache directory are not encrypted
+by this application; rely on operating-system account and disk protection.
+
+Spotify OAuth requests public and private playlist modification scopes. Users who authenticated
+before those scopes were added need to log out and reconnect Spotify.
+
+This project is not affiliated with NTS.
+
+## Future public hosting
+
+Public hosting is a separate deployment step, not a different application fork. The adapter-node
+build can run on a conventional Node host when it is supplied a fixed HTTPS `ORIGIN`, injected
+Spotify credentials, trusted reverse-proxy configuration, and durable cache storage. A public,
+multi-instance or serverless deployment also needs a dedicated security review and coordinated
+storage. Never expose the local launcher directly to the internet.
 
 ## Checks
 
 ```bash
+npm test
 npm run check
+npm run lint
 npm run build
+npm audit --omit=dev
 ```
-
-Spotify OAuth requests public and private playlist modification scopes. Users who authenticated
-before those scopes were added need to log out and reconnect Spotify.
 
 ## Development toolchain notes
 
 - The newest stable SvelteKit currently brings `@polka/url@1.0.0-next.29` through Sirv. This
   unavoidable transitive dependency must not be overridden to the incompatible stable 0.5.0
   release.
-- The full npm audit reports three Low nodes for one `cookie@0.6.0` advisory through SvelteKit and
-  adapter-auto. The application uses fixed cookie names and paths, `npm audit --omit=dev` reports
-  zero vulnerabilities, and no compatible upstream correction is currently available.
+- The full npm audit may report a Low development-only cookie advisory through SvelteKit. The
+  application uses fixed cookie names and paths; `npm audit --omit=dev` is the production
+  dependency check.
+
+## License
+
+MIT. See [LICENSE](LICENSE). This fork remains based on the original NTS to Spotify project by
+[pdrbrnd](https://github.com/pdrbrnd/nts-to-spotify).

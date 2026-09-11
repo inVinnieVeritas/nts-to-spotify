@@ -20,6 +20,7 @@ const nodeFiles = [
 	'src/routes/**/+page.server.ts',
 	'src/routes/**/+layout.server.ts',
 	'src/**/*.test.ts',
+	'scripts/**/*.{js,mjs,cjs,ts}',
 	'*.{js,mjs,cjs,ts}'
 ];
 
