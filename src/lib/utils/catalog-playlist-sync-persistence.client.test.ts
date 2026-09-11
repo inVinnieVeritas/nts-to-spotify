@@ -7,6 +7,7 @@ import {
 	claimCatalogPlaylistSyncLease,
 	deleteCatalogProgress,
 	listCatalogProgress,
+	loadCatalogProgress,
 	loadCatalogPlaylistSync,
 	saveCatalogProgress,
 	saveCatalogPlaylistSync
@@ -27,7 +28,15 @@ import {
 	parseSpotifyPlaylistPreview,
 	createPlaylistPreviewInputSignature
 } from './playlist-preview.client';
-import { captureCatalogProgress } from './catalog-scan';
+import {
+	captureCatalogProgress,
+	getCatalogExportUris,
+	getResumableEpisodeIndexes,
+	runCatalogWorkers,
+	type EpisodeState,
+	type ReviewTrack
+} from './catalog-scan';
+import { reconcileSavedCatalogWithNTS } from './catalog-update';
 
 const PLAYLIST_ID = 'ABCDEFGHIJKLMNOPQRSTUV';
 const syncRecord = (alias = 'show'): CatalogPlaylistSyncRecord => ({
@@ -130,6 +139,348 @@ const memoryFactory = () => {
 };
 
 describe('catalogue playlist synchronization persistence', () => {
+	it('updates one linked playlist after scanning only newly reconciled episodes', async () => {
+		const { factory } = memoryFactory();
+		const options = { factory, timeoutMs: 100 };
+		let clock = Date.now();
+		const owner = 'existing_playlist_update_document';
+		const uri = (index: number) => `spotify:track:${String(index).padStart(22, '0')}`;
+		const reviewTrack = (index: number): ReviewTrack => ({
+			artist: `NTS artist ${index}`,
+			title: `NTS title ${index}`,
+			matches: [
+				{
+					artist: `Spotify artist ${index}`,
+					title: `Spotify title ${index}`,
+					uri: uri(index),
+					href: `https://open.spotify.com/track/${String(index).padStart(22, '0')}`
+				}
+			],
+			confident: true,
+			fallback: false,
+			selectedMatch: uri(index),
+			checked: true
+		});
+		const episode = (
+			episodeAlias: string,
+			broadcast: string,
+			tracks: ReviewTrack[] = [],
+			status: EpisodeState['status'] = 'done'
+		): EpisodeState => ({
+			episodeAlias,
+			name: episodeAlias,
+			broadcast,
+			cover: '',
+			genres: [],
+			status,
+			tracks
+		});
+		const oldest = episode(
+			'oldest',
+			'2025-01-01T00:00:00.000Z',
+			Array.from({ length: 50 }, (_, index) => reviewTrack(index))
+		);
+		const recent = episode(
+			'recent',
+			'2025-06-01T00:00:00.000Z',
+			Array.from({ length: 50 }, (_, index) => reviewTrack(index + 50))
+		);
+		const newSummary = episode('new-episode', '2026-01-01T00:00:00.000Z', [], 'pending');
+		const playlist = {
+			title: 'Existing linked archive',
+			description: 'Reviewed catalogue',
+			public: false,
+			order: 'latest-first' as const,
+			linkedPlaylistId: PLAYLIST_ID
+		};
+		const originalProgress = captureCatalogProgress('show', [oldest, recent], playlist);
+		const originalReviews = structuredClone(
+			Object.fromEntries(
+				Object.values(originalProgress.episodes).map(({ episodeAlias, tracks }) => [
+					episodeAlias,
+					tracks
+				])
+			)
+		);
+		await saveCatalogProgress(originalProgress, options);
+
+		const reconciled = reconcileSavedCatalogWithNTS(
+			(await loadCatalogProgress('show', options))!,
+			{
+				showAlias: 'show',
+				name: 'Show',
+				description: '',
+				cover: '',
+				episodes: [newSummary, recent, oldest]
+			},
+			clock
+		);
+		expect(reconciled.addedCount).toBe(1);
+		expect(reconciled.progress.playlist).toEqual(playlist);
+		expect(reconciled.progress.episodes.oldest.tracks).toEqual(originalReviews.oldest);
+		expect(reconciled.progress.episodes.recent.tracks).toEqual(originalReviews.recent);
+		expect(reconciled.progress.episodes['new-episode']).toMatchObject({
+			status: 'pending',
+			tracks: []
+		});
+		await saveCatalogProgress(reconciled.progress, options);
+
+		const episodes = Object.values((await loadCatalogProgress('show', options))!.episodes);
+		const resumable = getResumableEpisodeIndexes(episodes);
+		const scannedAliases: string[] = [];
+		await runCatalogWorkers({
+			indexes: resumable,
+			concurrency: 2,
+			signal: new AbortController().signal,
+			waitUntilReady: async () => undefined,
+			scanEpisode: async (index) => {
+				scannedAliases.push(episodes[index].episodeAlias);
+				episodes[index] = {
+					...episodes[index],
+					status: 'done',
+					tracks: [reviewTrack(100), reviewTrack(20), reviewTrack(101), reviewTrack(102)]
+				};
+				return { type: 'done' };
+			},
+			onRateLimit: () => {
+				throw new Error('Unexpected rate limit');
+			},
+			onSystemicSpotifyFailure: () => {
+				throw new Error('Unexpected Spotify failure');
+			}
+		});
+		expect(scannedAliases).toEqual(['new-episode']);
+		expect(episodes.filter(({ status }) => status === 'done')).toHaveLength(3);
+		await saveCatalogProgress(captureCatalogProgress('show', episodes, playlist), options);
+
+		const restoredProgress = (await loadCatalogProgress('show', options))!;
+		expect(restoredProgress.playlist.linkedPlaylistId).toBe(PLAYLIST_ID);
+		expect(restoredProgress.episodes.oldest.tracks).toEqual(originalReviews.oldest);
+		expect(restoredProgress.episodes.recent.tracks).toEqual(originalReviews.recent);
+		const oldTargetTracks = getCatalogExportUris([oldest, recent], 'latest-first');
+		const targetTracks = getCatalogExportUris(
+			Object.values(restoredProgress.episodes),
+			'latest-first'
+		);
+		expect(oldTargetTracks).toEqual([
+			...Array.from({ length: 50 }, (_, index) => uri(index + 50)),
+			...Array.from({ length: 50 }, (_, index) => uri(index))
+		]);
+		expect(targetTracks).toEqual([
+			uri(100),
+			uri(20),
+			uri(101),
+			uri(102),
+			...oldTargetTracks.filter((value) => value !== uri(20))
+		]);
+		expect(new Set(targetTracks).size).toBe(targetTracks.length);
+
+		let items = [...oldTargetTracks];
+		let snapshotId = 'snapshot-0';
+		const json = (body: unknown, status = 200) =>
+			new Response(JSON.stringify(body), {
+				status,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		const spotify = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url.endsWith('/v1/me')) return json({ id: 'fixture-user' });
+			if (url.endsWith('/v1/me/playlists')) throw new Error('Must not create another playlist');
+			if (url.includes('/items?')) {
+				const offset = Number(new URL(url).searchParams.get('offset') ?? 0);
+				return json({
+					total: items.length,
+					items: items
+						.slice(offset, offset + 100)
+						.map((trackUri) => ({ item: { type: 'track', uri: trackUri } }))
+				});
+			}
+			if (url.includes('?fields=')) {
+				return json({
+					id: PLAYLIST_ID,
+					owner: { id: 'fixture-user' },
+					snapshot_id: snapshotId,
+					name: playlist.title,
+					description: playlist.description,
+					public: playlist.public
+				});
+			}
+			if (url.endsWith(`/v1/playlists/${PLAYLIST_ID}`) && init?.method === 'PUT') {
+				return new Response(null, { status: 204 });
+			}
+			if (url.endsWith(`/v1/playlists/${PLAYLIST_ID}/items`) && init?.method === 'PUT') {
+				items = [...(JSON.parse(String(init.body)).uris as string[])];
+				snapshotId = 'snapshot-1';
+				return json({ snapshot_id: snapshotId });
+			}
+			if (url.endsWith(`/v1/playlists/${PLAYLIST_ID}/items`) && init?.method === 'POST') {
+				items.push(...(JSON.parse(String(init.body)).uris as string[]));
+				snapshotId = 'snapshot-2';
+				return json({ snapshot_id: snapshotId });
+			}
+			throw new Error('Unexpected Spotify request');
+		});
+		const endpoint = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+			POST({
+				request: new Request('http://localhost/api/spotify/playlist', init),
+				fetch: spotify
+			} as never)
+		);
+		const request = (body: unknown, signal?: AbortSignal) =>
+			requestPlaylistJson(endpoint, body, signal);
+		const target = {
+			name: playlist.title,
+			description: playlist.description,
+			public: playlist.public,
+			tracks: targetTracks
+		};
+		const signature = createPlaylistPreviewInputSignature({
+			playlistId: PLAYLIST_ID,
+			title: target.name,
+			...target
+		});
+		const mutationCount = () =>
+			spotify.mock.calls.filter(([, init]) => ['POST', 'PUT'].includes(init?.method ?? '')).length;
+		const firstPreviewResponse = await request({
+			operation: 'preview',
+			playlistId: PLAYLIST_ID,
+			...target
+		});
+		const firstPreview = parseSpotifyPlaylistPreview(
+			firstPreviewResponse.body,
+			PLAYLIST_ID,
+			signature
+		)!;
+		expect(firstPreviewResponse.response.status).toBe(200);
+		expect(firstPreview).toMatchObject({
+			addedCount: 3,
+			removedCount: 0,
+			retainedCount: 100,
+			orderChanged: true,
+			synchronized: false
+		});
+		expect(mutationCount()).toBe(0);
+
+		const previousCompleted: CatalogPlaylistSyncRecord = {
+			...syncRecord(),
+			playlistId: PLAYLIST_ID,
+			targetFingerprint: await fingerprintPlaylistSyncTarget(PLAYLIST_ID, {
+				...target,
+				tracks: oldTargetTracks
+			}),
+			totalTrackCount: oldTargetTracks.length,
+			confirmedPosition: oldTargetTracks.length,
+			phase: 'completed',
+			mode: 'updated',
+			startedAt: clock - 1,
+			updatedAt: clock - 1,
+			snapshotId
+		};
+		await saveCatalogPlaylistSync(previousCompleted, options);
+		const nextOperation: CatalogPlaylistSyncRecord = {
+			...previousCompleted,
+			operationId: 'new_episode_update_operation',
+			targetFingerprint: await fingerprintPlaylistSyncTarget(PLAYLIST_ID, target),
+			totalTrackCount: targetTracks.length,
+			confirmedPosition: 0,
+			phase: 'interrupted',
+			restartRequired: true,
+			startedAt: clock,
+			updatedAt: clock,
+			snapshotId: undefined
+		};
+		const claimed = await claimCatalogPlaylistSyncLease(
+			nextOperation,
+			owner,
+			clock,
+			PLAYLIST_SYNC_LEASE_MS,
+			options
+		);
+		expect(claimed).toMatchObject({
+			acquired: true,
+			record: { playlistId: PLAYLIST_ID, mode: 'updated', confirmedPosition: 0 }
+		});
+		const confirmedPositions: number[] = [];
+		const outcome = await runPlaylistSyncBatches({
+			record: claimed.record!,
+			target,
+			previewFingerprint: firstPreview.previewFingerprint,
+			request,
+			now: () => clock,
+			delay: async (milliseconds) => {
+				clock += milliseconds;
+			},
+			persist: async (next) => {
+				const release = ['completed', 'uncertain', 'blocked', 'interrupted', 'paused'].includes(
+					next.phase
+				);
+				const saved = await claimCatalogPlaylistSyncLease(
+					next,
+					owner,
+					clock,
+					PLAYLIST_SYNC_LEASE_MS,
+					options,
+					release
+				);
+				expect(saved.acquired).toBe(true);
+				confirmedPositions.push(saved.record!.confirmedPosition);
+				return saved.record!;
+			}
+		});
+		expect(outcome).toMatchObject({
+			type: 'completed',
+			record: {
+				playlistId: PLAYLIST_ID,
+				mode: 'updated',
+				confirmedPosition: targetTracks.length
+			}
+		});
+		expect(confirmedPositions).toContain(100);
+		expect(items).toEqual(targetTracks);
+		expect(new Set(items).size).toBe(items.length);
+		expect(spotify.mock.calls.some(([url]) => String(url).endsWith('/v1/me/playlists'))).toBe(
+			false
+		);
+		expect(
+			spotify.mock.calls
+				.filter(([, init]) => ['POST', 'PUT'].includes(init?.method ?? ''))
+				.every(([url]) => String(url).includes(`/v1/playlists/${PLAYLIST_ID}`))
+		).toBe(true);
+
+		const restoredSync = await loadCatalogPlaylistSync('show', options);
+		expect(restoredSync).toMatchObject({
+			phase: 'completed',
+			playlistId: PLAYLIST_ID,
+			confirmedPosition: targetTracks.length,
+			totalTrackCount: targetTracks.length
+		});
+		const restoredAfterSync = await loadCatalogProgress('show', options);
+		expect(restoredAfterSync?.playlist.linkedPlaylistId).toBe(PLAYLIST_ID);
+		expect(restoredAfterSync?.episodes.oldest.tracks).toEqual(originalReviews.oldest);
+		expect(restoredAfterSync?.episodes.recent.tracks).toEqual(originalReviews.recent);
+
+		const mutationsBeforeFinalPreview = mutationCount();
+		const finalPreviewResponse = await request({
+			operation: 'preview',
+			playlistId: PLAYLIST_ID,
+			...target
+		});
+		const finalPreview = parseSpotifyPlaylistPreview(
+			finalPreviewResponse.body,
+			PLAYLIST_ID,
+			signature
+		)!;
+		expect(finalPreviewResponse.response.status).toBe(200);
+		expect(finalPreview).toMatchObject({
+			addedCount: 0,
+			removedCount: 0,
+			retainedCount: targetTracks.length,
+			orderChanged: false,
+			synchronized: true
+		});
+		expect(mutationCount()).toBe(mutationsBeforeFinalPreview);
+	});
+
 	it('shows one exact preview after 100/181 resume reaches 181 but settlement reads expire', async () => {
 		const { factory, values } = memoryFactory();
 		const options = { factory, timeoutMs: 100 };
