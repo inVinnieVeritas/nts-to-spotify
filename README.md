@@ -21,6 +21,14 @@ The local URL is `http://127.0.0.1:5173/`.
 Keep that host and port stable. Browser IndexedDB and localStorage are isolated by origin, so
 using `localhost`, another address, or another port will show a different set of browser data.
 
+## Download the Windows release
+
+Open the GitHub Releases page, download the `v0.1.0` source ZIP, and extract it into a folder
+writable by your Windows account. Run `setup-local.cmd`, add your personal Spotify credentials to
+the new `.env`, and then run `start-local.cmd`. In your Spotify application settings, register
+exactly `http://127.0.0.1:5173/login` as the redirect URI. The sections below explain each step and
+the available troubleshooting options in more detail.
+
 ## Create a personal Spotify application
 
 1. Sign in to the Spotify developer dashboard and create an application for your own use.
