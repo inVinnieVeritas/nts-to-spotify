@@ -2,6 +2,7 @@ import type { MatchedTrack, NTSEpisodeSummary, URI } from '$lib/types';
 import { isAbortError } from './abort';
 import { emptyCatalogScanTiming, type CatalogScanTiming } from './catalog-scan-session';
 import { getTrackPartMismatchWarning } from './part-mismatch';
+import { isConfidentSpotifyMatch } from './spotify-match';
 
 export const CATALOG_PROGRESS_SCHEMA_VERSION = 2;
 export const SPOTIFY_MATCHER_VERSION = 1;
@@ -453,7 +454,12 @@ export const catalogTrackMatchesReviewFilter = (
 	}
 	if (filter === 'no-candidates') return track.matches.length === 0;
 	if (filter === 'part-mismatches') return getTrackPartMismatchWarning(track) !== null;
-	if (track.confident || track.matches.length === 0) return false;
+	const selectedCandidate = track.matches.find(({ uri }) => uri === track.selectedMatch);
+	const titleEquivalentPrimarySelection = Boolean(
+		!track.fallback && selectedCandidate && isConfidentSpotifyMatch(track, selectedCandidate)
+	);
+	if (track.confident || titleEquivalentPrimarySelection || track.matches.length === 0)
+		return false;
 	return filter === 'fallback-review' ? track.fallback : !track.fallback;
 };
 

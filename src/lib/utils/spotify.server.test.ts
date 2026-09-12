@@ -420,6 +420,23 @@ describe('Spotify rate limiting', () => {
 
 describe('Spotify server-session search cache', () => {
 	beforeEach(() => resetSpotifyServerSessionForTests());
+
+	it('marks a primary artist-and-title remaster result confident through the real search path', async () => {
+		const request = vi.fn(async () =>
+			searchResponse([spotifyItem('Song Title - 2011 Remaster')])
+		) as Fetcher;
+
+		await expect(
+			searchSpotifyTrack({ artist: 'Artist', title: 'Song Title' }, 'token', request)
+		).resolves.toMatchObject({
+			artist: 'Artist',
+			title: 'Song Title',
+			fallback: false,
+			confident: true,
+			matches: [expect.objectContaining({ title: 'Song Title - 2011 Remaster' })]
+		});
+		expect(request).toHaveBeenCalledOnce();
+	});
 	afterEach(() => {
 		vi.useRealTimers();
 	});
@@ -428,6 +445,9 @@ describe('Spotify server-session search cache', () => {
 		expect(normalizeSpotifySearchKeyPart('  ARTIST\t Name  ')).toBe('artist name');
 		expect(createSpotifySearchCacheKey({ artist: 'Artist', title: 'A-B' }, 1)).not.toBe(
 			createSpotifySearchCacheKey({ artist: 'Artist', title: 'A B' }, 1)
+		);
+		expect(createSpotifySearchCacheKey({ artist: 'Artist', title: 'Song Title' }, 1)).not.toBe(
+			createSpotifySearchCacheKey({ artist: 'Artist', title: 'Song Title - Remastered' }, 1)
 		);
 		expect(createSpotifySearchCacheKey({ artist: 'Artist', title: 'Track' }, 1, 'BE')).not.toBe(
 			createSpotifySearchCacheKey({ artist: 'Artist', title: 'Track' }, 1, 'US')
