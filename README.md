@@ -209,15 +209,22 @@ designed to write under administrator-only application directories.
 
 ## Updating an existing installation
 
-1. Download current catalogue backups while the server is still available.
-2. Stop the local server with `Ctrl+C` after active operations finish.
-3. Update the source using the distribution method you originally chose.
-4. Run `npm ci`.
-5. Run `npm run build`.
-6. Start the server normally at the same host and port.
+For a safe Windows upgrade to a packaged release:
 
-Do not replace or commit `.env` or `.data/`. Browser catalogue records remain associated with
-the original browser origin.
+1. Download and extract the new release into a new folder.
+2. Stop the old server with `Ctrl+C` after active operations finish.
+3. Copy the existing `.env` file into the new folder.
+4. Copy the existing `.data` directory into the new folder if it exists.
+5. Run `setup-local.cmd` in the new folder.
+6. Start the application with `start-local.cmd`.
+7. Open the same `http://127.0.0.1:5173/` address.
+8. Confirm that saved catalogues and linked playlists remain available.
+9. Keep the old installation until the new version is verified.
+
+Downloaded catalogue backups are recommended before updating. Browser catalogue data is tied to
+the browser origin (scheme, host, and port), so using the same address preserves access to it.
+The `.data` directory is installation-local and contains server-side public match-cache and
+cooldown information. Do not commit or share `.env` or `.data/`.
 
 ## Security and privacy
 
