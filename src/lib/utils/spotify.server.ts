@@ -14,9 +14,9 @@ import { requestSpotifyToken } from './spotify-token.server';
 import {
 	createDefaultSpotifyMatchCache,
 	createSpotifyPersistentCacheIdentity,
-	isConfidentSpotifyMatch,
 	type SpotifyMatchCacheStorage
 } from './spotify-match-cache.server';
+import { isConfidentSpotifyMatch } from './spotify-match';
 
 const SEARCH_TIMEOUT_MS = 20_000;
 export const SPOTIFY_SEARCH_INTERVAL_MS = 2_000;

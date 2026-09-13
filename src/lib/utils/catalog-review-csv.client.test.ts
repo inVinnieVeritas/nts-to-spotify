@@ -138,8 +138,8 @@ describe('catalogue review CSV rows', () => {
 	});
 
 	it('recalculates warning columns from the currently chosen alternative without changing selection', () => {
-		const equivalent = match('equivalent', 'Artist', 'Work Part II');
-		const conflicting = match('conflicting', 'Artist', 'Work Part III');
+		const equivalent = match('equivalent', 'Unrelated performer', 'Work Part II');
+		const conflicting = match('conflicting', 'Unrelated performer', 'Work Part III');
 		const reviewed = track({
 			title: 'Work Part II',
 			matches: [equivalent, conflicting],
@@ -162,6 +162,23 @@ describe('catalogue review CSV rows', () => {
 			partMismatchReason: 'NTS specifies Part II; Spotify suggestion specifies Part III.'
 		});
 		expect(reviewed.checked).toBe(false);
+	});
+
+	it('uses the same remaster-aware review classification without mutating the occurrence', () => {
+		const candidate = match('remastered', 'NTS Artist', 'NTS Title - Remastered');
+		const reviewed = track({
+			matches: [candidate],
+			selectedMatch: candidate.uri,
+			checked: false,
+			confident: false,
+			fallback: false
+		});
+		const original = structuredClone(reviewed);
+		const episodes = [episode('Episode', '2026-01-02T12:00:00.000Z', [reviewed])];
+
+		expect(getCatalogReviewTrackCount(episodes)).toBe(0);
+		expect(getCatalogReviewCsvRows('Show', episodes)).toEqual([]);
+		expect(reviewed).toEqual(original);
 	});
 });
 

@@ -16,6 +16,7 @@ import { dirname, resolve } from 'node:path';
 import type { BasicTrack, Match, MatchedTrack } from '$lib/types';
 import { parseOfficialSpotifyArtworkUrl } from './artwork';
 import { abortableDelay } from './abort';
+import { isConfidentSpotifyMatch } from './spotify-match';
 
 export const SPOTIFY_PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const SPOTIFY_PERSISTENT_CACHE_MAX_ENTRIES = 10_000;
@@ -152,29 +153,6 @@ export const createSpotifyPersistentCacheKey = (identity: SpotifyPersistentCache
 		identity.primaryQuery,
 		identity.fallbackQuery
 	]);
-
-const normalizeMatchText = (value: string) =>
-	value
-		.normalize('NFKD')
-		.replace(/[\u0300-\u036f]/g, '')
-		.toLowerCase()
-		.replace(/&/g, 'and')
-		.replace(/[^a-z0-9]+/g, ' ')
-		.trim();
-
-export const isConfidentSpotifyMatch = (track: BasicTrack, match: Match) => {
-	if (normalizeMatchText(track.title) !== normalizeMatchText(match.title)) return false;
-	const requestedArtist = normalizeMatchText(track.artist);
-	return match.artist
-		.split(',')
-		.map(normalizeMatchText)
-		.some(
-			(artist) =>
-				artist === requestedArtist ||
-				(requestedArtist.length >= 5 &&
-					(artist.includes(requestedArtist) || requestedArtist.includes(artist)))
-		);
-};
 
 const parseSafeHttpsUrl = (value: unknown) => {
 	if (!isBoundedString(value, MAX_URL_LENGTH)) return null;

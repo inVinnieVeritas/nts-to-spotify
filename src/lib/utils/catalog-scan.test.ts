@@ -127,6 +127,72 @@ describe('catalogue progress restoration', () => {
 		expect(restored[1]).toMatchObject({ status: 'pending', tracks: [] });
 	});
 
+	it('reclassifies a persisted unresolved remaster match without changing its review choices', () => {
+		const savedEpisode = episode('remaster', '2026-01-01');
+		const remasteredUri = 'spotify:track:0123456789ABCDEFGHIJKL';
+		const persistedTrack = {
+			artist: 'Artist',
+			title: 'Song Title',
+			matches: [
+				{
+					uri: remasteredUri,
+					artist: 'Artist',
+					title: 'Song Title - 2011 Remaster',
+					href: 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL'
+				}
+			],
+			confident: false,
+			fallback: false,
+			selectedMatch: remasteredUri,
+			checked: false
+		};
+		const restored = reconcileEpisodes(
+			[savedEpisode],
+			savedProgress([{ ...savedEpisode, status: 'done', tracks: [persistedTrack] }])
+		);
+
+		expect(restored[0].tracks[0]).toEqual(persistedTrack);
+		expect(getCatalogReviewFilterCounts(restored)['primary-review']).toBe(0);
+		expect(getCatalogReviewFilterCounts(restored).selected).toBe(0);
+	});
+
+	it('preserves an explicit alternative selection while applying remaster review equivalence', () => {
+		const savedEpisode = episode('manual-remaster', '2026-01-01');
+		const chosenUri = 'spotify:track:ZYXWVUTSRQPONMLKJIHGFE';
+		const persistedTrack = {
+			artist: 'Artist',
+			title: 'Song Title',
+			matches: [
+				{
+					uri: 'spotify:track:0123456789ABCDEFGHIJKL',
+					artist: 'Artist',
+					title: 'Different Title',
+					href: 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL'
+				},
+				{
+					uri: chosenUri,
+					artist: 'Artist',
+					title: 'Song Title [2020 Remaster]',
+					href: 'https://open.spotify.com/track/ZYXWVUTSRQPONMLKJIHGFE'
+				}
+			],
+			confident: false,
+			fallback: false,
+			selectedMatch: chosenUri,
+			checked: true
+		};
+		const restored = reconcileEpisodes(
+			[savedEpisode],
+			savedProgress([{ ...savedEpisode, status: 'done', tracks: [persistedTrack] }])
+		);
+
+		expect(restored[0].tracks[0]).toEqual(persistedTrack);
+		expect(getCatalogReviewFilterCounts(restored)).toMatchObject({
+			selected: 1,
+			'primary-review': 0
+		});
+	});
+
 	it('preserves completed episodes while adding a newly published episode as pending', () => {
 		const older = episode('older', '2026-01-01');
 		const newer = episode('newer', '2026-02-01');
@@ -446,6 +512,62 @@ describe('catalogue review filters', () => {
 			'fallback-review': 1,
 			'no-candidates': 1,
 			'part-mismatches': 1
+		});
+	});
+
+	it('does not classify a selected title-equivalent remaster as primary review', () => {
+		const remasteredUri = 'spotify:track:0123456789ABCDEFGHIJKL';
+		const remastered = filteredTrack('Song Title', {
+			artist: 'Artist',
+			fallback: false,
+			confident: false,
+			matches: [
+				{
+					...candidate,
+					uri: remasteredUri,
+					artist: 'Artist',
+					title: 'Song Title (Remastered)'
+				}
+			],
+			selectedMatch: remasteredUri,
+			checked: false
+		});
+		const completed = completedEpisode([remastered]);
+
+		expect(getCatalogReviewFilterCounts([completed])).toMatchObject({
+			all: 1,
+			selected: 0,
+			'primary-review': 0
+		});
+		expect(getCatalogEpisodeReviewTracks(completed, 'primary-review')).toEqual([]);
+		expect(remastered).toMatchObject({
+			confident: false,
+			checked: false,
+			selectedMatch: remasteredUri
+		});
+	});
+
+	it('keeps a remastered title with a different artist in primary review', () => {
+		const candidateUri = 'spotify:track:0123456789ABCDEFGHIJKL';
+		const artistMismatch = filteredTrack('Song Title', {
+			artist: 'Original Artist',
+			fallback: false,
+			confident: false,
+			matches: [
+				{
+					...candidate,
+					uri: candidateUri,
+					artist: 'Unrelated performer',
+					title: 'Song Title - Remastered'
+				}
+			],
+			selectedMatch: candidateUri,
+			checked: false
+		});
+
+		expect(getCatalogReviewFilterCounts([completedEpisode([artistMismatch])])).toMatchObject({
+			'primary-review': 1,
+			selected: 0
 		});
 	});
 
