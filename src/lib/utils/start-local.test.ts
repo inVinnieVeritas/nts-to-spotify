@@ -45,8 +45,11 @@ afterEach(async () => {
 		await rm(directory, { recursive: true, force: true });
 });
 
-const temporaryProject = async (configuration: string | null = dummy) => {
-	const root = await mkdtemp(join(tmpdir(), 'nts2s launcher ! space '));
+const temporaryProject = async (
+	configuration: string | null = dummy,
+	prefix = 'nts2s launcher ! space '
+) => {
+	const root = await mkdtemp(join(tmpdir(), prefix));
 	directories.push(root);
 	await mkdir(join(root, 'scripts'));
 	await mkdir(join(root, 'build'));
@@ -287,18 +290,20 @@ describe('validation and bounded shutdown', () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('executed Windows command wrappers', () => {
-	const wrapper = async (
+	const startWrapper = async (
 		root: string,
 		name: string,
 		transform?: (text: string) => string,
-		extra: NodeJS.ProcessEnv = {}
+		extra: NodeJS.ProcessEnv = {},
+		command: string[] = ['/d', '/v:on', '/c', name]
 	) => {
 		const original = await readFile(join(sourceRoot, name), 'utf8');
 		await writeFile(join(root, name), transform ? transform(original) : original);
-		const child = spawn('cmd.exe', ['/d', '/v:on', '/c', name], {
+		const child = spawn('cmd.exe', command, {
 			cwd: tmpdir(),
 			env: { ...cleanEnvironment(), PATH: `${root};${process.env.PATH}`, ...extra },
-			shell: false
+			shell: false,
+			stdio: ['pipe', 'pipe', 'pipe']
 		});
 		children.push(child);
 		let output = '';
@@ -308,11 +313,208 @@ describe.skipIf(process.platform !== 'win32')('executed Windows command wrappers
 		child.stderr!.on('data', (data) => {
 			output += data;
 		});
-		return await new Promise<{ code: number | null; output: string }>((done, reject) => {
+		const closed = new Promise<{ code: number | null; output: string }>((done, reject) => {
 			child.on('error', reject);
 			child.on('close', (code) => done({ code, output }));
 		});
+		return { child, closed, output: () => output };
 	};
+
+	const wrapper = async (
+		root: string,
+		name: string,
+		transform?: (text: string) => string,
+		extra: NodeJS.ProcessEnv = {},
+		command?: string[]
+	) => (await startWrapper(root, name, transform, extra, command)).closed;
+
+	const waitForOutput = async (running: Awaited<ReturnType<typeof startWrapper>>, text: string) => {
+		const deadline = Date.now() + 2_000;
+		while (!running.output().includes(text)) {
+			if (Date.now() >= deadline) throw new Error('Timed out waiting for wrapper output');
+			await new Promise((done) => setTimeout(done, 10));
+		}
+	};
+
+	const replaceDetectionCommand = (text: string, replacement: string) => {
+		const command = text.split(/\r?\n/u).find((line) => line.startsWith('"%NTS2S_POWERSHELL%"'));
+		if (!command) throw new Error('Explorer detection command was not found');
+		return text.replace(command, replacement);
+	};
+
+	// Mock only the OS process records and console handle. Execute the real PowerShell
+	// decision, including its option parser, local query bounds and failure handling.
+	const processFixture = (
+		command = '"C:\\Windows\\System32\\cmd.exe" /c "start-local.cmd"',
+		parent = 'explorer.exe',
+		shell = 'cmd.exe',
+		failure = false,
+		reusedParent = false
+	) => {
+		const literal = (value: string) => "'" + value.replace(/'/g, "''") + "'";
+		return `function Get-CimInstance { param($ClassName, $Filter, $OperationTimeoutSec, $ErrorAction); if ($ClassName -ne 'Win32_Process' -or $OperationTimeoutSec -ne 1 -or $ErrorAction -ne 'Stop') { throw 'Invalid query boundary' }; ${failure ? "throw 'dummy-private-failure';" : ''} if ($Filter -eq ('ProcessId=' + $PID)) { return [pscustomobject]@{ParentProcessId=100;CreationDate=3} }; if ($Filter -eq 'ProcessId=100') { return [pscustomobject]@{Name=${literal(shell)};ParentProcessId=99;CreationDate=2;CommandLine=${literal(command)}} }; if ($Filter -eq 'ProcessId=99') { return [pscustomobject]@{Name=${literal(parent)};CreationDate=${reusedParent ? 4 : 1}} }; throw 'Unexpected query' }; `;
+	};
+	const withProcessFixture = (text: string, fixture = processFixture(), consoleInput = true) => {
+		const command = text.split(/\r?\n/u).find((line) => line.startsWith('"%NTS2S_POWERSHELL%"'));
+		if (!command) throw new Error('Missing detection command');
+		// Encode fixture data so quotes/metacharacters never enter cmd's command syntax.
+		const encoded = Buffer.from(fixture, 'utf16le').toString('base64');
+		let controlled = command.replace(
+			'-Command "',
+			`-Command ". ([scriptblock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encoded}')))); `
+		);
+		if (consoleInput) controlled = controlled.replace('[Console]::IsInputRedirected', '$false');
+		return text.replace(command, controlled);
+	};
+	const simulateExplorerConsole = (text: string) =>
+		withProcessFixture(text)
+			// A headless test cannot drive cmd.exe's console-only PAUSE implementation.
+			.replace('pause >nul', 'set /p "NTS2S_TEST_KEY=" >nul');
+
+	const simulateExplorerWithRedirectedInput = (text: string) =>
+		withProcessFixture(text, processFixture(), false);
+
+	it('keeps the two failure handlers identical to prevent drift', async () => {
+		const start = await readFile(join(sourceRoot, 'start-local.cmd'), 'utf8');
+		const setup = await readFile(join(sourceRoot, 'setup-local.cmd'), 'utf8');
+		expect(start.slice(start.indexOf('\n:NTS2S_FINISH'))).toBe(
+			setup.slice(setup.indexOf('\n:NTS2S_FINISH'))
+		);
+	});
+
+	it.each([
+		[
+			'persistent cmd with /c in argument text',
+			'"cmd.exe" /k echo /c',
+			'explorer.exe',
+			'cmd.exe',
+			false,
+			false
+		],
+		['persistent cmd', '"cmd.exe" /k', 'explorer.exe', 'cmd.exe', false, false],
+		['PowerShell', '"cmd.exe" /c start-local.cmd', 'powershell.exe', 'cmd.exe', false, false],
+		[
+			'Windows Terminal',
+			'"cmd.exe" /c start-local.cmd',
+			'WindowsTerminal.exe',
+			'cmd.exe',
+			false,
+			false
+		],
+		['nested cmd', '"cmd.exe" /c start-local.cmd', 'cmd.exe', 'cmd.exe', false, false],
+		['CI runner', '"cmd.exe" /c start-local.cmd', 'runner.exe', 'cmd.exe', false, false],
+		[
+			'wrong immediate process',
+			'"cmd.exe" /c start-local.cmd',
+			'explorer.exe',
+			'pwsh.exe',
+			false,
+			false
+		],
+		['CIM exception', '"cmd.exe" /c start-local.cmd', 'explorer.exe', 'cmd.exe', true, false],
+		['reused parent PID', '"cmd.exe" /c start-local.cmd', 'explorer.exe', 'cmd.exe', false, true]
+	] as const)(
+		'skips pause and preserves failure for %s',
+		async (_label, command, parent, shell, failure, reused) => {
+			const root = await temporaryProject(null);
+			const result = await wrapper(root, 'start-local.cmd', (text) =>
+				withProcessFixture(text, processFixture(command, parent, shell, failure, reused))
+			);
+			expect(result.code).toBe(78);
+			expect(result.output).toContain('Missing .env');
+			expect(result.output).not.toContain('Press any key');
+			expect(result.output).not.toContain('dummy-private-failure');
+		}
+	);
+
+	it.each(['CI', 'TF_BUILD'])('never detects or pauses with %s set', async (flag) => {
+		const root = await temporaryProject(null);
+		const result = await wrapper(
+			root,
+			'start-local.cmd',
+			(text) => replaceDetectionCommand(text, 'echo DETECTION-MUST-NOT-RUN'),
+			{ [flag]: 'true' }
+		);
+		expect(result.code).toBe(78);
+		expect(result.output).not.toContain('DETECTION-MUST-NOT-RUN');
+		expect(result.output).not.toContain('Press any key');
+	});
+
+	it.each(['start-local.cmd', 'setup-local.cmd'])(
+		'preserves errors when PowerShell is missing or fails: %s',
+		async (name) => {
+			const root = await temporaryProject(null);
+			for (const transform of [
+				(text: string) =>
+					text.replace(
+						'set "NTS2S_POWERSHELL=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
+						'set "NTS2S_POWERSHELL=missing-powershell-for-test.exe"'
+					),
+				(text: string) => replaceDetectionCommand(text, 'cmd.exe /d /c exit /b -1')
+			]) {
+				const result = await wrapper(root, name, transform, {
+					NODE_OPTIONS: '--conditions=dummy-private-value'
+				});
+				expect(result.code).toBe(78);
+				expect(result.output).toContain('Remove inherited');
+				expect(result.output).not.toContain('Press any key');
+				expect(result.output).not.toContain('dummy-private-value');
+			}
+		}
+	);
+
+	it('recognizes Explorer /d /s /c with an immediately quoted command', async () => {
+		const root = await temporaryProject(null);
+		const running = await startWrapper(root, 'start-local.cmd', (text) =>
+			withProcessFixture(
+				text,
+				processFixture('"C:\\Windows\\System32\\cmd.exe" /d /s /c"start-local.cmd"')
+			).replace('pause >nul', 'set /p "NTS2S_TEST_KEY=" >nul')
+		);
+		await waitForOutput(running, 'Press any key to close this window.');
+		expect(running.child.exitCode).toBeNull();
+		running.child.stdin!.end('x\r\n');
+		expect((await running.closed).code).toBe(78);
+	});
+
+	it('does not run detection after successful setup', async () => {
+		const root = await temporaryProject(null);
+		await writeFile(join(root, 'npm.cmd'), '@echo off\r\nexit /b 0\r\n');
+		const result = await wrapper(root, 'setup-local.cmd', (text) =>
+			replaceDetectionCommand(text, 'echo DETECTION-MUST-NOT-RUN')
+		);
+		expect(result.code).toBe(0);
+		expect(result.output).toContain('Setup complete.');
+		expect(result.output).not.toContain('DETECTION-MUST-NOT-RUN');
+		expect(result.output).not.toContain('Press any key');
+	});
+
+	it.each(['start-local.cmd', 'setup-local.cmd'])(
+		'rejects shadowed exit status safely: %s',
+		async (name) => {
+			const root = await temporaryProject(null);
+			const result = await wrapper(root, name, undefined, {
+				ERRORLEVEL: '123 & echo HARMLESS-SYNTAX-MARKER',
+				NODE_OPTIONS: '--conditions=dummy-private-value'
+			});
+			expect(result.code).toBe(78);
+			expect(result.output).not.toContain('HARMLESS-SYNTAX-MARKER');
+			expect(result.output).not.toContain('dummy-private-value');
+		}
+	);
+
+	it.each(['start-local.cmd', 'setup-local.cmd'])(
+		'handles all permitted special path characters: %s',
+		async (name) => {
+			const root = await temporaryProject(null, 'nts2s ! (space) & %NTS_PATH_MARKER% é 日本 ');
+			await writeFile(join(root, 'npm.cmd'), '@echo off\r\nexit /b 23\r\n');
+			const result = await wrapper(root, name, undefined, { NTS_PATH_MARKER: 'not-the-path' });
+			expect(result.code).toBe(name === 'start-local.cmd' ? 78 : 23);
+			expect(result.output).toContain(
+				name === 'start-local.cmd' ? 'Missing .env' : 'Dependency installation failed'
+			);
+		}
+	);
 
 	it.each(['start-local.cmd', 'setup-local.cmd'])(
 		'handles spaces/! and its own directory: %s',
@@ -329,6 +531,105 @@ describe.skipIf(process.platform !== 'win32')('executed Windows command wrappers
 				expect(await readFile(join(root, '.env'), 'utf8')).toBe(dummy);
 		}
 	);
+
+	it.each([
+		['start-local.cmd', 78],
+		['setup-local.cmd', 23]
+	] as const)(
+		'keeps an Explorer-style failure visible and preserves exit code: %s',
+		async (name, expectedCode) => {
+			const root = await temporaryProject(null);
+			await writeFile(join(root, 'npm.cmd'), '@echo off\r\nexit /b 23\r\n');
+			const running = await startWrapper(root, name, simulateExplorerConsole);
+
+			await waitForOutput(running, 'Press any key to close this window.');
+			expect(running.child.exitCode).toBeNull();
+			running.child.stdin!.end('x\r\n');
+			const result = await running.closed;
+
+			expect(result.code).toBe(expectedCode);
+			expect(result.output).toContain('Press any key to close this window.');
+			expect(result.output).not.toContain('dummy-secret');
+		}
+	);
+
+	it('does not pause an existing Command Prompt failure', async () => {
+		const root = await temporaryProject(null);
+		const running = await startWrapper(root, 'start-local.cmd', undefined, {}, ['/d', '/q']);
+		running.child.stdin!.write(`call "${join(root, 'start-local.cmd')}"\r\n`);
+		running.child.stdin!.end('exit /b %errorlevel%\r\n');
+		const result = await running.closed;
+		expect(result.code).toBe(78);
+		expect(result.output).toContain('Missing .env');
+		expect(result.output).not.toContain('Press any key');
+	});
+
+	it('does not pause an existing PowerShell failure', async () => {
+		const root = await temporaryProject(null);
+		const original = await readFile(join(sourceRoot, 'start-local.cmd'), 'utf8');
+		await writeFile(join(root, 'start-local.cmd'), original);
+		const escapedPath = join(root, 'start-local.cmd').replace(/'/g, "''");
+		const child = spawn(
+			'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+			[
+				'-NoLogo',
+				'-NoProfile',
+				'-NonInteractive',
+				'-Command',
+				`& '${escapedPath}'; exit $LASTEXITCODE`
+			],
+			{
+				cwd: tmpdir(),
+				env: { ...cleanEnvironment(), PATH: `${root};${process.env.PATH}` },
+				shell: false,
+				stdio: ['ignore', 'pipe', 'pipe']
+			}
+		);
+		children.push(child);
+		let output = '';
+		child.stdout!.on('data', (data) => (output += data.toString()));
+		child.stderr!.on('data', (data) => (output += data.toString()));
+		const code = await new Promise<number | null>((done, reject) => {
+			child.once('error', reject);
+			child.once('close', done);
+		});
+
+		expect(code).toBe(78);
+		expect(output).toContain('Missing .env');
+		expect(output).not.toContain('Press any key');
+	});
+
+	it('does not pause when Explorer-like execution has redirected input', async () => {
+		const root = await temporaryProject(null);
+		const result = await wrapper(root, 'start-local.cmd', simulateExplorerWithRedirectedInput);
+		expect(result.code).toBe(78);
+		expect(result.output).toContain('Missing .env');
+		expect(result.output).not.toContain('Press any key');
+	});
+
+	it('does not pause after successful startup and preserves foreground shutdown handling', async () => {
+		const root = await temporaryProject();
+		const port = await unusedPort();
+		await writeFile(
+			join(root, 'build/index.js'),
+			`import { createServer } from 'node:http';
+const http = createServer((req, res) => res.end('local fixture'));
+http.listen(Number(process.env.PORT), process.env.HOST, () => setTimeout(() => http.close(), 25));
+export const server = { server: http };
+`
+		);
+		const result = await wrapper(root, 'start-local.cmd', (text) =>
+			replaceDetectionCommand(text, 'echo DETECTION-MUST-NOT-RUN').replace(
+				'node scripts\\start-local.mjs',
+				`node scripts\\start-local.mjs --port ${port}`
+			)
+		);
+		expect(result.code).toBe(0);
+		expect(result.output).toContain(`Local URL: http://127.0.0.1:${port}/`);
+		expect(result.output).not.toContain('Press any key');
+		expect(result.output).not.toContain('DETECTION-MUST-NOT-RUN');
+		await expect(assertPortAvailable('127.0.0.1', port)).resolves.toBeUndefined();
+	});
 
 	it.each(['start-local.cmd', 'setup-local.cmd'])(
 		'fails before execution when directory selection fails: %s',
