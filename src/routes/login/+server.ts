@@ -60,6 +60,7 @@ export const GET: RequestHandler = async (event) => {
 				const message = (cause as { body?: { message?: unknown } }).body?.message;
 				if (
 					(status === 401 && message === 'Not authorized') ||
+					(status === 403 && message === 'Spotify account is not permitted') ||
 					(status === 503 && message === 'Spotify application is not configured')
 				) {
 					throw cause;

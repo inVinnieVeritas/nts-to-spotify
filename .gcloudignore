@@ -1,0 +1,2 @@
+# Cloud Build upload uses the same positive allowlist as Docker.
+#!include:.dockerignore

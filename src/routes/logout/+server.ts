@@ -2,8 +2,10 @@ import { redirect } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from '$lib/constants';
 import { secureCookieForUrl } from '$lib/utils/oauth.server';
+import { clearHostedSession } from '$lib/utils/hosted-access.server';
 
 const clearAuthentication = (event: Parameters<RequestHandler>[0]) => {
+	clearHostedSession(event);
 	const options = {
 		httpOnly: true,
 		sameSite: 'lax' as const,

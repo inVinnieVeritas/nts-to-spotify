@@ -5,6 +5,8 @@ import { getSpotifyConfiguration } from './spotify-config.server';
 import { secureCookieForUrl } from './oauth.server';
 import { requestSpotifyToken } from './spotify-token.server';
 import type { ValidatedSpotifyToken } from './spotify-token.server';
+import { getSpotifyProfile } from './spotify-profile.server';
+import { hasHostedSession, hostedConfiguration, setHostedSession } from './hosted-access.server';
 
 export const createTokenCookieData = (
 	data: ValidatedSpotifyToken,
@@ -18,6 +20,7 @@ export const createTokenCookieData = (
 });
 
 export const getAccessToken = async (event: RequestEvent) => {
+	if (!hasHostedSession(event)) throw error(401, 'Not authorized');
 	const refresh = event.cookies.get(REFRESH_TOKEN_KEY);
 
 	if (!refresh) return null;
@@ -35,6 +38,7 @@ const refreshAccessToken = async (
 ) => {
 	const data = await rotateAccessToken(refreshToken, signal);
 
+	setHostedSession(event, data.accessToken, data.refreshToken ?? refreshToken);
 	setCookies(event, createTokenCookieData(data, refreshToken));
 
 	return data.accessToken;
@@ -73,6 +77,7 @@ export const startUserSession = async (
 	code: string,
 	request: typeof fetch = fetch
 ) => {
+	const hosted = hostedConfiguration();
 	const configuration = getSpotifyConfiguration();
 	if (!configuration) throw error(503, 'Spotify application is not configured');
 	const data = await requestSpotifyToken(
@@ -86,6 +91,11 @@ export const startUserSession = async (
 		{ requireRefreshToken: true, signal: event.request.signal }
 	);
 
+	if (hosted) {
+		const profile = await getSpotifyProfile(request, data.accessToken, event.request.signal);
+		if (profile.id !== hosted.userId) throw error(403, 'Spotify account is not permitted');
+		setHostedSession(event, data.accessToken, data.refreshToken as string);
+	}
 	setCookies(event, createTokenCookieData(data));
 };
 

@@ -1,0 +1,20 @@
+# Deny by default: never upload local credentials, cache, Git, or generated output.
+**
+!Dockerfile
+!.dockerignore
+!package.json
+!package-lock.json
+!LICENSE
+!svelte.config.js
+!vite.config.ts
+!tsconfig.json
+!postcss.config.cjs
+!src/
+!src/**
+!static/
+!static/**
+!scripts/
+!scripts/start-cloud-run.mjs
+**/*.test.ts
+**/.env*
+**/.data/**

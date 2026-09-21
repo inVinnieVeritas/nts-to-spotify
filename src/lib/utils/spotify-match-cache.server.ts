@@ -880,5 +880,13 @@ const isMissingFileError = (cause: unknown) =>
 const isAlreadyExistsError = (cause: unknown) =>
 	isRecord(cause) && 'code' in cause && cause.code === 'EEXIST';
 
-export const createDefaultSpotifyMatchCache = () =>
-	new FileSpotifyMatchCache({ directory: resolve('.data', 'spotify-match-cache') });
+export const createDefaultSpotifyMatchCache = (): SpotifyMatchCacheStorage =>
+	// Cloud Run's filesystem is ephemeral. Use the existing bounded memory cache only;
+	// never mount a shared object-store filesystem under the local file-lock protocol.
+	process.env.NTS_HOSTED_STAGING || process.env.K_SERVICE
+		? {
+				get: async () => null,
+				set: async () => {},
+				flush: async () => {}
+			}
+		: new FileSpotifyMatchCache({ directory: resolve('.data', 'spotify-match-cache') });
