@@ -1,5 +1,5 @@
 # Build without runtime secrets. Supply only the allowlisted context below.
-FROM node:22-bookworm-slim AS build
+FROM node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -9,7 +9,7 @@ COPY static ./static
 COPY scripts/start-cloud-run.mjs ./scripts/start-cloud-run.mjs
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9 AS runtime
 ENV NODE_ENV=production NTS_HOSTED_STAGING=1 HOST=0.0.0.0
 ENV ORIGIN=https://nts2spotify.vincentvanderveken.com
 WORKDIR /app
