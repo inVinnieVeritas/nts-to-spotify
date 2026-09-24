@@ -37,6 +37,7 @@
 		formatCooldownDuration,
 		formatSpotifyCooldownMessage,
 		formatSpotifySessionMetricLines,
+		getCatalogDisplayEpisodes,
 		getCatalogEpisodeDateBounds,
 		getCatalogEpisodeReviewTracks,
 		getCatalogExportUris,
@@ -186,6 +187,7 @@
 	const globalCooldownController = new SpotifySearchCooldownController();
 
 	let episodes: EpisodeState[] = reconcileEpisodes(data.episodes);
+	let displayEpisodes = getCatalogDisplayEpisodes(episodes, playlistOrder);
 
 	const monotonicNow = () => globalThis.performance?.now?.() ?? Date.now();
 	const activeScanDuration = () =>
@@ -955,6 +957,7 @@
 			.map((track) => track.selectedMatch as string)
 	);
 	$: selectedTracks = getCatalogExportUris(episodes, playlistOrder);
+	$: displayEpisodes = getCatalogDisplayEpisodes(episodes, playlistOrder);
 	$: playlistPreviewKey = JSON.stringify(
 		episodes.map((episode) => [
 			episode.episodeAlias,
@@ -1292,8 +1295,9 @@
 						<option value="oldest-first">Oldest episodes first</option>
 					</select>
 					<span id="playlist-order-help" class="playlist-order-help font-tiny">
-						<strong>This choice controls the track order in the Spotify playlist.</strong> Tracks within
-						each episode keep their original order. The catalogue below remains oldest to newest for review.
+						<strong>This choice controls the episode order here and in the Spotify playlist.</strong
+						>
+						Tracks within each episode keep their original order.
 					</span>
 				</label>
 				<label class="visibility font-base">
@@ -1392,7 +1396,7 @@
 		{/if}
 
 		<div class="episodes">
-			{#each episodes as episode, episodeIndex}
+			{#each displayEpisodes as { episode, index: episodeIndex } (episode.episodeAlias)}
 				{#if shouldShowCatalogEpisodeForReview(episode, reviewFilter)}
 					<section class="episode">
 						<div class="episode-heading">

@@ -637,6 +637,14 @@ export const getCatalogExportUris = (
 			)
 	);
 
+export const getCatalogDisplayEpisodes = (episodes: EpisodeState[], order: PlaylistOrder) =>
+	episodes
+		.map((episode, index) => ({ episode, index }))
+		.sort((left, right) => {
+			const difference = Date.parse(left.episode.broadcast) - Date.parse(right.episode.broadcast);
+			return (order === 'oldest-first' ? difference : -difference) || left.index - right.index;
+		});
+
 export const runCatalogWorkers = async ({
 	indexes,
 	concurrency,

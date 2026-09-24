@@ -13,6 +13,7 @@ import {
 	formatCooldownDuration,
 	formatSpotifyCooldownMessage,
 	formatSpotifySessionMetricLines,
+	getCatalogDisplayEpisodes,
 	getCatalogEpisodeReviewTracks,
 	getCatalogEpisodeDateBounds,
 	getCatalogExportUris,
@@ -1082,6 +1083,26 @@ describe('catalogue export ordering', () => {
 			'spotify:track:oldest',
 			'spotify:track:middle',
 			'spotify:track:newest'
+		]);
+	});
+
+	it('displays episodes in the selected order while preserving their scan indexes', () => {
+		const episodes = [
+			completedEpisode('oldest', '2026-01-01', []),
+			completedEpisode('newest', '2026-03-01', []),
+			completedEpisode('middle', '2026-02-01', [])
+		];
+
+		expect(getCatalogDisplayEpisodes(episodes, 'latest-first').map(({ index }) => index)).toEqual([
+			1, 2, 0
+		]);
+		expect(getCatalogDisplayEpisodes(episodes, 'oldest-first').map(({ index }) => index)).toEqual([
+			0, 2, 1
+		]);
+		expect(episodes.map(({ episodeAlias }) => episodeAlias)).toEqual([
+			'oldest',
+			'newest',
+			'middle'
 		]);
 	});
 
