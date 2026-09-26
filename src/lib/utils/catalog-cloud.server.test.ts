@@ -30,7 +30,14 @@ const progress = (): CatalogProgress => ({
 	matcherVersion: 1,
 	showAlias: 'channeling',
 	updatedAt: Date.now(),
-	episodes: { [episode.episodeAlias]: episode },
+	episodes: {
+		[episode.episodeAlias]: episode,
+		'episode-two': {
+			...episode,
+			episodeAlias: 'episode-two',
+			status: 'pending'
+		}
+	},
 	playlist: { title: 'Channeling', description: '', public: false },
 	retry: { cooldownUntil: 0, pausedByRateLimit: false }
 });
@@ -83,13 +90,13 @@ describe('cloud progress', () => {
 
 		const original = progress();
 		const firstVersion = await saveCloudProgress('channeling', original, null, request);
-		expect(commits[0].writes).toHaveLength(2);
+		expect(commits[0].writes).toHaveLength(3);
 		expect(commits[0].writes[0].update?.fields.payload.stringValue).toMatch(/^gz:/);
 		expect((await loadCloudProgress('channeling', request))?.progress.episodes).toEqual(
 			original.episodes
 		);
 		expect(await listCloudCatalogues(request)).toMatchObject([
-			{ showAlias: 'channeling', scanned: 1, pending: 0, failed: 0 }
+			{ showAlias: 'channeling', scanned: 1, pending: 1, failed: 0 }
 		]);
 		const secondVersion = await saveCloudProgress('channeling', original, firstVersion, request);
 		expect(commits[1].writes).toHaveLength(1);
