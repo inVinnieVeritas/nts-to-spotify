@@ -24,6 +24,17 @@
 		restoreCatalogProgressIfConfirmed
 	} from '$lib/utils/catalog-backup';
 	import {
+		cloudSyncAvailable,
+		CloudSyncError,
+		forgetCloudCopy,
+		loadCloudCopy,
+		progressSignature,
+		readCloudMarker,
+		rememberCloudCopy,
+		saveCloudCopy,
+		type CloudCopy
+	} from '$lib/utils/catalog-cloud.client';
+	import {
 		downloadCatalogReviewCsv,
 		getCatalogReviewTrackCount
 	} from '$lib/utils/catalog-review-csv.client';
@@ -63,6 +74,7 @@
 		updateGeneratedPlaylistText,
 		updateGeneratedPlaylistTextForCatalog,
 		type CatalogReviewFilter,
+		type CatalogProgress,
 		type CatalogScanOutcome,
 		type CatalogSpotifyRateLimitReason,
 		type CatalogPlaylistLinkState,
@@ -172,6 +184,11 @@
 	let progressTransferMessage = '';
 	let progressTransferError = '';
 	let progressFileInput: HTMLInputElement;
+	let cloudState: 'local' | 'checking' | 'active' | 'upload' | 'conflict' | 'unavailable' = 'local';
+	let cloudCopy: CloudCopy | null = null;
+	let cloudVersion: string | null = null;
+	let cloudBusy = false;
+	let cloudTimer: ReturnType<typeof setTimeout> | undefined;
 	let activeShowAlias = data.showAlias;
 	let activeShowName = data.name;
 	let activeShowCover = data.cover;
@@ -249,6 +266,46 @@
 			scanMessage = 'Progress could not be saved in this browser.';
 		}
 	);
+	const cloudWriter = createLatestSnapshotWriter(
+		async (snapshot: CatalogProgress) => {
+			if (cloudState !== 'active' || snapshot.showAlias !== activeShowAlias) return;
+			try {
+				const version = await saveCloudCopy(snapshot, cloudVersion);
+				cloudVersion = version;
+				cloudCopy = { version, progress: snapshot };
+				await rememberCloudCopy(snapshot, version);
+			} catch (cause) {
+				cloudState =
+					cause instanceof CloudSyncError && cause.reason === 'conflict'
+						? 'conflict'
+						: 'unavailable';
+				if (cloudState === 'conflict') {
+					try {
+						const latest = await loadCloudCopy(snapshot.showAlias);
+						if (snapshot.showAlias === activeShowAlias) {
+							cloudCopy = latest;
+							cloudVersion = latest?.version ?? null;
+						}
+					} catch {
+						cloudState = 'unavailable';
+					}
+				}
+				cloudWriter.discardPending();
+			}
+		},
+		() => {
+			cloudState = 'unavailable';
+		}
+	);
+
+	const queueCloudSave = () => {
+		if (cloudState !== 'active') return;
+		if (cloudTimer) clearTimeout(cloudTimer);
+		cloudTimer = setTimeout(() => {
+			cloudTimer = undefined;
+			if (cloudState === 'active') cloudWriter.enqueue(currentProgressSnapshot());
+		}, 2_000);
+	};
 
 	const currentProgressSnapshot = () =>
 		captureCatalogProgress(
@@ -277,7 +334,123 @@
 		skipDestroyPersistence = false;
 		const snapshot = currentProgressSnapshot();
 		snapshotWriter.enqueue(snapshot);
+		queueCloudSave();
 		return waitForSave ? snapshotWriter.flush() : Promise.resolve();
+	};
+
+	const initializeCloud = async (
+		local: CatalogProgress | null,
+		showAlias: string,
+		generation: number
+	) => {
+		if (!cloudSyncAvailable() || !data.user) return;
+		cloudState = 'checking';
+		try {
+			const remote = await loadCloudCopy(showAlias);
+			if (!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration))
+				return;
+			cloudCopy = remote;
+			cloudVersion = remote?.version ?? null;
+			if (!remote) {
+				cloudState = 'upload';
+				return;
+			}
+			if (!local) {
+				await useCloudCopy(false);
+				return;
+			}
+			const [localSignature, remoteSignature] = await Promise.all([
+				progressSignature(local),
+				progressSignature(remote.progress)
+			]);
+			if (!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration))
+				return;
+			const marker = readCloudMarker(showAlias);
+			if (localSignature === remoteSignature) {
+				cloudState = 'active';
+				await rememberCloudCopy(local, remote.version);
+			} else if (marker?.version === remote.version) {
+				cloudState = 'active';
+				if (marker.signature !== localSignature) cloudWriter.enqueue(local);
+			} else if (marker?.signature === localSignature) {
+				// Only the cloud changed since this browser's last confirmed save.
+				await useCloudCopy(false);
+			} else {
+				cloudState = 'conflict';
+			}
+		} catch {
+			if (shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration))
+				cloudState = 'unavailable';
+		}
+	};
+
+	const useCloudCopy = async (confirmReplacement = true) => {
+		if (cloudBusy || !cloudCopy || scanning) return;
+		if (
+			confirmReplacement &&
+			!window.confirm(
+				'Replace this browser’s progress with the cloud copy? Download a backup first if you want to keep both.'
+			)
+		)
+			return;
+		cloudBusy = true;
+		try {
+			const alias = activeShowAlias;
+			if (cloudTimer) clearTimeout(cloudTimer);
+			cloudWriter.discardPending();
+			await cloudWriter.flush();
+			const latest = await loadCloudCopy(alias);
+			if (alias !== activeShowAlias || !latest) return;
+			await saveCatalogProgress(latest.progress);
+			await deleteCatalogPlaylistSync(alias);
+			await rememberCloudCopy(latest.progress, latest.version);
+			await initializeShow(data);
+		} catch {
+			cloudState = 'unavailable';
+		} finally {
+			cloudBusy = false;
+		}
+	};
+
+	const uploadBrowserCopy = async () => {
+		if (cloudBusy || scanning || !restored || !persistenceAvailable) return;
+		if (
+			cloudCopy &&
+			!window.confirm(
+				'Replace the cloud copy with this browser’s progress? Download a backup of the cloud copy first if you need it.'
+			)
+		)
+			return;
+		cloudBusy = true;
+		try {
+			await snapshotWriter.flush();
+			const snapshot = currentProgressSnapshot();
+			const remote = await loadCloudCopy(snapshot.showAlias);
+			if ((remote?.version ?? null) !== cloudVersion) {
+				cloudCopy = remote;
+				cloudVersion = remote?.version ?? null;
+				throw new CloudSyncError('conflict');
+			}
+			const version = await saveCloudCopy(snapshot, remote?.version ?? null);
+			cloudVersion = version;
+			cloudCopy = { version, progress: snapshot };
+			await rememberCloudCopy(snapshot, version);
+			cloudState = 'active';
+		} catch (cause) {
+			cloudState =
+				cause instanceof CloudSyncError && cause.reason === 'conflict' ? 'conflict' : 'unavailable';
+		} finally {
+			cloudBusy = false;
+		}
+	};
+
+	const retryCloud = async () => {
+		if (cloudBusy || scanning) return;
+		await initializeCloud(
+			await loadCatalogProgress(activeShowAlias),
+			activeShowAlias,
+			showGeneration
+		);
 	};
 
 	const captureAndPersistReview = () => void persistProgress();
@@ -773,6 +946,10 @@
 				importAlias,
 				importCatalog
 			);
+			if (cloudTimer) clearTimeout(cloudTimer);
+			cloudTimer = undefined;
+			cloudWriter.discardPending();
+			await cloudWriter.flush();
 			if (
 				destroyed ||
 				!shouldApplyCatalogRestoration(
@@ -792,6 +969,7 @@
 				beforePersist: () => {
 					progressReplacementAlias = importAlias;
 					replacementStarted = true;
+					if (cloudState === 'active') cloudState = 'conflict';
 					snapshotWriter.discardPending();
 				},
 				persist: saveCatalogProgress,
@@ -839,6 +1017,8 @@
 			if (replacementSucceeded) {
 				await deleteCatalogPlaylistSync(importAlias);
 				playlistSyncRecord = undefined;
+				forgetCloudCopy(importAlias);
+				if (cloudState === 'active') cloudState = cloudCopy ? 'conflict' : 'upload';
 			}
 		} catch (cause) {
 			if (
@@ -878,6 +1058,11 @@
 		if (!window.confirm('Reset all saved catalogue progress for this show?')) return;
 		progressTransferBusy = true;
 		const resetAlias = activeShowAlias;
+		if (cloudTimer) clearTimeout(cloudTimer);
+		cloudTimer = undefined;
+		cloudWriter.discardPending();
+		await cloudWriter.flush();
+		if (cloudState === 'active') cloudState = 'conflict';
 		progressReplacementAlias = resetAlias;
 		snapshotWriter.discardPending();
 		const resetGeneration = showGeneration;
@@ -920,6 +1105,7 @@
 			persistenceAvailable = true;
 			skipDestroyPersistence = true;
 			progressTransferMessage = 'Saved progress reset for this show.';
+			forgetCloudCopy(resetAlias);
 		} catch {
 			if (
 				shouldApplyCatalogRestoration(resetAlias, resetGeneration, activeShowAlias, showGeneration)
@@ -990,6 +1176,9 @@
 		downloadCatalogReviewCsv(activeShowName, activeShowAlias, episodes);
 
 	const initializeShow = async (pageData: PageData) => {
+		if (cloudTimer) clearTimeout(cloudTimer);
+		cloudTimer = undefined;
+		await cloudWriter.flush();
 		const previousShowWasRestored = restored;
 		scanController?.abort();
 		abortActiveEpisodes();
@@ -1032,6 +1221,9 @@
 		scanController = undefined;
 		scanMessage = '';
 		restored = false;
+		cloudState = 'local';
+		cloudCopy = null;
+		cloudVersion = null;
 		persistenceAvailable = true;
 		cooldownUntil = 0;
 		cooldownRemaining = 0;
@@ -1047,6 +1239,7 @@
 		latestScanSession = undefined;
 		let generatedMetadataChanged = false;
 		let scanTimingChanged = false;
+		let localSaved: CatalogProgress | null = null;
 
 		try {
 			const [saved, savedPlaylistSync] = await Promise.all([
@@ -1054,6 +1247,7 @@
 				loadCatalogPlaylistSync(showAlias),
 				globalCooldownController.initialize()
 			]);
+			localSaved = saved;
 			if (
 				destroyed ||
 				!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
@@ -1125,6 +1319,11 @@
 				if (generatedMetadataChanged || scanTimingChanged) void persistProgress();
 			}
 		}
+		if (
+			!destroyed &&
+			shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
+		)
+			void initializeCloud(localSaved, showAlias, generation);
 	};
 
 	onMount(() => {
@@ -1138,6 +1337,7 @@
 
 	onDestroy(() => {
 		destroyed = true;
+		if (cloudTimer) clearTimeout(cloudTimer);
 		showGeneration += 1;
 		if (cooldownTimer) clearInterval(cooldownTimer);
 		unsubscribeGlobalCooldown?.();
@@ -1181,6 +1381,8 @@
 						loading={scanning}
 						disabled={!restored ||
 							scanning ||
+							cloudState === 'checking' ||
+							cloudBusy ||
 							progressTransferBusy ||
 							scanComplete ||
 							cooldownRemaining > 0}
@@ -1348,6 +1550,56 @@
 					<p class="progress-transfer-message font-small-beast" role="alert">
 						{progressTransferError}
 					</p>
+				{/if}
+				{#if cloudState !== 'local'}
+					<div class="cloud-progress font-small-beast" aria-label="Cloud progress">
+						{#if cloudState === 'checking'}
+							<p role="status">Checking saved cloud progress…</p>
+						{:else if cloudState === 'active'}
+							<p role="status">Cloud progress connected. Changes also save in this browser.</p>
+						{:else if cloudState === 'upload'}
+							<p role="status">This show is saved only in this browser.</p>
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={cloudBusy || scanning}
+								on:click={uploadBrowserCopy}>Save this browser’s progress to cloud</Button
+							>
+						{:else if cloudState === 'conflict'}
+							<p role="alert">
+								This browser and the cloud have different progress. Automatic sync is paused.
+							</p>
+							{#if cloudCopy}
+								<p>
+									Cloud copy: {getCatalogSummaryCounts(Object.values(cloudCopy.progress.episodes))
+										.scanned} scanned episodes. This browser: {completedCount} scanned episodes.
+								</p>
+							{/if}
+							<p>Download a progress backup before choosing which copy to keep.</p>
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={cloudBusy || scanning}
+								on:click={() => useCloudCopy()}>Use cloud copy here</Button
+							>
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={cloudBusy || scanning}
+								on:click={uploadBrowserCopy}>Replace cloud with this browser</Button
+							>
+						{:else}
+							<p role="alert">
+								Cloud progress is unavailable. This browser still saves progress locally.
+							</p>
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={cloudBusy || scanning}
+								on:click={retryCloud}>Retry cloud connection</Button
+							>
+						{/if}
+					</div>
 				{/if}
 				<p class="font-small-beast">
 					{reviewTrackCount} tracks need review · {duplicateCount} exact duplicate{duplicateCount ===

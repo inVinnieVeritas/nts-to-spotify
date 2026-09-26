@@ -56,7 +56,8 @@ export async function startCloudRun() {
 	process.env.HOST = configuration.host;
 	process.env.PORT = configuration.port;
 	process.env.ORIGIN = configuration.origin;
-	process.env.BODY_SIZE_LIMIT = '2097152';
+	// Catalogue backups may contain thousands of reviewed tracks (maximum 10 MiB).
+	process.env.BODY_SIZE_LIMIT = '11534336';
 	process.env.SHUTDOWN_TIMEOUT = '8';
 	// adapter-node owns the foreground listener and SIGTERM drain. Cloud Run terminates TLS.
 	await import(pathToFileURL(resolve('build/index.js')).href);

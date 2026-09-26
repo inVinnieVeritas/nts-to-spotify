@@ -139,9 +139,16 @@ requests are deliberately paced and uncertain matches require review.
 
 ## Catalogue backup and restore
 
-Catalogue progress is stored in this browser. Use **Download backup** on a catalogue page or the
-Saved Catalogues dashboard after important reviews and playlist updates. Use **Restore progress**
-on the matching show page to import the JSON backup.
+Catalogue progress is stored in this browser. On the private Cloud Run staging installation, you
+can also choose **Save this browser’s progress to cloud** on the show page. A new browser lists
+cloud catalogues on the home page and restores a cloud copy when you open one. If two browsers
+have different progress, automatic sync pauses and asks which copy to keep. Download a backup
+before replacing either copy. The local Vite edition continues to use browser storage; transfer
+its progress with a JSON backup.
+
+Use **Download backup** on a catalogue page or the Saved Catalogues dashboard after important
+reviews and playlist updates. Use **Restore progress** on the matching show page to import the
+JSON backup. Restoring or resetting local progress pauses cloud sync until you choose a copy.
 
 A backup contains catalogue results, review choices, playlist settings, and compatible linked
 playlist state. It deliberately excludes Spotify credentials, tokens, cookies, server cache data,
@@ -153,6 +160,9 @@ catalogue and review choices.
 - **IndexedDB:** catalogue progress, completed matches, review decisions, playlist settings, and
   resumable playlist synchronization state for this browser origin.
 - **localStorage:** the browser-origin-wide Spotify Search cooldown.
+- **Private Cloud Run staging only:** optional Firestore copy of catalogue progress, split by
+  episode under the configured Spotify owner's account. Browser progress stays available when
+  cloud sync is unavailable. Scan timers remain local to each browser.
 - **HTTP-only cookies:** Spotify access and refresh tokens. Logging out clears authentication but
   does not delete catalogue progress.
 - **`.data/spotify-match-cache`:** public Spotify match metadata used to avoid repeated searches
@@ -161,6 +171,27 @@ catalogue and review choices.
   reset when Node stops.
 
 Cache usage reduces repeated searches; it does not increase or reveal Spotify quota.
+
+## Private staging cloud progress setup
+
+The cloud progress API is available only on the private staging domain. It requires the existing
+IAP protection and signed Spotify owner session. The server uses its Cloud Run service account to
+access Firestore; no Firestore credential or database access is sent to the browser. It does not
+make additional Spotify searches.
+
+In project `gen-lang-client-0941278185`, enable `firestore.googleapis.com` and create a Standard
+edition Firestore Native `(default)` database in `europe-west1` if one does not already exist.
+Check the existing database and its free-tier eligibility before creating one: the first eligible
+database in the project receives the Firestore free tier. Choose restrictive Firestore rules because
+the browser never needs direct database access. Grant
+`roles/datastore.user` to the `nts-staging-runtime` service account, then deploy the built revision
+with `NTS_FIRESTORE_PROJECT=gen-lang-client-0941278185`. Do not expose the Cloud Run service
+without IAP. Keep the current revision available for rollback until the import and second-browser
+checks pass.
+
+Cloud writes use a Firestore document update-time precondition. An unexpected change from another
+browser stops automatic upload instead of overwriting the newer copy. The first upload is manual.
+Cloud saving is not enabled for local Vite yet.
 
 The cache directory must be owned and writable only by the operating-system account running the
 application. Shared or adversarially writable project directories are unsupported. Deleting

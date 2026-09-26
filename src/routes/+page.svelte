@@ -16,6 +16,11 @@
 		type SavedCatalogCard
 	} from '$lib/utils/catalog-dashboard.client';
 	import { deleteCatalogProgress, listCatalogProgress } from '$lib/utils/catalog-progress.client';
+	import {
+		cloudSyncAvailable,
+		listCloudCopies,
+		type CloudCatalogueSummary
+	} from '$lib/utils/catalog-cloud.client';
 	import { formatCatalogScanSessionSummary } from '$lib/utils/catalog-scan-session';
 	import {
 		formatSpotifySearchCooldownDashboardNotice,
@@ -29,6 +34,12 @@
 	let savedCataloguesLoading = true;
 	let savedCataloguesWarning = '';
 	let savedCataloguesError = '';
+	let cloudCatalogues: CloudCatalogueSummary[] = [];
+	let cloudCataloguesLoading = false;
+	let cloudCataloguesError = '';
+	$: cloudOnlyCatalogues = cloudCatalogues.filter(
+		(cloud) => !savedCatalogues.some((local) => local.showAlias === cloud.showAlias)
+	);
 	let deletingAlias: string | undefined;
 	let globalCooldown: SpotifySearchCooldownState | null = null;
 	let globalCooldownRemaining = 0;
@@ -62,6 +73,18 @@
 			savedCataloguesError = 'Saved catalogues are unavailable in this browser.';
 		} finally {
 			savedCataloguesLoading = false;
+		}
+	};
+
+	const loadCloudCatalogues = async () => {
+		if (!me || !cloudSyncAvailable()) return;
+		cloudCataloguesLoading = true;
+		try {
+			cloudCatalogues = await listCloudCopies();
+		} catch {
+			cloudCataloguesError = 'Cloud catalogues are unavailable right now. Local copies still work.';
+		} finally {
+			cloudCataloguesLoading = false;
 		}
 	};
 
@@ -120,6 +143,7 @@
 	onMount(() => {
 		unsubscribeGlobalCooldown = globalCooldownController.subscribe(updateGlobalCooldown);
 		void loadSavedCatalogues();
+		void loadCloudCatalogues();
 		cooldownTimer = setInterval(() => updateGlobalCooldown(), 1000);
 	});
 
@@ -171,8 +195,9 @@
 			<details>
 				<summary class="font-base">Where is my progress saved?</summary>
 				<p class="font-base">
-					Catalogue progress is stored in this browser. Downloaded JSON backups let you restore it
-					after clearing browser data or moving to another browser or computer.
+					Catalogue progress is saved in this browser. On the private hosted site, you can also
+					upload it to cloud storage from the show page and open it on another computer. Download
+					JSON backups after important reviews as an independent copy.
 				</p>
 			</details>
 			<details>
@@ -202,9 +227,10 @@
 					>Does opening the Saved Catalogues dashboard use Spotify quota?</summary
 				>
 				<p class="font-base">
-					The dashboard itself reads only this browser’s saved data and uses no Spotify Search
-					quota. When you are logged in, the shared header may ask Spotify to verify your current
-					profile. NTS is contacted only when you explicitly check or open a catalogue.
+					The dashboard reads saved browser data and, on the private hosted site, cloud catalogue
+					summaries. Neither uses Spotify Search quota. When you are logged in, the shared header
+					may ask Spotify to verify your current profile. NTS is contacted only when you explicitly
+					check or open a catalogue.
 				</p>
 			</details>
 		</section>
@@ -231,12 +257,19 @@
 				{#if savedCataloguesError}
 					<p class="catalogue-warning font-base" role="alert">{savedCataloguesError}</p>
 				{/if}
-				{#if savedCatalogues.length === 0 && !savedCataloguesError}
+				{#if cloudCataloguesLoading}
+					<p class="font-base" role="status">Checking cloud catalogues…</p>
+				{/if}
+				{#if cloudCataloguesError}<p class="catalogue-warning font-base" role="status">
+						{cloudCataloguesError}
+					</p>{/if}
+				{#if savedCatalogues.length === 0 && cloudOnlyCatalogues.length === 0 && !savedCataloguesError && !cloudCataloguesLoading}
 					<p class="font-base">
-						No full-catalogue progress is saved in this browser yet. Open an NTS show and start a
-						catalogue scan to create one.
+						No full-catalogue progress is saved here yet. Open an NTS show and start a catalogue
+						scan to create one.
 					</p>
-				{:else if savedCatalogues.length > 0}
+				{/if}
+				{#if savedCatalogues.length > 0}
 					<div class="catalogue-grid">
 						{#each savedCatalogues as catalogue (catalogue.showAlias)}
 							<article class="catalogue-card">
@@ -318,6 +351,23 @@
 										on:click={() => deleteLocalProgress(catalogue)}>Delete local progress</Button
 									>
 								</div>
+							</article>
+						{/each}
+					</div>
+				{/if}
+				{#if cloudOnlyCatalogues.length > 0}
+					<h3 class="font-base">Saved in cloud</h3>
+					<div class="catalogue-grid">
+						{#each cloudOnlyCatalogues as catalogue (catalogue.showAlias)}
+							<article class="catalogue-card">
+								<h3 class="font-title">{catalogue.showName}</h3>
+								<p class="font-base">
+									{catalogue.scanned} scanned · {catalogue.pending} pending · {catalogue.failed} failed
+								</p>
+								<p class="font-small-beast">Last saved {formatSavedAt(catalogue.updatedAt)}</p>
+								<a class="font-base" href={`/shows/${catalogue.showAlias}`}
+									>Open and load cloud progress</a
+								>
 							</article>
 						{/each}
 					</div>
