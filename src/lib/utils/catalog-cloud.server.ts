@@ -255,7 +255,7 @@ export async function saveCloudProgress(
 	const hashes: Record<string, string> = {};
 	const writes: unknown[] = [];
 	for (const [alias, episode] of Object.entries(episodes)) {
-		if (!isValidNTSSlug(alias) || episode.status === 'pending') continue;
+		if (!isValidNTSSlug(alias)) continue;
 		const payload = JSON.stringify(episode);
 		if (bytes(payload) > 1_000_000) throw new CloudProgressError('invalid');
 		hashes[alias] = hash(payload);
