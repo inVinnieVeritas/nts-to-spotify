@@ -21,6 +21,11 @@
 		listCloudCopies,
 		type CloudCatalogueSummary
 	} from '$lib/utils/catalog-cloud.client';
+	import {
+		connectLocalCloud,
+		isLocalCloudBridge,
+		localCloudConnected
+	} from '$lib/utils/catalog-cloud-bridge.client';
 	import { formatCatalogScanSessionSummary } from '$lib/utils/catalog-scan-session';
 	import {
 		formatSpotifySearchCooldownDashboardNotice,
@@ -37,6 +42,7 @@
 	let cloudCatalogues: CloudCatalogueSummary[] = [];
 	let cloudCataloguesLoading = false;
 	let cloudCataloguesError = '';
+	let bridgeConnected = false;
 	$: cloudOnlyCatalogues = cloudCatalogues.filter(
 		(cloud) => !savedCatalogues.some((local) => local.showAlias === cloud.showAlias)
 	);
@@ -77,7 +83,7 @@
 	};
 
 	const loadCloudCatalogues = async () => {
-		if (!me || !cloudSyncAvailable()) return;
+		if (!me || !cloudSyncAvailable(me.id)) return;
 		cloudCataloguesLoading = true;
 		try {
 			cloudCatalogues = await listCloudCopies();
@@ -141,10 +147,21 @@
 	};
 
 	onMount(() => {
+		bridgeConnected = localCloudConnected();
+		const handleBridgeConnected = () => {
+			bridgeConnected = true;
+			void loadCloudCatalogues();
+		};
+		window.addEventListener('nts-cloud-connected', handleBridgeConnected);
 		unsubscribeGlobalCooldown = globalCooldownController.subscribe(updateGlobalCooldown);
 		void loadSavedCatalogues();
 		void loadCloudCatalogues();
-		cooldownTimer = setInterval(() => updateGlobalCooldown(), 1000);
+		cooldownTimer = setInterval(() => {
+			updateGlobalCooldown();
+			if (isLocalCloudBridge() && bridgeConnected && !localCloudConnected())
+				bridgeConnected = false;
+		}, 1000);
+		return () => window.removeEventListener('nts-cloud-connected', handleBridgeConnected);
 	});
 
 	onDestroy(() => {
@@ -243,6 +260,16 @@
 
 		<section class="saved-catalogues" aria-labelledby="saved-catalogues-heading">
 			<h2 id="saved-catalogues-heading" class="font-title">SAVED CATALOGUES</h2>
+			{#if me && isLocalCloudBridge() && !bridgeConnected}
+				<p class="font-base">Connect this local Vite browser to your private cloud progress.</p>
+				<Button size="sm" variant="outline" on:click={connectLocalCloud}>Connect to cloud</Button>
+			{/if}
+			{#if me && bridgeConnected && !cloudSyncAvailable(me.id)}
+				<p role="alert" class="font-base">
+					The local Spotify account differs from the hosted account. Sign in to the same account
+					before syncing.
+				</p>
+			{/if}
 			{#if globalCooldownNotice && globalCooldownRemaining > 0}
 				<div class="catalogue-warning font-base" role="status">
 					<p>{globalCooldownNotice}</p>
