@@ -157,6 +157,33 @@ describe('catalogue progress restoration', () => {
 		expect(getCatalogReviewFilterCounts(restored).selected).toBe(0);
 	});
 
+	it('reclassifies a saved remaster with an added The without selecting it automatically', () => {
+		const savedEpisode = episode('lady-rachel', '2026-01-01');
+		const uri = 'spotify:track:0123456789ABCDEFGHIJKL';
+		const persistedTrack = {
+			artist: 'Kevin Ayers',
+			title: 'Lady Rachel',
+			matches: [
+				{
+					uri,
+					artist: 'Kevin Ayers',
+					title: 'The Lady Rachel - 2003 Remaster',
+					href: 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL'
+				}
+			],
+			confident: false,
+			fallback: false,
+			selectedMatch: uri,
+			checked: false
+		};
+		const restored = reconcileEpisodes(
+			[savedEpisode],
+			savedProgress([{ ...savedEpisode, status: 'done', tracks: [persistedTrack] }])
+		);
+		expect(getCatalogReviewFilterCounts(restored)['primary-review']).toBe(0);
+		expect(restored[0].tracks[0]).toEqual(persistedTrack);
+	});
+
 	it('preserves an explicit alternative selection while applying remaster review equivalence', () => {
 		const savedEpisode = episode('manual-remaster', '2026-01-01');
 		const chosenUri = 'spotify:track:ZYXWVUTSRQPONMLKJIHGFE';
