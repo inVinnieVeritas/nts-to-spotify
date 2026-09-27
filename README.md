@@ -143,8 +143,11 @@ Catalogue progress is stored in this browser. On the private Cloud Run staging i
 can also choose **Save this browser’s progress to cloud** on the show page. A new browser lists
 cloud catalogues on the home page and restores a cloud copy when you open one. If two browsers
 have different progress, automatic sync pauses and asks which copy to keep. Download a backup
-before replacing either copy. The local Vite edition continues to use browser storage; transfer
-its progress with a JSON backup.
+before replacing either copy. On local Vite at `http://127.0.0.1:5173`, select **Connect to cloud**
+and approve the connection in the hosted window. Both sites must be signed in to the same Spotify
+account. Keep that window open during local sync; reconnect after reloading Vite. Local Vite still
+saves to browser storage, and JSON backup/restore remains available without a connection. Cloud
+sync through the hosted window does not expose its Google or Spotify credentials to Vite.
 
 Use **Download backup** on a catalogue page or the Saved Catalogues dashboard after important
 reviews and playlist updates. Use **Restore progress** on the matching show page to import the
@@ -160,9 +163,10 @@ catalogue and review choices.
 - **IndexedDB:** catalogue progress, completed matches, review decisions, playlist settings, and
   resumable playlist synchronization state for this browser origin.
 - **localStorage:** the browser-origin-wide Spotify Search cooldown.
-- **Private Cloud Run staging only:** optional Firestore copy of catalogue progress, split by
-  episode under the configured Spotify owner's account. Browser progress stays available when
-  cloud sync is unavailable. Scan timers remain local to each browser.
+- **Private Cloud Run staging:** optional Firestore copy of catalogue progress, split by episode
+  under the configured Spotify owner's account. Local Vite can access this copy only while its
+  explicitly approved hosted window remains open. Browser progress stays available when cloud
+  sync is unavailable. Scan timers remain local to each browser.
 - **HTTP-only cookies:** Spotify access and refresh tokens. Logging out clears authentication but
   does not delete catalogue progress.
 - **`.data/spotify-match-cache`:** public Spotify match metadata used to avoid repeated searches
