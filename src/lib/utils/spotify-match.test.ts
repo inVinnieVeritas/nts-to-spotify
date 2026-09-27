@@ -50,6 +50,32 @@ describe('Spotify match title equivalence', () => {
 		);
 	});
 
+	it('accepts a remaster with an added leading The when the artist and remaining title match', () => {
+		expect(
+			isConfidentSpotifyMatch(
+				track('Lady Rachel', 'Kevin Ayers'),
+				match('The Lady Rachel - 2003 Remaster', 'Kevin Ayers')
+			)
+		).toBe(true);
+		expect(
+			isConfidentSpotifyMatch(track('The Lady Rachel - Remastered'), match('Lady Rachel'))
+		).toBe(true);
+	});
+
+	it('does not discard a leading The on unrelated titles or editions', () => {
+		expect(isConfidentSpotifyMatch(track('End'), match('The End - Remastered'))).toBe(false);
+		expect(isConfidentSpotifyMatch(track('Lady Rachel'), match('The Lady Rachel'))).toBe(false);
+		expect(
+			isConfidentSpotifyMatch(track('Lady Rachel'), match('The Lady Rachel - Live - Remastered'))
+		).toBe(false);
+		expect(
+			isConfidentSpotifyMatch(
+				track('Lady Rachel', 'Kevin Ayers'),
+				match('The Lady Rachel - 2003 Remaster', 'Another Artist')
+			)
+		).toBe(false);
+	});
+
 	it('still requires an artist match', () => {
 		expect(
 			isConfidentSpotifyMatch(

@@ -29,8 +29,25 @@ export const stripTrailingRemasterQualifier = (value: string) => {
 export const normalizeSpotifyMatchTitle = (value: string) =>
 	normalizeMatchText(stripTrailingRemasterQualifier(value));
 
+const isRemasterTitle = (value: string) =>
+	stripTrailingRemasterQualifier(value) !== value.normalize('NFKC');
+
+const titlesDifferOnlyByLeadingThe = (left: string, right: string) => {
+	const withoutArticle = (value: string) => value.replace(/^the /, '');
+	const root = withoutArticle(left);
+	return root === withoutArticle(right) && root.split(' ').length >= 2;
+};
+
 export const isConfidentSpotifyMatch = (track: BasicTrack, match: Match) => {
-	if (normalizeSpotifyMatchTitle(track.title) !== normalizeSpotifyMatchTitle(match.title)) {
+	const requestedTitle = normalizeSpotifyMatchTitle(track.title);
+	const candidateTitle = normalizeSpotifyMatchTitle(match.title);
+	if (
+		requestedTitle !== candidateTitle &&
+		!(
+			(isRemasterTitle(track.title) || isRemasterTitle(match.title)) &&
+			titlesDifferOnlyByLeadingThe(requestedTitle, candidateTitle)
+		)
+	) {
 		return false;
 	}
 	const requestedArtist = normalizeMatchText(track.artist);
