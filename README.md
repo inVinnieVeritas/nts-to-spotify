@@ -195,7 +195,8 @@ checks pass.
 
 Cloud writes use a Firestore document update-time precondition. An unexpected change from another
 browser stops automatic upload instead of overwriting the newer copy. The first upload is manual.
-Cloud saving is not enabled for local Vite yet.
+Local Vite can connect through an approved popup on the hosted origin; it does not access Firestore
+directly.
 
 The cache directory must be owned and writable only by the operating-system account running the
 application. Shared or adversarially writable project directories are unsupported. Deleting
