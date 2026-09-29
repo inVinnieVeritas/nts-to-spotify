@@ -18,7 +18,9 @@ import {
 
 export const CATALOG_BACKUP_FORMAT = 'nts-to-spotify-catalog-progress';
 export const CATALOG_BACKUP_VERSION = 1;
-export const CATALOG_BACKUP_MAX_BYTES = 10 * 1024 * 1024;
+// A full NTS show can contain thousands of tracks and many candidate matches. Keep imports
+// bounded while allowing a complete catalogue to round-trip through JSON and cloud progress.
+export const CATALOG_BACKUP_MAX_BYTES = 24 * 1024 * 1024;
 // Spotify has returned multi-hour cooldowns in production; one year preserves extreme legitimate
 // values while rejecting timestamps that would effectively disable scanning forever.
 export const CATALOG_BACKUP_MAX_COOLDOWN_MS = 366 * 24 * 60 * 60 * 1000;
@@ -472,7 +474,7 @@ export const createCatalogBackup = (
 });
 
 export const serializeCatalogBackup = (progress: CatalogProgress, exportedAt = new Date()) =>
-	JSON.stringify(createCatalogBackup(progress, exportedAt), null, 2);
+	JSON.stringify(createCatalogBackup(progress, exportedAt));
 
 export const parseCatalogBackup = (
 	text: string,
