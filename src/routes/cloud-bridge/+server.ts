@@ -60,7 +60,7 @@ window.addEventListener('message', async (event) => {
 			'Content-Type': 'text/html; charset=utf-8',
 			'Cache-Control': 'no-store',
 			'Referrer-Policy': 'no-referrer',
-			'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${scriptNonce}'; style-src 'none'; base-uri 'none'; frame-ancestors 'none'`
+			'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${scriptNonce}'; connect-src 'self'; style-src 'none'; base-uri 'none'; frame-ancestors 'none'`
 		}
 	});
 };
