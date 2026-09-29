@@ -48,7 +48,10 @@ describe('local cloud bridge boundary', () => {
 		expect(() => new Script(inlineScript ?? '')).not.toThrow();
 		expect(inlineScript).toContain("message.method === 'PUT'");
 		expect(html).not.toContain('client_secret');
-		expect(response.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+		const policy = response.headers.get('content-security-policy');
+		expect(policy).toContain("default-src 'none'");
+		expect(policy).toContain("connect-src 'self'");
+		expect(policy).toContain("frame-ancestors 'none'");
 		expect(response.headers.get('cache-control')).toBe('no-store');
 	});
 
