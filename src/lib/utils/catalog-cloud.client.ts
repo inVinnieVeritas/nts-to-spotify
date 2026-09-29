@@ -1,5 +1,10 @@
 import { createCatalogBackup } from './catalog-backup';
 import type { CatalogProgress } from './catalog-scan';
+import {
+	bridgeRequest,
+	isLocalCloudBridge,
+	localCloudOwnerMatches
+} from './catalog-cloud-bridge.client';
 export type CloudCatalogueSummary = {
 	showAlias: string;
 	showName: string;
@@ -19,8 +24,22 @@ export class CloudSyncError extends Error {
 const endpoint = (showAlias: string) => `/api/catalog-progress/${encodeURIComponent(showAlias)}`;
 const markerKey = (showAlias: string) => `nts-cloud-sync:${showAlias}`;
 
-export const cloudSyncAvailable = () =>
-	location.origin === 'https://nts2spotify.vincentvanderveken.com';
+export const cloudSyncAvailable = (userId?: string) =>
+	location.origin === 'https://nts2spotify.vincentvanderveken.com' ||
+	(!!userId && localCloudOwnerMatches(userId));
+
+async function cloudRequest(method: 'GET' | 'PUT', path: string, body?: unknown) {
+	if (isLocalCloudBridge()) return bridgeRequest(method, path, body);
+	const response = await fetch(path, {
+		method,
+		credentials: 'same-origin',
+		cache: 'no-store',
+		...(method === 'PUT'
+			? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+			: {})
+	});
+	return { status: response.status, body: await response.json() };
+}
 
 export async function progressSignature(progress: CatalogProgress) {
 	const portable = createCatalogBackup(progress).progress;
@@ -63,48 +82,43 @@ export const forgetCloudCopy = (showAlias: string) => {
 };
 
 export async function loadCloudCopy(showAlias: string): Promise<CloudCopy | null> {
-	let response: Response;
+	let response: { status: number; body: unknown };
 	try {
-		response = await fetch(endpoint(showAlias), { credentials: 'same-origin', cache: 'no-store' });
+		response = await cloudRequest('GET', endpoint(showAlias));
 	} catch {
 		throw new CloudSyncError('unavailable');
 	}
 	if (response.status === 404) return null;
 	if (response.status === 401) throw new CloudSyncError('unauthorized');
-	if (!response.ok) throw new CloudSyncError('unavailable');
-	return (await response.json()) as CloudCopy;
+	if (response.status !== 200) throw new CloudSyncError('unavailable');
+	return response.body as CloudCopy;
 }
 
 export async function listCloudCopies(): Promise<CloudCatalogueSummary[]> {
-	let response: Response;
+	let response: { status: number; body: unknown };
 	try {
-		response = await fetch('/api/catalog-progress', {
-			credentials: 'same-origin',
-			cache: 'no-store'
-		});
+		response = await cloudRequest('GET', '/api/catalog-progress');
 	} catch {
 		throw new CloudSyncError('unavailable');
 	}
-	if (!response.ok) throw new CloudSyncError('unavailable');
-	return ((await response.json()) as { catalogues: CloudCatalogueSummary[] }).catalogues;
+	if (response.status !== 200) throw new CloudSyncError('unavailable');
+	return (response.body as { catalogues: CloudCatalogueSummary[] }).catalogues;
 }
 
 export async function saveCloudCopy(progress: CatalogProgress, version: string | null) {
-	let response: Response;
+	let response: { status: number; body: unknown };
 	try {
-		response = await fetch(endpoint(progress.showAlias), {
-			method: 'PUT',
-			credentials: 'same-origin',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ version, progress: createCatalogBackup(progress).progress })
+		response = await cloudRequest('PUT', endpoint(progress.showAlias), {
+			version,
+			progress: createCatalogBackup(progress).progress
 		});
 	} catch {
 		throw new CloudSyncError('unavailable');
 	}
 	if (response.status === 409) throw new CloudSyncError('conflict');
 	if (response.status === 401) throw new CloudSyncError('unauthorized');
-	if (!response.ok) throw new CloudSyncError('unavailable');
-	const result = (await response.json()) as { version?: unknown };
+	if (response.status !== 200) throw new CloudSyncError('unavailable');
+	const result = response.body as { version?: unknown };
 	if (typeof result.version !== 'string') throw new CloudSyncError('unavailable');
 	return result.version;
 }

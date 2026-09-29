@@ -263,6 +263,9 @@ export const verifyCacheLocation = async (projectRoot, statPath = stat, accessFi
 			if (cause && typeof cause === 'object' && 'code' in cause && cause.code === 'ENOENT') {
 				continue;
 			}
+			if (cause && typeof cause === 'object' && 'code' in cause && cause.code === 'ENOTDIR') {
+				throw new LocalLauncherError('The local Spotify cache path exists but is not a directory.');
+			}
 			throw new LocalLauncherError('The local Spotify cache location could not be checked.');
 		}
 	}

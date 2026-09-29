@@ -23,9 +23,9 @@ describe('cloud sync change detection', () => {
 			playlist: { title: 'Channeling', description: '', public: false }
 		};
 		const initial = await progressSignature(progress);
-		expect(
-			await progressSignature({ ...progress, updatedAt: progress.updatedAt + 1_000 })
-		).toBe(initial);
+		expect(await progressSignature({ ...progress, updatedAt: progress.updatedAt + 1_000 })).toBe(
+			initial
+		);
 		expect(
 			await progressSignature({
 				...progress,

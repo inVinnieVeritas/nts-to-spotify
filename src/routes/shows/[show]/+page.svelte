@@ -35,6 +35,11 @@
 		type CloudCopy
 	} from '$lib/utils/catalog-cloud.client';
 	import {
+		connectLocalCloud,
+		isLocalCloudBridge,
+		localCloudConnected
+	} from '$lib/utils/catalog-cloud-bridge.client';
+	import {
 		downloadCatalogReviewCsv,
 		getCatalogReviewTrackCount
 	} from '$lib/utils/catalog-review-csv.client';
@@ -189,6 +194,7 @@
 	let cloudVersion: string | null = null;
 	let cloudBusy = false;
 	let cloudTimer: ReturnType<typeof setTimeout> | undefined;
+	let bridgeConnected = false;
 	let activeShowAlias = data.showAlias;
 	let activeShowName = data.name;
 	let activeShowCover = data.cover;
@@ -343,7 +349,7 @@
 		showAlias: string,
 		generation: number
 	) => {
-		if (!cloudSyncAvailable() || !data.user) return;
+		if (!data.user || !cloudSyncAvailable(data.user.id)) return;
 		cloudState = 'checking';
 		try {
 			const remote = await loadCloudCopy(showAlias);
@@ -1328,9 +1334,27 @@
 
 	onMount(() => {
 		mounted = true;
+		bridgeConnected = localCloudConnected();
+		const handleBridgeConnected = async () => {
+			bridgeConnected = true;
+			if (!data.user || !cloudSyncAvailable(data.user.id)) return;
+			const alias = activeShowAlias;
+			const generation = showGeneration;
+			await snapshotWriter.flush();
+			if (!restored || alias !== activeShowAlias || generation !== showGeneration) return;
+			await initializeCloud(await loadCatalogProgress(alias), alias, generation);
+		};
+		window.addEventListener('nts-cloud-connected', handleBridgeConnected);
 		unsubscribeGlobalCooldown = globalCooldownController.subscribe(applyGlobalCooldown);
 		void initializeShow(data);
-		cooldownTimer = setInterval(updatePageTimers, 1000);
+		cooldownTimer = setInterval(() => {
+			updatePageTimers();
+			if (isLocalCloudBridge() && bridgeConnected && !localCloudConnected()) {
+				bridgeConnected = false;
+				if (cloudState === 'active') cloudState = 'unavailable';
+			}
+		}, 1000);
+		return () => window.removeEventListener('nts-cloud-connected', handleBridgeConnected);
 	});
 
 	$: if (mounted && data.showAlias !== activeShowAlias) void initializeShow(data);
@@ -1549,6 +1573,20 @@
 				{#if progressTransferError}
 					<p class="progress-transfer-message font-small-beast" role="alert">
 						{progressTransferError}
+					</p>
+				{/if}
+				{#if isLocalCloudBridge() && !bridgeConnected && data.user}
+					<div class="cloud-progress font-small-beast">
+						<p>Cloud progress is available through your signed-in staging site.</p>
+						<Button size="sm" variant="outline" on:click={connectLocalCloud}
+							>Connect local Vite to cloud</Button
+						>
+					</div>
+				{/if}
+				{#if bridgeConnected && data.user && !cloudSyncAvailable(data.user.id)}
+					<p role="alert">
+						The local Spotify account differs from the hosted account. Sign in to the same account
+						before syncing.
 					</p>
 				{/if}
 				{#if cloudState !== 'local'}
