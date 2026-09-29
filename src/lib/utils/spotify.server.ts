@@ -795,6 +795,12 @@ export const searchSpotifyTrack = async (
 	request: Fetcher = fetch,
 	signal?: AbortSignal
 ): Promise<MatchedTrack> => {
+	// NTS sometimes lists a known artist with no track title. A search for "N/A" produces
+	// unrelated Spotify suggestions and spends quota without identifying the recording.
+	if (!track.title.trim() || /^n\s*\/\s*a$/i.test(track.title.trim())) {
+		throwIfAborted(signal);
+		return { ...track, matches: [], fallback: false, confident: false };
+	}
 	// Searches currently use application credentials and do not send a market. The key helper keeps
 	// an explicit market dimension for a future market-aware caller to thread through.
 	const identity = createSpotifyPersistentCacheIdentity(track, SPOTIFY_MATCHER_VERSION);
