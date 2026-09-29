@@ -1,11 +1,20 @@
 <script lang="ts">
 	import '$styles/index.pcss';
+	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { tick } from 'svelte';
 	import { Header } from '$components';
 	import type { LayoutData } from './$types';
 
 	export let data: LayoutData;
 	$: title = $page.data.title ? `${$page.data.title} | NTS to Spotify` : 'NTS to Spotify';
+	let mainElement: HTMLElement;
+
+	afterNavigate(async ({ from, to }) => {
+		if (from?.url.pathname === to?.url.pathname) return;
+		await tick();
+		mainElement?.scrollTo(0, 0);
+	});
 </script>
 
 <svelte:head>
@@ -17,7 +26,7 @@
 
 <div class="holder" style={`background-image: url(${$page.data?.cover || data.bgImage})`}>
 	<Header />
-	<main>
+	<main bind:this={mainElement}>
 		<slot />
 	</main>
 </div>
