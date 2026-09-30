@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { NTSEpisodeSummary } from '$lib/types';
 import {
 	CATALOG_BACKUP_FORMAT,
+	CATALOG_BACKUP_MAX_BYTES,
 	CATALOG_BACKUP_MAX_COOLDOWN_MS,
 	CATALOG_BACKUP_VERSION,
 	CatalogBackupValidationError,
@@ -110,6 +111,32 @@ describe('catalogue progress backup', () => {
 			showAlias: 'show',
 			progress
 		});
+	});
+
+	it('restores a full catalogue backup larger than the former 10 MiB ceiling', () => {
+		const progress = makeProgress();
+		progress.updatedAt = EXPORTED_AT_MS;
+		const original = reviewedEpisode();
+		const track = original.tracks[0];
+		const alternatives = Array.from({ length: 10 }, () => track.matches[0]);
+		progress.episodes = Object.fromEntries(
+			Array.from({ length: 259 }, (_, index) => {
+				const alias = `episode-${index + 1}`;
+				return [
+					alias,
+					{
+						...original,
+						episodeAlias: alias,
+						tracks: Array.from({ length: 30 }, () => ({ ...track, matches: alternatives }))
+					}
+				];
+			})
+		);
+		const backup = serializeCatalogBackup(progress, new Date(EXPORTED_AT));
+		const size = new TextEncoder().encode(backup).byteLength;
+		expect(size).toBeGreaterThan(10 * 1024 * 1024);
+		expect(size).toBeLessThan(CATALOG_BACKUP_MAX_BYTES);
+		expect(Object.keys(parseCatalogBackup(backup, 'show').progress.episodes)).toHaveLength(259);
 	});
 
 	it('keeps legacy backups without optional dashboard display metadata compatible', () => {

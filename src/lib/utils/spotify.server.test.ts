@@ -420,6 +420,23 @@ describe('Spotify rate limiting', () => {
 
 describe('Spotify server-session search cache', () => {
 	beforeEach(() => resetSpotifyServerSessionForTests());
+	it('does not search Spotify for an N/A or empty NTS title', async () => {
+		const request = vi.fn() as unknown as Fetcher;
+		for (const track of [
+			{ artist: 'Unknown Artist', title: 'N/A' },
+			{ artist: 'Andrew Weatherall', title: ' n / a ' },
+			{ artist: 'Artist', title: '  ' }
+		]) {
+			await expect(searchSpotifyTrack(track, 'token', request)).resolves.toEqual({
+				...track,
+				matches: [],
+				fallback: false,
+				confident: false
+			});
+		}
+		expect(request).not.toHaveBeenCalled();
+		expect(expectMetricInvariants().searchRequests).toBe(0);
+	});
 
 	it('marks a primary artist-and-title remaster result confident through the real search path', async () => {
 		const request = vi.fn(async () =>
