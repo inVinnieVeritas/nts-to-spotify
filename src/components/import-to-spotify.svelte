@@ -14,6 +14,7 @@
 		dismissPlaylistPreview,
 		parseSpotifyPlaylistPreview,
 		runExclusivePlaylistAction,
+		verifyAndSaveExistingPlaylist,
 		type ClientSpotifyPlaylistPreview
 	} from '$lib/utils/playlist-preview.client';
 	import {
@@ -41,6 +42,7 @@
 	import LoginWithSpotify from './login-with-spotify.svelte';
 
 	export let disabled = false;
+	export let comparisonDisabled = false;
 	export let catalogueMode = false;
 	export let showAlias = '';
 	export let creationPending = false;
@@ -49,6 +51,8 @@
 		((record: CatalogPlaylistSyncRecord | undefined) => void) | undefined = undefined;
 	export let prepareCatalogueCreation: (() => Promise<boolean>) | undefined = undefined;
 	export let persistCatalogueLink: ((playlistId: string) => Promise<boolean>) | undefined =
+		undefined;
+	export let persistExistingCatalogueLink: ((playlistId: string) => Promise<boolean>) | undefined =
 		undefined;
 	export let clearCatalogueCreationPending: (() => Promise<boolean>) | undefined = undefined;
 	export let forgetCatalogueLink: (() => Promise<boolean>) | undefined = undefined;
@@ -69,6 +73,8 @@
 	let failure = '';
 	let responsePlaylistId: string | undefined;
 	let recoveryValue = '';
+	let existingPlaylistValue = '';
+	let showExistingPlaylistForm = false;
 	let preview: ClientSpotifyPlaylistPreview | undefined;
 	let previewSyncStamp: string | undefined;
 	const previewGuard = createPlaylistSyncPreviewGuard();
@@ -143,11 +149,14 @@
 				? syncEligibility.label
 				: preview && !preview.synchronized
 					? 'Apply Spotify update'
-					: 'Preview Spotify update'
+					: 'Compare with Spotify playlist'
 			: creationPending
 				? 'Creation outcome pending'
 				: 'Create Spotify playlist'
 		: 'Import to Spotify';
+	$: comparing = Boolean(
+		catalogueMode && linkedPlaylistId && !resumableSync && (!preview || preview.synchronized)
+	);
 
 	const failureMessage = (payload: unknown) => {
 		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -280,7 +289,7 @@
 	};
 
 	const previewPlaylist = async () => {
-		if (!me || working || !linkedPlaylistId) return;
+		if (!me || working || comparisonDisabled || !linkedPlaylistId) return;
 		const requestedSignature = inputSignature;
 		const ticket = previewGuard.begin(requestedSignature, localSyncRecord);
 		working = true;
@@ -332,7 +341,7 @@
 	};
 
 	const synchronizePlaylist = async () => {
-		if (!me || working || !tabOwner || syncEligibility.disabled) return;
+		if (!me || disabled || working || !tabOwner || syncEligibility.disabled) return;
 		const creatingNew = !linkedPlaylistId;
 		if (catalogueMode && creatingNew && creationPending) return;
 		if (linkedPlaylistId && !resumableSync && (!preview || preview.synchronized)) return;
@@ -604,6 +613,56 @@
 		}
 	};
 
+	const linkExistingPlaylist = async () => {
+		if (
+			!me ||
+			!catalogueMode ||
+			working ||
+			comparisonDisabled ||
+			creationPending ||
+			linkedPlaylistId
+		)
+			return;
+		working = true;
+		failure = '';
+		message = 'Checking playlist ownership…';
+		const controller = new AbortController();
+		playlistController = controller;
+		const current = () => !disposed && playlistController === controller;
+		try {
+			const result = await verifyAndSaveExistingPlaylist({
+				value: existingPlaylistValue,
+				verify: (playlistId) => requestApi({ operation: 'verify', playlistId }, controller.signal),
+				persist: async (playlistId) => (await persistExistingCatalogueLink?.(playlistId)) === true,
+				isCurrent: current
+			});
+			if (!current()) return;
+			message = '';
+			if (result.status === 'linked') {
+				existingPlaylistValue = '';
+				showExistingPlaylistForm = false;
+				message = 'Playlist linked. Compare with Spotify playlist to see the differences.';
+			} else if (result.status === 'invalid-input') {
+				failure = 'Enter a valid Spotify playlist URL or playlist ID.';
+			} else if (result.status === 'rejected') {
+				failure = failureMessage(result.body);
+			} else if (result.status === 'save-failed') {
+				failure = 'The playlist link could not be saved. Please try again.';
+			} else if (result.status === 'invalid-response') {
+				failure = 'Spotify returned an invalid verification response. Please try again.';
+			}
+		} catch {
+			if (!current()) return;
+			message = '';
+			failure = 'The Spotify playlist could not be linked. Please try again.';
+		} finally {
+			if (current()) {
+				playlistController = undefined;
+				working = false;
+			}
+		}
+	};
+
 	const confirmNoPlaylistCreated = async () => {
 		if (
 			working ||
@@ -661,6 +720,40 @@
 				{syncFeedback.historicalStatus}
 			</p>
 		{/if}
+		{#if catalogueMode && me?.id && !creationPending && !linkedPlaylistId}
+			{#if showExistingPlaylistForm}
+				<form class="creation-recovery" on:submit|preventDefault={linkExistingPlaylist}>
+					<p class="font-small-beast">
+						Link a playlist you own. Linking leaves its tracks unchanged.
+					</p>
+					<label class="font-small-beast" for="existing-playlist">Spotify playlist URL or ID</label>
+					<input
+						id="existing-playlist"
+						bind:value={existingPlaylistValue}
+						autocomplete="off"
+						disabled={working}
+					/>
+					<Button type="submit" size="sm" variant="outline" disabled={working || comparisonDisabled}
+						>Verify and link playlist</Button
+					>
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						disabled={working}
+						on:click={() => (showExistingPlaylistForm = false)}>Cancel</Button
+					>
+				</form>
+			{:else}
+				<Button
+					type="button"
+					size="sm"
+					variant="outline"
+					disabled={working || comparisonDisabled}
+					on:click={() => (showExistingPlaylistForm = true)}>Link existing Spotify playlist</Button
+				>
+			{/if}
+		{/if}
 		{#if catalogueMode && creationPending && !linkedPlaylistId}
 			<div class="creation-recovery">
 				<p class="font-small-beast">
@@ -700,15 +793,22 @@
 		{/if}
 		{#if preview}
 			<div class="update-preview" aria-label="Spotify playlist update preview">
+				<p class="font-small-beast">Comparison only; Spotify has not been changed.</p>
+				{#if catalogueMode && disabled}
+					<p class="font-small-beast">
+						Comparing tracks selected so far. Finish scanning before applying a playlist update.
+						Linking does not restore scan progress or review choices.
+					</p>
+				{/if}
 				{#if preview.synchronized}
 					<p class="font-small-beast" role="status" aria-live="polite">
 						{syncFeedback.synchronizedStatus}
 					</p>
 				{:else}
 					<p class="font-small-beast">
-						<strong>{preview.addedCount}</strong> tracks will be added ·
-						<strong>{preview.removedCount}</strong> tracks will be removed ·
-						<strong>{preview.retainedCount}</strong> tracks will remain
+						<strong>{preview.addedCount}</strong> selected tracks missing from Spotify ·
+						<strong>{preview.retainedCount}</strong> selected tracks already present ·
+						<strong>{preview.removedCount}</strong> playlist entries outside the selection
 					</p>
 					<ul class="font-small-beast">
 						<li>Playlist order {preview.orderChanged ? 'will change' : 'is unchanged'}</li>
@@ -737,7 +837,7 @@
 				as="button"
 				type="button"
 				icon="spotify"
-				disabled={disabled ||
+				disabled={(comparing ? comparisonDisabled : disabled) ||
 					working ||
 					!tabOwner ||
 					syncEligibility.disabled ||

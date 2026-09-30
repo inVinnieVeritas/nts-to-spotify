@@ -137,6 +137,24 @@ Paste either a show URL such as `https://www.nts.live/shows/jim-o-rourke` or an 
 episode URL into the search bar. A full catalogue scan can take several minutes because Spotify
 requests are deliberately paced and uncertain matches require review.
 
+### Compare an existing Spotify playlist
+
+On a catalogue page, choose **Link existing Spotify playlist** in the bottom bar and paste a
+Spotify playlist URL (including a Share link) or ID. **Verify and link playlist** checks ownership
+and saves the link to this catalogue's progress. Cloud-connected progress also saves the link
+for other browsers. Only playlists owned by the signed-in Spotify account can be linked.
+
+Choose **Compare with Spotify playlist** to read the playlist and preview selected tracks already
+present, selected tracks missing, and playlist entries outside the selection. Linking and comparing
+make no Spotify writes, but their reads consume API requests and may be rate limited. You can
+compare a partially scanned catalogue; those counts use only selections scanned so far and do
+not recover missing episode results or review decisions.
+
+After the scan is complete, **Apply Spotify update** explicitly replaces the playlist with the
+catalogue selection and settings. Review the removals before applying: extra tracks are removed.
+Adding only missing tracks and scheduled scanning are not implemented. **Forget linked playlist**
+removes the saved link without deleting the playlist in Spotify.
+
 ## Catalogue backup and restore
 
 Catalogue progress is stored in this browser. On the private Cloud Run staging installation, you

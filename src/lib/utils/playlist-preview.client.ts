@@ -1,4 +1,48 @@
-import { isSpotifyPlaylistId } from './catalog-scan';
+import { isSpotifyPlaylistId, parseSpotifyPlaylistId } from './catalog-scan';
+
+// Spotify's Share link includes a tracking query. Only the parsed ID is sent to our API.
+export const parseExistingSpotifyPlaylistId = (value: string): string | undefined => {
+	const direct = parseSpotifyPlaylistId(value);
+	if (direct) return direct;
+	try {
+		const url = new URL(value.trim());
+		url.search = '';
+		return parseSpotifyPlaylistId(url.href);
+	} catch {
+		return undefined;
+	}
+};
+
+type PlaylistLinkResult =
+	| { status: 'linked'; playlistId: string }
+	| { status: 'invalid-input' | 'cancelled' | 'save-failed' | 'invalid-response' }
+	| { status: 'rejected'; body: unknown };
+
+export const verifyAndSaveExistingPlaylist = async (options: {
+	value: string;
+	verify: (playlistId: string) => Promise<{ response: Response; body: unknown }>;
+	persist: (playlistId: string) => Promise<boolean>;
+	isCurrent: () => boolean;
+}): Promise<PlaylistLinkResult> => {
+	const playlistId = parseExistingSpotifyPlaylistId(options.value);
+	if (!playlistId) return { status: 'invalid-input' };
+	if (!options.isCurrent()) return { status: 'cancelled' };
+	const { response, body } = await options.verify(playlistId);
+	if (!options.isCurrent()) return { status: 'cancelled' };
+	if (!response.ok) return { status: 'rejected', body };
+	if (
+		!body ||
+		typeof body !== 'object' ||
+		Array.isArray(body) ||
+		(body as Record<string, unknown>).mode !== 'verified' ||
+		(body as Record<string, unknown>).playlistId !== playlistId
+	) {
+		return { status: 'invalid-response' };
+	}
+	const saved = await options.persist(playlistId);
+	if (!options.isCurrent()) return { status: 'cancelled' };
+	return saved ? { status: 'linked', playlistId } : { status: 'save-failed' };
+};
 
 export type ClientSpotifyPlaylistPreview = {
 	inputSignature: string;

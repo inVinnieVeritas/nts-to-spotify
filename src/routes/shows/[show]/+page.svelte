@@ -524,6 +524,16 @@
 			{ linkedPlaylistId: playlistId, creationPending: true }
 		);
 	};
+	const persistExistingPlaylist = async (playlistId: string) => {
+		if (!isSpotifyPlaylistId(playlistId) || linkedPlaylistId || playlistCreationPending || scanning)
+			return false;
+		const linked = await durablePlaylistTransition(
+			{ linkedPlaylistId: playlistId, creationPending: false },
+			{ creationPending: false }
+		);
+		if (linked) queueCloudSave();
+		return linked;
+	};
 	const clearPlaylistCreationPending = async () => {
 		return durablePlaylistTransition(
 			{ creationPending: false },
@@ -1745,6 +1755,7 @@
 		<ImportToSpotify
 			catalogueMode
 			disabled={!scanComplete || scanning}
+			comparisonDisabled={scanning || !restored}
 			creationPending={playlistCreationPending}
 			showAlias={activeShowAlias}
 			syncRecord={playlistSyncRecord}
@@ -1753,6 +1764,7 @@
 			}}
 			prepareCatalogueCreation={preparePlaylistCreation}
 			persistCatalogueLink={persistLinkedPlaylist}
+			persistExistingCatalogueLink={persistExistingPlaylist}
 			clearCatalogueCreationPending={clearPlaylistCreationPending}
 			forgetCatalogueLink={forgetPlaylist}
 			data={{
