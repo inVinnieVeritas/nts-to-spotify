@@ -152,7 +152,8 @@ not recover missing episode results or review decisions.
 
 After the scan is complete, **Apply Spotify update** explicitly replaces the playlist with the
 catalogue selection and settings. Review the removals before applying: extra tracks are removed.
-Adding only missing tracks and scheduled scanning are not implemented. **Forget linked playlist**
+Adding only missing tracks is not implemented. Opt-in scheduled scanning is described in
+[the scheduled scan setup guide](docs/catalog-schedules.md). **Forget linked playlist**
 removes the saved link without deleting the playlist in Spotify.
 
 ## Catalogue backup and restore

@@ -79,7 +79,7 @@ const cloudConfig = () => {
 	return { project, userId: hosted.userId };
 };
 
-const documentBase = () => {
+export const documentBase = () => {
 	const { project, userId } = cloudConfig();
 	return `projects/${project}/databases/(default)/documents/ntsUsers/${encodeURIComponent(userId)}`;
 };
@@ -90,7 +90,7 @@ const documentPaths = (showAlias: string) => {
 	return { name, url: `${FIRESTORE}/${name}`, episodes: `${name}/episodes` };
 };
 
-const accessToken = async (request: typeof fetch) => {
+export const accessToken = async (request: typeof fetch) => {
 	try {
 		const response = await request(TOKEN_URL, {
 			headers: { 'Metadata-Flavor': 'Google' },
@@ -106,7 +106,7 @@ const accessToken = async (request: typeof fetch) => {
 	}
 };
 
-const firestoreRequest = async (
+export const firestoreRequest = async (
 	request: typeof fetch,
 	token: string,
 	url: string,

@@ -7,6 +7,7 @@
 !LICENSE
 !svelte.config.js
 !vite.config.ts
+!vite.jobs.config.ts
 !tsconfig.json
 !postcss.config.cjs
 !src/
@@ -15,6 +16,9 @@
 !static/**
 !scripts/
 !scripts/start-cloud-run.mjs
+!scripts/cloud-run-config.mjs
+!scripts/job-env.ts
 **/*.test.ts
+**/test-helpers/**
 **/.env*
 **/.data/**

@@ -2,7 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { error, type RequestEvent } from '@sveltejs/kit';
 import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from '$lib/constants';
-import { STAGING_ORIGIN, validateCloudRunEnvironment } from '../../../scripts/start-cloud-run.mjs';
+import { STAGING_ORIGIN, validateCloudRunEnvironment } from '../../../scripts/cloud-run-config.mjs';
 
 export const HOSTED_SESSION_COOKIE = '__Host-nts-staging';
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -16,7 +16,7 @@ const cookieOptions = {
 export function hostedConfiguration() {
 	if (!env.NTS_HOSTED_STAGING && !env.K_SERVICE) return null;
 	try {
-		validateCloudRunEnvironment(env);
+		validateCloudRunEnvironment(env, { job: env.NTS_CATALOG_JOB === '1' });
 	} catch {
 		throw error(503, 'Hosted staging is not configured');
 	}
