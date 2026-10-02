@@ -19,12 +19,18 @@ export type ScheduleWorkerDependencies = {
 	searchCount: () => number;
 	now: () => number;
 	signal: AbortSignal;
+	afterBatch?: (show: string, signal: AbortSignal) => Promise<number | undefined>;
+	notify?: (
+		kind: 'new-episodes' | 'matches-ready',
+		show: string,
+		episodes: string[]
+	) => Promise<void>;
 };
 export const SCHEDULE_EPISODE_LIMIT = 5;
 const CONTINUE_AFTER_MS = 60 * 60_000;
 
 // One bounded catalogue batch per invocation. Every episode is saved before the next starts.
-// The worker never imports a playlist writer or needs a Spotify user's refresh token.
+// Playlist automation is a separate opt-in boundary, invoked only after matching releases its lease.
 export async function runScheduledScan(deps: ScheduleWorkerDependencies) {
 	const { store, now, signal } = deps;
 	const initial = (await store.listSchedules())
@@ -77,12 +83,20 @@ export async function runScheduledScan(deps: ScheduleWorkerDependencies) {
 						status = 'missing-progress';
 						break;
 					}
+					const latestEpisodesBeforeDiscovery = copy.progress.episodes;
 					const reconciled = reconcileSavedCatalogWithNTS(copy.progress, catalog, now());
 					if (reconciled.addedCount) {
 						if (scope.aborted || !(await store.owns(acquired, now())))
 							throw new CloudProgressError('conflict');
 						copy.version = await deps.save(schedule.showAlias, reconciled.progress, copy.version);
 						copy.progress = reconciled.progress;
+						await deps.notify?.(
+							'new-episodes',
+							schedule.showAlias,
+							Object.keys(copy.progress.episodes).filter(
+								(alias) => !Object.hasOwn(latestEpisodesBeforeDiscovery, alias)
+							)
+						);
 					}
 					schedule.nextCheckAt = now() + SCHEDULE_INTERVALS[schedule.frequency];
 				}
@@ -129,6 +143,7 @@ export async function runScheduledScan(deps: ScheduleWorkerDependencies) {
 					latest.progress.retry = { cooldownUntil: 0, pausedByRateLimit: false };
 				await deps.save(schedule.showAlias, latest.progress, latest.version);
 				scanned++;
+				await deps.notify?.('matches-ready', schedule.showAlias, [episode.episodeAlias]);
 				if (Object.values(latest.progress.episodes).every((e) => e.status === 'done')) {
 					status = 'complete';
 					nextRunAt = schedule.nextCheckAt;
@@ -171,6 +186,11 @@ export async function runScheduledScan(deps: ScheduleWorkerDependencies) {
 					: 'unavailable';
 	} finally {
 		if (acquired) await store.release(acquired);
+	}
+	if (deps.afterBatch && ['complete', 'waiting'].includes(status) && !signal.aborted) {
+		const retryAt = await deps.afterBatch(schedule.showAlias, signal);
+		if (retryAt !== undefined)
+			nextRunAt = Math.min(nextRunAt, Math.max(now() + CONTINUE_AFTER_MS, retryAt));
 	}
 	// A disable or frequency change made while this job ran wins over its status write.
 	try {

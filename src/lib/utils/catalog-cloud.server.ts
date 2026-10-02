@@ -232,6 +232,13 @@ export async function loadCloudProgress(showAlias: string, request: typeof fetch
 	return { version: manifest.version, progress };
 }
 
+// Playlist fencing needs only the manifest revision, not every compressed episode.
+export async function loadCloudProgressVersion(showAlias: string, request: typeof fetch = fetch) {
+	const paths = documentPaths(showAlias);
+	const token = await accessToken(request);
+	return (await readManifest(request, token, paths.url))?.version ?? null;
+}
+
 export async function saveCloudProgress(
 	showAlias: string,
 	progressInput: unknown,

@@ -61,7 +61,10 @@ describe('local cloud bridge boundary', () => {
 		const script = new Script(html.match(/<script nonce="[^"]+">([\s\S]+)<\/script>/)?.[1] ?? '');
 		const handlers = new Map<string, (event: unknown) => Promise<void> | void>();
 		const opener = { postMessage: vi.fn() };
-		const request = vi.fn(async () => ({ status: 200, json: async () => ({ catalogues: [] }) }));
+		const request = vi.fn(async (_input: string, _init?: RequestInit) => ({
+			status: 200,
+			json: async () => ({ catalogues: [] })
+		}));
 		const button = {
 			disabled: false,
 			addEventListener: (_type: string, handler: () => void) => handlers.set('click', handler)
@@ -79,7 +82,12 @@ describe('local cloud bridge boundary', () => {
 			Number,
 			JSON
 		});
-		const message = (path: string, origin = 'http://127.0.0.1:5173', source: unknown = opener) =>
+		const message = (
+			path: string,
+			origin = 'http://127.0.0.1:5173',
+			source: unknown = opener,
+			method = 'GET'
+		) =>
 			handlers.get('message')?.({
 				origin,
 				source,
@@ -87,7 +95,7 @@ describe('local cloud bridge boundary', () => {
 					type: 'nts-cloud-bridge-request',
 					nonce: 'a'.repeat(64),
 					id: 1,
-					method: 'GET',
+					method,
 					path
 				}
 			});
@@ -100,5 +108,13 @@ describe('local cloud bridge boundary', () => {
 		expect(request).not.toHaveBeenCalled();
 		await message('/api/catalog-progress/channeling');
 		expect(request).toHaveBeenCalledOnce();
+		await message('/api/playlist-authorization', 'http://127.0.0.1:5173', opener, 'POST');
+		expect(request).toHaveBeenCalledOnce();
+		await message('/api/spotify/playlist', 'http://127.0.0.1:5173', opener, 'POST');
+		expect(request).toHaveBeenCalledTimes(2);
+		expect(request.mock.calls.at(-1)?.[1]).toMatchObject({
+			method: 'POST',
+			credentials: 'same-origin'
+		});
 	});
 });

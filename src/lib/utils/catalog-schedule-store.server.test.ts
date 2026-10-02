@@ -9,6 +9,40 @@ import { fakeFirestore } from '../test-helpers/firestore';
 import type { CatalogSchedule } from './catalog-schedule';
 
 describe('durable scan coordination', () => {
+	it('fails closed when a conflicting renewal loses ownership before its CAS retry', async () => {
+		const fixture = fakeFirestore();
+		const first = new ScheduleStore(fixture.request);
+		const claim = await first.acquire('playlist');
+		let conflict = true;
+		const request: typeof fetch = async (input, init) => {
+			if (String(input).endsWith('/documents:commit') && conflict) {
+				conflict = false;
+				const doc = fixture.documents.values().next().value!;
+				const coordination = JSON.parse(doc.fields.payload.stringValue);
+				coordination.leases = [];
+				doc.fields.payload.stringValue = JSON.stringify(coordination);
+				doc.updateTime = new Date(Date.now() + 1000).toISOString();
+				return new Response(null, { status: 409 });
+			}
+			return fixture.request(input, init);
+		};
+		await expect(new ScheduleStore(request).renew(claim.lease!.id)).rejects.toMatchObject({
+			kind: 'conflict'
+		});
+		expect(await first.owns(claim.lease!.id)).toBe(false);
+	});
+	it('playlist writes are exclusive with manual/background scans and renewals fence expired owners', async () => {
+		const store = new ScheduleStore(fakeFirestore().request);
+		const now = Date.now();
+		const claim = await store.acquire('playlist', now);
+		expect(claim.lease).toBeDefined();
+		expect(await store.acquire('manual', now)).toEqual({});
+		expect(await store.acquire('scheduled', now)).toEqual({});
+		await store.renew(claim.lease!.id, now + 60_000);
+		expect(await store.owns(claim.lease!.id, now + 5 * 60_000)).toBe(true);
+		await store.release(claim.lease!.id);
+		await expect(store.renew(claim.lease!.id, now + 60_000)).rejects.toThrow();
+	});
 	it('admits exactly one concurrent job and excludes manual scans until release', async () => {
 		const { request } = fakeFirestore();
 		const store = new ScheduleStore(request);

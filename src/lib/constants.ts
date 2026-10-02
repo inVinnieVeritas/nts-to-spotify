@@ -1,4 +1,5 @@
-export const SPOTIFY_SCOPES = 'playlist-modify-public playlist-modify-private';
+export const SPOTIFY_SCOPES =
+	'playlist-modify-public playlist-modify-private playlist-read-private';
 export const ACCESS_TOKEN_KEY = 'nts2s_access_token';
 export const REFRESH_TOKEN_KEY = 'nts2s_refresh_token';
 export const OAUTH_STATE_KEY = 'nts2s_oauth_state';

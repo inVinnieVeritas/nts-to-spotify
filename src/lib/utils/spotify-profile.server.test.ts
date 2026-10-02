@@ -37,7 +37,8 @@ describe('Spotify profile minimization', () => {
 	it('requests no email or image-upload OAuth scopes', () => {
 		expect(SPOTIFY_SCOPES.split(' ')).toEqual([
 			'playlist-modify-public',
-			'playlist-modify-private'
+			'playlist-modify-private',
+			'playlist-read-private'
 		]);
 	});
 

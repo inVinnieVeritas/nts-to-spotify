@@ -486,6 +486,7 @@ export const parsePlaylistSyncApiFailure = async (
 			'playlist_changed_since_sync',
 			'playlist_changed_since_preview',
 			'playlist_settling',
+			'playlist_busy',
 			'playlist_not_found',
 			'playlist_not_owned',
 			'playlist_inaccessible',
@@ -734,6 +735,8 @@ export const runPlaylistSyncBatches = async (input: {
 			);
 		if (mutation && (failure.ambiguous || response.status >= 500))
 			return stop('uncertain', 'uncertain', 'playlist_outcome_uncertain');
+		if (failure.error === 'playlist_busy')
+			return stop('interrupted', 'unavailable', 'playlist_busy');
 		if (response.status === 409) {
 			// This response proves the attempted mutation was rejected before dispatch.
 			if (record.snapshotId) return stop('settling', 'settling', failure.error, now() + 5_000);

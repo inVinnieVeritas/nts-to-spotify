@@ -40,6 +40,11 @@
 		deleteCatalogPlaylistSync
 	} from '$lib/utils/catalog-progress.client';
 	import LoginWithSpotify from './login-with-spotify.svelte';
+	import {
+		isLocalCloudBridge,
+		localCloudConnected,
+		bridgeRequest
+	} from '$lib/utils/catalog-cloud-bridge.client';
 
 	export let disabled = false;
 	export let comparisonDisabled = false;
@@ -252,8 +257,17 @@
 		localSyncRecord = undefined;
 		onSyncRecordChange?.(undefined);
 	};
-	const requestApi = (body: unknown, signal?: AbortSignal) => {
+	const requestApi = async (body: unknown, signal?: AbortSignal) => {
 		if (disposed) throw new Error('Synchronization component changed');
+		if (catalogueMode && isLocalCloudBridge() && localCloudConnected()) {
+			if (signal?.aborted) throw new Error('Playlist action cancelled');
+			const reply = await bridgeRequest('POST', '/api/spotify/playlist', body);
+			if (signal?.aborted) throw new Error('Playlist action cancelled');
+			return {
+				response: new Response(JSON.stringify(reply.body), { status: reply.status }),
+				body: reply.body as Record<string, unknown>
+			};
+		}
 		return requestPlaylistJson<Record<string, unknown>>(fetch, body, signal);
 	};
 	const requestPreview = async (

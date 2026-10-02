@@ -19,6 +19,7 @@ import {
 	compareSpotifyPlaylist,
 	canonicalSpotifyTrackUri,
 	fingerprintSpotifyPlaylistPreview,
+	fingerprintSpotifyPlaylist,
 	isSpotifyPlaylistFingerprint,
 	spotifyPlaylistItemTrackUri
 } from '$lib/utils/playlist-preview.server';
@@ -176,7 +177,10 @@ const readBoundedPlaylistRequestBody = async (request: Request, signal: AbortSig
 	}
 };
 
-const parseRequest = async (request: Request, signal: AbortSignal): Promise<PlaylistRequest> => {
+export const _parseRequest = async (
+	request: Request,
+	signal: AbortSignal
+): Promise<PlaylistRequest> => {
 	let value: unknown;
 	try {
 		value = JSON.parse(await readBoundedPlaylistRequestBody(request, signal));
@@ -612,10 +616,15 @@ const readOwnedPlaylistState = async (
 	return { ...metadata, items };
 };
 
-const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signal: AbortSignal) => {
+export const _handlePlaylistRequest = async (
+	event: Parameters<RequestHandler>[0],
+	signal: AbortSignal,
+	background?: { token: string; owner: string },
+	beforeMutation?: () => Promise<void>
+) => {
 	let payload: PlaylistRequest;
 	try {
-		payload = await parseRequest(event.request, signal);
+		payload = await _parseRequest(event.request, signal);
 	} catch (cause) {
 		if (isAbortError(cause)) return safeErrorResponse(new SpotifyPlaylistFailure('timeout'), false);
 		return safeErrorResponse(
@@ -628,7 +637,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 
 	let token: string | null;
 	try {
-		token = await getAccessToken(event);
+		token = background?.token ?? (await getAccessToken(event));
 	} catch {
 		return safeErrorResponse(new SpotifyPlaylistFailure('authentication'), false);
 	}
@@ -654,6 +663,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 			throw new SpotifyPlaylistFailure('invalid-response');
 		}
 		const userId = profileValue.id;
+		if (background && userId !== background.owner) throw new SpotifyPlaylistFailure('ownership');
 
 		if (payload.operation === 'verify') {
 			await verifyOwnership(event, headers, userId, payload.playlistId, signal);
@@ -676,10 +686,17 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 				playlistId: payload.playlistId,
 				mode: 'preview',
 				previewFingerprint: fingerprintSpotifyPlaylistPreview(current, payload),
+				...(background
+					? {
+							stateFingerprint: fingerprintSpotifyPlaylist(current),
+							snapshotId: current.snapshotId
+						}
+					: {}),
 				...preview
 			});
 		}
 		if (payload.operation === 'create') {
+			await beforeMutation?.();
 			creationDispatched = true;
 			const createdValue = await requestSpotify(
 				event.fetch,
@@ -749,6 +766,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 			) {
 				throw new SpotifyPlaylistFailure('stale-sync');
 			}
+			await beforeMutation?.();
 			mutationStarted = true;
 			const mutation = await requestSpotify(
 				event.fetch,
@@ -783,6 +801,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 			if (fingerprintSpotifyPlaylistPreview(current, payload) !== payload.previewFingerprint) {
 				throw new SpotifyPlaylistFailure('stale-preview');
 			}
+			await beforeMutation?.();
 			mutationStarted = true;
 			await requestSpotify(
 				event.fetch,
@@ -799,6 +818,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 				signal,
 				{ notFound: true }
 			);
+			await beforeMutation?.();
 			const replacement = await requestSpotify(
 				event.fetch,
 				`https://api.spotify.com/v1/playlists/${payload.playlistId}/items`,
@@ -837,7 +857,13 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 export const POST: RequestHandler = async (event) => {
 	const scope = createAbortScope(event.request.signal, SPOTIFY_PLAYLIST_ROUTE_TIMEOUT_MS);
 	try {
-		return await handlePlaylistRequest(event, scope.signal);
+		const { coordinateManualPlaylistRequest } =
+			await import('$lib/utils/catalog-playlist-automation.server');
+		return await coordinateManualPlaylistRequest(event, scope.signal, (guard) =>
+			_handlePlaylistRequest(event, scope.signal, undefined, guard)
+		);
+	} catch {
+		return json({ error: 'playlist_coordination_unavailable' }, { status: 503 });
 	} finally {
 		scope.cleanup();
 	}

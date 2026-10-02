@@ -72,17 +72,20 @@ export const connectLocalCloud = () => {
 };
 
 export const bridgeRequest = (
-	method: 'GET' | 'PUT',
+	method: 'GET' | 'PUT' | 'POST',
 	path: string,
 	body?: unknown
 ): Promise<BridgeReply> => {
 	if (!localCloudConnected()) return Promise.reject(new Error('Cloud bridge disconnected'));
 	const id = ++nextId;
 	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => {
-			pending.delete(id);
-			reject(new Error('Cloud bridge timed out'));
-		}, REQUEST_TIMEOUT_MS);
+		const timer = setTimeout(
+			() => {
+				pending.delete(id);
+				reject(new Error('Cloud bridge timed out'));
+			},
+			path === '/api/spotify/playlist' ? 5 * 60_000 + 15_000 : REQUEST_TIMEOUT_MS
+		);
 		pending.set(id, { resolve, reject: () => reject(new Error('Invalid bridge reply')), timer });
 		bridgeWindow!.postMessage(
 			{ type: 'nts-cloud-bridge-request', nonce: bridgeNonce, id, method, path, body },
