@@ -8,11 +8,12 @@ the worker uses the same application credentials as manual matching.
 
 ## How it runs
 
-- One private Cloud Run Job, invoked hourly by Cloud Scheduler using a dedicated service account.
+- One private Cloud Run Job, invoked daily at 09:00 Europe/Brussels by Cloud Scheduler using a
+  dedicated service account.
 - One due catalogue per invocation, at most five episodes, an 18-minute worker deadline and a
   20-minute Cloud Run task deadline. Task and scheduler retries are disabled.
 - Daily, weekly, fortnightly or 30-day discovery intervals. An unfinished catalogue continues
-  on later hourly checks independently of that discovery interval.
+  on later daily checks independently of that discovery interval.
 - The owner-scoped Firestore lease excludes concurrent scheduled workers and hosted manual
   matching. A crashed lease expires after five minutes. Existing parallel manual workers remain
   supported. The longest observed Spotify cooldown is stored across instances and revisions.
@@ -25,8 +26,10 @@ the worker uses the same application credentials as manual matching.
 
 Cloud Run execution, Firestore reads/writes, and Scheduler are metered services. This is not a
 promise of zero cost: monitor Billing and the job's execution time. A cooldown/idle job exits
-quickly. Use hourly checks as configured; do not increase tasks, parallelism, or retries.
-During initial testing enable **one catalogue only**.
+quickly. Use daily checks as configured; do not increase tasks, parallelism, or retries.
+During initial testing enable **one catalogue only**. Each daily invocation handles one due
+catalogue, so multiple due catalogues may wait for subsequent days. The daily trigger reduces idle
+starts; it does not limit the duration or search usage of an active matching batch.
 
 ## Build and deploy in Cloud Shell
 
@@ -77,11 +80,11 @@ including its unfinished backlog. Wait out any existing Spotify cooldown. Execut
 and check its logs/status. Reload the cloud copy in another browser; completed counts and reviews
 should agree. The existing local/cloud conflict chooser still protects older local progress.
 
-After the single-run test passes, start the hourly trigger:
+After the single-run test passes, start the daily trigger:
 
 ```bash
 bash scripts/start-catalog-scheduler.sh
-gcloud scheduler jobs describe nts-catalog-scans-hourly \
+gcloud scheduler jobs describe nts-catalog-scans-daily \
   --project=gen-lang-client-0941278185 --location=europe-west1
 ```
 
@@ -105,7 +108,7 @@ application allowance. Do not set `NTS_CATALOG_SCHEDULES=1` in a local environme
 To stop the trigger globally:
 
 ```bash
-gcloud scheduler jobs pause nts-catalog-scans-hourly \
+gcloud scheduler jobs pause nts-catalog-scans-daily \
   --project=gen-lang-client-0941278185 --location=europe-west1
 ```
 

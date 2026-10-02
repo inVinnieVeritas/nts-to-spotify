@@ -11,9 +11,9 @@ fi
 gcloud run jobs add-iam-policy-binding nts-catalog-scans \
   --project=gen-lang-client-0941278185 --region=europe-west1 \
   --member="serviceAccount:$nts_scheduler_account" --role=roles/run.invoker --format=none
-gcloud scheduler jobs create http nts-catalog-scans-hourly \
+gcloud scheduler jobs create http nts-catalog-scans-daily \
   --project=gen-lang-client-0941278185 --location=europe-west1 \
-  --schedule='0 * * * *' --time-zone=Etc/UTC \
+  --schedule='0 9 * * *' --time-zone=Europe/Brussels \
   --uri='https://run.googleapis.com/v2/projects/gen-lang-client-0941278185/locations/europe-west1/jobs/nts-catalog-scans:run' \
   --http-method=POST --headers=Content-Type=application/json --message-body='{}' \
   --oauth-service-account-email="$nts_scheduler_account" \
