@@ -12,6 +12,8 @@ import {
 	mapWithConcurrency,
 	searchSpotifyTrack
 } from '$lib/utils/spotify.server';
+import { SpotifyRateLimitError } from '$lib/utils/spotify.server';
+import { ScheduleStore, schedulesEnabled } from '$lib/utils/catalog-schedule-store.server';
 import { createAbortScope } from '$lib/utils/abort';
 import { fetchWithTimeout } from '$lib/utils/request';
 import { isSpotifyTokenAcquisitionError } from '$lib/utils/spotify-token.server';
@@ -22,8 +24,24 @@ const NTS_DOCUMENT_TIMEOUT_MS = 20_000;
 export const load: PageServerLoad = async ({ params, fetch, request, setHeaders }) => {
 	const { show, episode } = params;
 	const scope = createAbortScope(request.signal, SINGLE_EPISODE_TIMEOUT_MS);
+	const store = schedulesEnabled() ? new ScheduleStore() : null;
+	let leaseId: string | undefined;
 
 	try {
+		if (store) {
+			const claim = await store.acquire('manual');
+			if (claim.cooldownUntil)
+				throw new SpotifyRateLimitError(
+					Math.max(1, Math.ceil((claim.cooldownUntil - Date.now()) / 1000)),
+					claim.reason
+				);
+			if (!claim.lease)
+				throw error(
+					503,
+					'An automatic scan is running. Pause automatic scans and try again after its current episode finishes.'
+				);
+			leaseId = claim.lease.id;
+		}
 		// load NTS episode
 		const document = await fetchWithTimeout(
 			fetch as typeof globalThis.fetch,
@@ -63,6 +81,7 @@ export const load: PageServerLoad = async ({ params, fetch, request, setHeaders 
 	} catch (err) {
 		if (isSpotifyRateLimitError(err)) {
 			const reason = getSpotifyRateLimitReason(err);
+			if (store) await store.cooldown(err.retryAfterSeconds, reason);
 			setHeaders({
 				'Retry-After': String(err.retryAfterSeconds),
 				'X-Spotify-Rate-Limit-Reason': reason
@@ -87,11 +106,20 @@ export const load: PageServerLoad = async ({ params, fetch, request, setHeaders 
 		if (err && typeof err === 'object' && 'status' in err && 'body' in err) {
 			const status = (err as { status: unknown }).status;
 			const message = (err as { body?: { message?: unknown } }).body?.message;
-			if (status === 503 && message === 'Spotify application is not configured') throw err;
+			if (
+				status === 503 &&
+				(message === 'Spotify application is not configured' ||
+					(typeof message === 'string' && message.startsWith('An automatic scan is running.')))
+			)
+				throw err;
 		}
 		console.error('Single-episode load failed', 'unexpected_error');
 		throw error(500, `Unable to load document from url: ${routeParamsToNtsUrl(show, episode)}`);
 	} finally {
 		scope.cleanup();
+		if (store && leaseId)
+			await store
+				.release(leaseId)
+				.catch(() => console.error('Scan lock release failed', 'cloud_unavailable'));
 	}
 };

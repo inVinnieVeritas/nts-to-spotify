@@ -15,6 +15,7 @@ import {
 import { getAccessToken } from '$lib/utils/auth.server';
 import { isSpotifyTokenAcquisitionError } from '$lib/utils/spotify-token.server';
 import { createAbortScope, isAbortError, RequestTimeoutError } from '$lib/utils/abort';
+import { ScheduleStore, schedulesEnabled } from '$lib/utils/catalog-schedule-store.server';
 
 const EPISODE_TIMEOUT_MS = 3 * 60 * 1000;
 
@@ -37,7 +38,25 @@ export const POST: RequestHandler = async (event) => {
 	}
 
 	const scope = createAbortScope(request.signal, EPISODE_TIMEOUT_MS);
+	const store = schedulesEnabled() ? new ScheduleStore() : null;
+	let leaseId: string | undefined;
 	try {
+		if (store) {
+			const claim = await store.acquire('manual');
+			if (claim.cooldownUntil) {
+				const seconds = Math.max(1, Math.ceil((claim.cooldownUntil - Date.now()) / 1000));
+				return json(
+					{ error: 'spotify_rate_limited', retryAfterSeconds: seconds, reason: claim.reason },
+					{ status: 429, headers: { 'Retry-After': String(seconds) } }
+				);
+			}
+			if (!claim.lease)
+				return json(
+					{ error: 'spotify_search_unavailable', reason: 'background-scan-active' },
+					{ status: 503 }
+				);
+			leaseId = claim.lease.id;
+		}
 		const token = await getClientCredentials(fetch as typeof globalThis.fetch, scope.signal);
 		if (!token) throw error(503, 'Spotify application is not configured');
 		const tracks = await getNTSEpisodeTracklist(
@@ -58,6 +77,7 @@ export const POST: RequestHandler = async (event) => {
 		return json({ tracks: matches, spotifySessionMetrics: getSpotifySessionMetrics() });
 	} catch (cause) {
 		if (isSpotifyRateLimitError(cause)) {
+			if (store) await store.cooldown(cause.retryAfterSeconds, getSpotifyRateLimitReason(cause));
 			return json(
 				{
 					error: 'spotify_rate_limited',
@@ -107,5 +127,10 @@ export const POST: RequestHandler = async (event) => {
 		throw error(502, 'Unable to match this NTS episode');
 	} finally {
 		scope.cleanup();
+		if (store && leaseId) {
+			await store
+				.release(leaseId)
+				.catch(() => console.error('Scan lock release failed', 'cloud_unavailable'));
+		}
 	}
 };

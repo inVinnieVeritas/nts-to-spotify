@@ -25,7 +25,7 @@ const nodeFiles = [
 ];
 
 export default defineConfig(
-	globalIgnores(['.DS_Store', 'build/**', '.svelte-kit/**', 'package/**']),
+	globalIgnores(['.DS_Store', 'build/**', 'build-jobs/**', '.svelte-kit/**', 'package/**']),
 	{
 		...js.configs.recommended,
 		files: ['**/*.{js,mjs,cjs,ts}']

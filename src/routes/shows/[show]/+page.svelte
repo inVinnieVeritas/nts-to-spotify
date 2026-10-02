@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import CatalogSchedule from '../../../components/catalog-schedule.svelte';
 	import {
 		Badge,
 		Button,
@@ -167,6 +168,7 @@
 	let playlistSyncRecord: CatalogPlaylistSyncRecord | undefined;
 	let scanning = false;
 	let scanMessage = '';
+	let backgroundScanActive = false;
 	let restored = false;
 	let persistenceAvailable = true;
 	let cooldownUntil = 0;
@@ -683,6 +685,7 @@
 				finishRequestMeasurement();
 				updateSpotifySessionMetrics(payload);
 				if (isSystemicSpotifyResponseFailure(payload)) {
+					backgroundScanActive = payload?.reason === 'background-scan-active';
 					episodes[index].status = 'pending';
 					episodes[index].error = undefined;
 					episodes = episodes;
@@ -825,6 +828,7 @@
 		pausedByRateLimit = false;
 		automaticRateLimitCount = 0;
 		scanMessage = '';
+		backgroundScanActive = false;
 		const sessionPersistence = beginActiveScanSession();
 		const currentScanController = new AbortController();
 		scanController = currentScanController;
@@ -890,6 +894,9 @@
 					: 'completed';
 		finalizeActiveScanSession(sessionOutcome);
 		if (cancelRequested) scanMessage = 'Scan cancelled. Completed episodes were saved.';
+		else if (backgroundScanActive)
+			scanMessage =
+				'An automatic scan is running. Pause automatic scans and try again once its current episode finishes.';
 		else if (systemicSpotifyFailure)
 			scanMessage = 'Spotify search is unavailable. Scan paused; pending episodes can be retried.';
 		else if (pausedByRateLimit)
@@ -1649,6 +1656,11 @@
 						{/if}
 					</div>
 				{/if}
+				<CatalogSchedule
+					showAlias={activeShowAlias}
+					cloudConnected={cloudState === 'active'}
+					{scanning}
+				/>
 				<p class="font-small-beast">
 					{reviewTrackCount} tracks need review · {duplicateCount} exact duplicate{duplicateCount ===
 					1
