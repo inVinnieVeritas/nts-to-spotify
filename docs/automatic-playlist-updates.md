@@ -142,6 +142,26 @@ of any device, and a persistent last-100-event history. Subscription capabilitie
 never returned by the history API. Chrome/FCM and Firefox push endpoints are allowlisted; arbitrary
 endpoints/private addresses are not accepted. Safari is not currently supported.
 
+The registration control checks this browser's permission and local subscription against the saved
+server device ID. It shows **Notifications enabled on this device** only when all three match,
+including after reload. A saved device entry on its own is not evidence that the current browser
+is registered. Removing the current device makes the enable action available again; blocked browser
+permission directs the user to the site's browser settings.
+
+**Send test notification** sends only to the current registered device through the real encrypted
+Web Push path. It requires the permitted hosted session and same-origin JSON request. A persistent
+installation-wide 30-second CAS cooldown bounds concurrent and repeated tests, including failed sends.
+Expired subscriptions are removed; other network errors are sanitized and never automatically retried.
+The test does not create a catalogue event, consume event-history capacity, or claim real catalogue
+alerts. It changes no scan or playlist settings. The UI reports push-service acceptance, not proof of
+phone delivery. Tapping the test opens the protected homepage. The notification worker activates its
+updated script before a test dispatch, with a bounded wait and no application-page caching.
+
+To check delivery after deploying the updated image, reload the homepage in Pixel Chrome, confirm the
+registered status, click **Send test notification**, then check Android's notification shade and tap
+that notification. Repeat on the PC if desired after at least 30 seconds. Actual phone/browser delivery
+still needs this live acceptance check; mocked tests cannot establish it.
+
 Stable per-episode event IDs distinguish discovery from matches-ready. Up to 10,000 event IDs are
 remembered even after rolling off the visible history (capacity exhaustion fails closed rather than
 reusing IDs). Firestore claims each device/event **before** a bounded send. At most ten sends per daily

@@ -1,6 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import {
+		notificationDeviceState,
+		prepareNotificationWorker,
+		type NotificationDeviceState
+	} from '$lib/utils/catalog-notifications.client';
 	import Button from './button.svelte';
+	let deviceState: NotificationDeviceState = { status: 'unknown', id: null };
+	let checking = true;
+	let testRetryUntil = 0;
 	let visible = false;
 	let busy = false;
 	let message = '';
@@ -8,7 +16,27 @@
 	let capacityRemaining = 10000;
 	let events: { id: string; showAlias: string; kind: string; createdAt: number }[] = [];
 	let devices: { id: string; label: string }[] = [];
+	async function checkDevice() {
+		deviceState = { status: 'unknown', id: null };
+		if (
+			!('serviceWorker' in navigator) ||
+			!('PushManager' in window) ||
+			!('Notification' in window)
+		) {
+			deviceState = { status: 'unsupported', id: null };
+			return;
+		}
+		// Page loads inspect permission; only the explicit enable button requests it.
+		let endpoint: string | null = null;
+		if (Notification.permission === 'granted') {
+			const registration = await navigator.serviceWorker.getRegistration('/');
+			endpoint = (await registration?.pushManager.getSubscription())?.endpoint ?? null;
+		}
+		deviceState = await notificationDeviceState(Notification.permission, endpoint, devices);
+	}
 	async function load() {
+		if (checking && visible) return;
+		checking = true;
 		if (location.origin !== 'https://nts2spotify.vincentvanderveken.com') return;
 		try {
 			const response = await fetch('/api/catalog-notifications', { cache: 'no-store' });
@@ -21,8 +49,12 @@
 			publicKey = body.publicKey;
 			capacityRemaining = Number.isSafeInteger(body.capacityRemaining) ? body.capacityRemaining : 0;
 			visible = true;
+			await checkDevice();
 		} catch {
-			message = 'Could not load notification history.';
+			deviceState = { status: 'unknown', id: null };
+			message = 'Could not check notification history or this device. Try refreshing.';
+		} finally {
+			checking = false;
 		}
 	}
 	async function save(body: unknown) {
@@ -34,12 +66,13 @@
 		if (!response.ok) throw new Error();
 	}
 	async function subscribe() {
-		if (busy || !publicKey) return;
+		if (busy || checking || !publicKey || deviceState.status !== 'unregistered') return;
 		busy = true;
 		message = '';
 		try {
 			if (!('serviceWorker' in navigator) || !('PushManager' in window)) throw new Error();
 			if ((await Notification.requestPermission()) !== 'granted') {
+				await checkDevice();
 				message = 'Notifications were not allowed. You can still use the history below.';
 				return;
 			}
@@ -48,8 +81,7 @@
 				'Chrome device'
 			);
 			if (!label) return;
-			await navigator.serviceWorker.register('/notifications-worker.js', { scope: '/' });
-			const registration = await navigator.serviceWorker.ready;
+			const registration = await prepareNotificationWorker();
 			const key = Uint8Array.from(
 				atob(
 					publicKey.replace(/-/g, '+').replace(/_/g, '/') +
@@ -74,8 +106,65 @@
 			busy = false;
 		}
 	}
+	async function testNotification() {
+		if (busy || checking || deviceState.status !== 'registered' || !publicKey) return;
+		if (testRetryUntil > Date.now()) {
+			message = `Wait ${Math.ceil((testRetryUntil - Date.now()) / 1000)} seconds before another test.`;
+			return;
+		}
+		busy = true;
+		message = 'Sending test notification…';
+		try {
+			await prepareNotificationWorker();
+			await checkDevice();
+			if (!deviceState.id) {
+				message = 'This device is no longer registered. Enable notifications again.';
+				return;
+			}
+			const response = await fetch('/api/catalog-notifications', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ operation: 'test', id: deviceState.id })
+			});
+			if (!response.ok) throw new Error();
+			const result = await response.json();
+			if (result.status === 'accepted') {
+				testRetryUntil = Date.now() + 30000;
+				message =
+					'Test accepted by the push service. Check notifications on this device; delivery may be delayed. The test does not add a catalogue event.';
+			} else if (
+				result.status === 'rate-limited' &&
+				Number.isSafeInteger(result.retryAfterSeconds) &&
+				result.retryAfterSeconds > 0 &&
+				result.retryAfterSeconds <= 30
+			) {
+				testRetryUntil = Date.now() + result.retryAfterSeconds * 1000;
+				message = `Wait ${result.retryAfterSeconds} seconds before another test.`;
+			} else if (result.status === 'expired' || result.status === 'not-registered') {
+				if (result.status === 'expired') {
+					const registration = await navigator.serviceWorker.getRegistration('/');
+					await (await registration?.pushManager.getSubscription())?.unsubscribe();
+				}
+				await load();
+				message =
+					'This device registration has expired or was removed. Enable notifications again.';
+			} else {
+				message =
+					'Test could not be confirmed. Check browser permissions and try again in 30 seconds.';
+			}
+		} catch {
+			message = 'Test could not be confirmed. Refresh this page and try again in 30 seconds.';
+		} finally {
+			busy = false;
+		}
+	}
+
 	async function remove(id: string) {
-		if (busy || !confirm('Stop notifications to this device? Notification history will remain.'))
+		if (
+			busy ||
+			checking ||
+			!confirm('Stop notifications to this device? Notification history will remain.')
+		)
 			return;
 		busy = true;
 		try {
@@ -98,12 +187,40 @@
 			Browser push works on registered devices, including Pixel Chrome. No email or paid
 			notification service. The last 100 events are kept here independently of delivery.
 		</p>
-		<Button size="sm" variant="outline" disabled={busy || !publicKey} on:click={subscribe}
-			>Enable notifications on this device</Button
+		<Button
+			size="sm"
+			variant="outline"
+			disabled={busy ||
+				checking ||
+				!publicKey ||
+				['registered', 'blocked', 'unsupported', 'unknown'].includes(deviceState.status)}
+			on:click={subscribe}
+			>{checking
+				? 'Checking this device…'
+				: deviceState.status === 'registered'
+					? 'Notifications enabled on this device'
+					: deviceState.status === 'blocked'
+						? 'Notifications blocked on this device'
+						: deviceState.status === 'unsupported'
+							? 'Browser notifications unavailable'
+							: deviceState.status === 'unknown'
+								? 'Device status unavailable'
+								: 'Enable notifications on this device'}</Button
 		>
-		<Button size="sm" variant="outline" disabled={busy} on:click={load}
+		<Button size="sm" variant="outline" disabled={busy || checking} on:click={load}
 			>Refresh notification history</Button
 		>
+		{#if deviceState.status === 'registered'}
+			<Button
+				size="sm"
+				variant="outline"
+				disabled={busy || checking || !publicKey}
+				on:click={testNotification}>Send test notification</Button
+			>
+			<p>Notifications are enabled on this device. Use the test button to check delivery.</p>
+		{:else if deviceState.status === 'blocked'}
+			<p>Allow notifications in this site's browser settings, then refresh this page.</p>
+		{/if}
 		{#if !publicKey}<p>Browser push has not been configured on the server.</p>{/if}
 		{#if capacityRemaining === 0}<p role="status">
 				Notification event capacity reached. New alerts are paused; contact the installation
@@ -112,7 +229,7 @@
 		<ul>
 			{#each devices as device (device.id)}<li>
 					{device.label}
-					<button type="button" disabled={busy} on:click={() => remove(device.id)}
+					<button type="button" disabled={busy || checking} on:click={() => remove(device.id)}
 						>Remove device</button
 					>
 				</li>{/each}
