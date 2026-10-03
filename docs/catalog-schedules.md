@@ -1,10 +1,12 @@
 # Opt-in scheduled catalogue scans
 
 This feature discovers episodes and saves matching results to the existing owner's Firestore
-catalogue while the browser and PC are off. It never creates, links, reorders, or writes a Spotify
-playlist. Reviewed selections, playlist settings, and links remain part of cloud progress.
-Every catalogue starts with scheduling off. No Spotify user refresh token is stored by this feature:
-the worker uses the same application credentials as manual matching.
+catalogue while the browser and PC are off. Matching uses application credentials and never creates
+or adopts a Spotify playlist. Reviewed selections, playlist settings, and links remain in cloud progress.
+Every catalogue starts with scheduling off. A separate playlist-update opt-in can write an existing
+app-created linked playlist using separately authorized, encrypted owner credentials; it remains off
+by default. See [automatic playlist updates and browser push](automatic-playlist-updates.md) before
+enabling that feature. The scan frequency, daily trigger and matching batch limits are unchanged.
 
 ## How it runs
 

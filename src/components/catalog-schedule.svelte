@@ -103,7 +103,7 @@
 		<h3>Automatic catalogue scans</h3>
 		<p>
 			Runs while your browser is closed and uses your shared Spotify search allowance. Matches save
-			to cloud for review. Spotify playlists are updated only when you choose to apply changes.
+			to cloud for review. Playlist updates remain manual unless separately enabled below.
 		</p>
 		<label for="catalogue-schedule-frequency">Check for new episodes</label>
 		<select id="catalogue-schedule-frequency" bind:value={frequency} disabled={busy || scanning}>

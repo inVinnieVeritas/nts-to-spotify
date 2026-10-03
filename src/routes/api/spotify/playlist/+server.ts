@@ -19,7 +19,9 @@ import {
 	compareSpotifyPlaylist,
 	canonicalSpotifyTrackUri,
 	fingerprintSpotifyPlaylistPreview,
+	fingerprintSpotifyPlaylist,
 	isSpotifyPlaylistFingerprint,
+	spotifyPlaylistDescriptionMatches,
 	spotifyPlaylistItemTrackUri
 } from '$lib/utils/playlist-preview.server';
 
@@ -66,7 +68,7 @@ type PlaylistVerifyRequest = { operation: 'verify'; playlistId: string };
 type PlaylistSettleRequest = Omit<
 	PlaylistAppendRequest,
 	'operation' | 'operationId' | 'targetFingerprint' | 'position' | 'totalTrackCount' | 'tracks'
-> & { operation: 'settle' };
+> & { operation: 'settle'; expectedTracks?: string[] };
 type PlaylistRequest =
 	| PlaylistCreateRequest
 	| PlaylistPreviewRequest
@@ -176,7 +178,10 @@ const readBoundedPlaylistRequestBody = async (request: Request, signal: AbortSig
 	}
 };
 
-const parseRequest = async (request: Request, signal: AbortSignal): Promise<PlaylistRequest> => {
+export const _parseRequest = async (
+	request: Request,
+	signal: AbortSignal
+): Promise<PlaylistRequest> => {
 	let value: unknown;
 	try {
 		value = JSON.parse(await readBoundedPlaylistRequestBody(request, signal));
@@ -202,7 +207,11 @@ const parseRequest = async (request: Request, signal: AbortSignal): Promise<Play
 			value.name.length > 100 ||
 			typeof value.description !== 'string' ||
 			value.description.length > 300 ||
-			typeof value.public !== 'boolean'
+			typeof value.public !== 'boolean' ||
+			(value.expectedTracks !== undefined &&
+				(!Array.isArray(value.expectedTracks) ||
+					value.expectedTracks.length > SPOTIFY_PLAYLIST_MAX_TRACKS ||
+					!value.expectedTracks.every((uri: unknown) => canonicalSpotifyTrackUri(uri))))
 		)
 			throw new SpotifyPlaylistFailure('request-rejected');
 		return {
@@ -211,7 +220,10 @@ const parseRequest = async (request: Request, signal: AbortSignal): Promise<Play
 			expectedSnapshotId: value.expectedSnapshotId,
 			name: value.name.trim(),
 			description: value.description,
-			public: value.public
+			public: value.public,
+			...(value.expectedTracks === undefined
+				? {}
+				: { expectedTracks: value.expectedTracks as string[] })
 		};
 	}
 	if (value.operation === 'append') {
@@ -612,10 +624,15 @@ const readOwnedPlaylistState = async (
 	return { ...metadata, items };
 };
 
-const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signal: AbortSignal) => {
+export const _handlePlaylistRequest = async (
+	event: Parameters<RequestHandler>[0],
+	signal: AbortSignal,
+	background?: { token: string; owner: string },
+	beforeMutation?: () => Promise<void>
+) => {
 	let payload: PlaylistRequest;
 	try {
-		payload = await parseRequest(event.request, signal);
+		payload = await _parseRequest(event.request, signal);
 	} catch (cause) {
 		if (isAbortError(cause)) return safeErrorResponse(new SpotifyPlaylistFailure('timeout'), false);
 		return safeErrorResponse(
@@ -628,7 +645,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 
 	let token: string | null;
 	try {
-		token = await getAccessToken(event);
+		token = background?.token ?? (await getAccessToken(event));
 	} catch {
 		return safeErrorResponse(new SpotifyPlaylistFailure('authentication'), false);
 	}
@@ -654,6 +671,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 			throw new SpotifyPlaylistFailure('invalid-response');
 		}
 		const userId = profileValue.id;
+		if (background && userId !== background.owner) throw new SpotifyPlaylistFailure('ownership');
 
 		if (payload.operation === 'verify') {
 			await verifyOwnership(event, headers, userId, payload.playlistId, signal);
@@ -676,10 +694,13 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 				playlistId: payload.playlistId,
 				mode: 'preview',
 				previewFingerprint: fingerprintSpotifyPlaylistPreview(current, payload),
+				stateFingerprint: fingerprintSpotifyPlaylist(current),
+				snapshotId: current.snapshotId,
 				...preview
 			});
 		}
 		if (payload.operation === 'create') {
+			await beforeMutation?.();
 			creationDispatched = true;
 			const createdValue = await requestSpotify(
 				event.fetch,
@@ -715,15 +736,41 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 				payload.playlistId,
 				signal
 			);
-			if (
-				current.snapshotId !== payload.expectedSnapshotId ||
-				current.name !== payload.name ||
-				current.description !== payload.description ||
-				current.public !== payload.public
-			) {
+			const mismatches: string[] = [];
+			if (current.snapshotId !== payload.expectedSnapshotId) mismatches.push('snapshot');
+			if (current.name !== payload.name) mismatches.push('title');
+			if (!spotifyPlaylistDescriptionMatches(current.description, payload.description))
+				mismatches.push('description');
+			if (current.public !== payload.public) mismatches.push('visibility');
+			if (payload.expectedTracks && mismatches.length === 0) {
+				// Explicit recovery verifies the complete acknowledged prefix, not just
+				// membership/counts. Re-read metadata after pagination to fence changes.
+				const items = await readPlaylistItems(event, headers, payload.playlistId, signal);
+				if (
+					items.length !== payload.expectedTracks.length ||
+					items.some((uri, index) => uri !== payload.expectedTracks![index])
+				)
+					mismatches.push('tracks');
+				const after = await readOwnedPlaylistSnapshot(
+					event,
+					headers,
+					userId,
+					payload.playlistId,
+					signal
+				);
+				if (after.snapshotId !== current.snapshotId) mismatches.push('snapshot');
+				if (after.name !== current.name) mismatches.push('title');
+				if (after.description !== current.description) mismatches.push('description');
+				if (after.public !== current.public) mismatches.push('visibility');
+			}
+			if (mismatches.length > 0) {
 				// A mismatching read alone cannot distinguish propagation from an external edit.
 				return json(
-					{ error: 'playlist_settling', retryAfterSeconds: 5 },
+					{
+						error: 'playlist_settling',
+						retryAfterSeconds: 5,
+						mismatches: [...new Set(mismatches)]
+					},
 					{ status: 409, headers: { 'Retry-After': '5' } }
 				);
 			}
@@ -744,11 +791,12 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 			if (
 				currentSnapshot.snapshotId !== payload.expectedSnapshotId ||
 				currentSnapshot.name !== payload.name ||
-				currentSnapshot.description !== payload.description ||
+				!spotifyPlaylistDescriptionMatches(currentSnapshot.description, payload.description) ||
 				currentSnapshot.public !== payload.public
 			) {
 				throw new SpotifyPlaylistFailure('stale-sync');
 			}
+			await beforeMutation?.();
 			mutationStarted = true;
 			const mutation = await requestSpotify(
 				event.fetch,
@@ -783,6 +831,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 			if (fingerprintSpotifyPlaylistPreview(current, payload) !== payload.previewFingerprint) {
 				throw new SpotifyPlaylistFailure('stale-preview');
 			}
+			await beforeMutation?.();
 			mutationStarted = true;
 			await requestSpotify(
 				event.fetch,
@@ -799,6 +848,7 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 				signal,
 				{ notFound: true }
 			);
+			await beforeMutation?.();
 			const replacement = await requestSpotify(
 				event.fetch,
 				`https://api.spotify.com/v1/playlists/${payload.playlistId}/items`,
@@ -837,7 +887,13 @@ const handlePlaylistRequest = async (event: Parameters<RequestHandler>[0], signa
 export const POST: RequestHandler = async (event) => {
 	const scope = createAbortScope(event.request.signal, SPOTIFY_PLAYLIST_ROUTE_TIMEOUT_MS);
 	try {
-		return await handlePlaylistRequest(event, scope.signal);
+		const { coordinateManualPlaylistRequest } =
+			await import('$lib/utils/catalog-playlist-automation.server');
+		return await coordinateManualPlaylistRequest(event, scope.signal, (guard) =>
+			_handlePlaylistRequest(event, scope.signal, undefined, guard)
+		);
+	} catch {
+		return json({ error: 'playlist_coordination_unavailable' }, { status: 503 });
 	} finally {
 		scope.cleanup();
 	}

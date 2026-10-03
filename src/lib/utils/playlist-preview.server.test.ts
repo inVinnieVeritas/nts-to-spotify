@@ -29,6 +29,72 @@ const target = (tracks: string[], overrides: Record<string, unknown> = {}) => ({
 });
 
 describe('Spotify playlist preview comparison', () => {
+	it('accepts only the observed one-pass apostrophe representation, keeping raw fingerprints', () => {
+		const description =
+			"A comprehensive archive of tracks played on Jim O'Rourke on NTS Radio, covering broadcasts from 20 January 2022 through 6 August 2026. Some tracks unavailable on Spotify may be missing.";
+		const encoded = description.replaceAll("'", '&#x27;');
+		const state = current([uri(1)], { description: encoded });
+		expect(compareSpotifyPlaylist(state, target([uri(1)], { description }))).toMatchObject({
+			descriptionChanged: false,
+			synchronized: true
+		});
+		expect(fingerprintSpotifyPlaylist(state)).not.toBe(
+			fingerprintSpotifyPlaylist({ ...state, description })
+		);
+		expect(fingerprintSpotifyPlaylistPreview(state, target([uri(1)], { description }))).not.toBe(
+			fingerprintSpotifyPlaylistPreview(state, target([uri(1)], { description: encoded }))
+		);
+		for (const [actual, expected, changed] of [
+			['Literal &#x27; text', 'Literal &#x27; text', false],
+			["Literal ' text", 'Literal &#x27; text', true],
+			['Literal &amp;#x27; text', 'Literal &#x27; text', true],
+			[encoded.replaceAll('&#x27;', '&amp;#x27;'), description, true],
+			[encoded + ' External edit', description, true],
+			[encoded + ' ', description, true],
+			['Jim O&#39;Rourke', "Jim O'Rourke", true],
+			['<b>Archive</b>', 'Archive', true],
+			['A &amp; B', 'A & B', true],
+			['Already &#x27; plus &#x27;', "Already &#x27; plus '", false]
+		] as const) {
+			expect(
+				compareSpotifyPlaylist(
+					current([uri(1)], { description: actual }),
+					target([uri(1)], { description: expected })
+				).descriptionChanged
+			).toBe(changed);
+		}
+	});
+	it('does not infer description equivalence from escaped text or strip metadata', () => {
+		const plain = 'Jim O\'Rourke & guests <archive> "quoted"';
+		for (const encoded of [
+			'Jim O&#x27;Rourke &amp; guests &lt;archive&gt; &quot;quoted&quot;',
+			'Jim O&#39;Rourke &#38; guests &#60;archive&#62; &#34;quoted&#34;'
+		]) {
+			expect(
+				compareSpotifyPlaylist(
+					current([uri(1)], { description: encoded }),
+					target([uri(1)], { description: plain })
+				).synchronized
+			).toBe(false);
+			expect(fingerprintSpotifyPlaylist(current([uri(1)], { description: encoded }))).not.toBe(
+				fingerprintSpotifyPlaylist(current([uri(1)], { description: plain }))
+			);
+		}
+		for (const [actual, requested] of [
+			['A &amp;amp; B', 'A & B'],
+			['A & B', 'A &amp; B'],
+			['<b>Archive</b>', 'Archive'],
+			['Different description', 'Description'],
+			['Description ', 'Description'],
+			['&#65;rchive', 'Archive']
+		])
+			expect(
+				compareSpotifyPlaylist(
+					current([uri(1)], { description: actual }),
+					target([uri(1)], { description: requested })
+				).descriptionChanged
+			).toBe(true);
+	});
 	it('canonicalizes only exact Spotify track URIs from valid non-local track items', () => {
 		const trackUri = uri(1);
 		expect(canonicalSpotifyTrackUri(trackUri)).toBe(trackUri);

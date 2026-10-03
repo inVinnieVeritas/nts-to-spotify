@@ -64,7 +64,7 @@ describe('Cloud Run startup boundary', () => {
 		expect(docker).not.toMatch(/COPY\s+\.\s/);
 		expect(docker).toContain('USER node');
 		expect(docker).not.toContain('ARG SPOTIFY');
-		expect(readFileSync('.dockerignore', 'utf8')).toContain('\n**\n');
+		expect(readFileSync('.dockerignore', 'utf8').split(/\r?\n/)).toContain('**');
 		expect(readFileSync('.gcloudignore', 'utf8')).toContain('#!include:.dockerignore');
 	});
 });

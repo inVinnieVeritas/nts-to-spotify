@@ -146,8 +146,8 @@ describe('private hosted staging boundary (no live services)', () => {
 		expect(hasHostedSession(f.event, now)).toBe(false);
 	});
 
-	it('accepts authorized reads but rejects cross-site and missing-origin writes', async () => {
-		for (const origin of [undefined, 'https://attacker.invalid']) {
+	it('accepts authorized reads but rejects cross-site, null and missing-origin writes', async () => {
+		for (const origin of [undefined, 'null', 'https://attacker.invalid']) {
 			const f = fixture('/api/spotify/playlist', 'POST', origin);
 			authorize(f);
 			const resolve = vi.fn();
@@ -157,6 +157,68 @@ describe('private hosted staging boundary (no live services)', () => {
 		const f = fixture('/api/spotify/playlist', 'POST', STAGING_ORIGIN);
 		authorize(f);
 		expect(await (await invoke(f.event)).text()).toBe('allowed');
+	});
+
+	it.each(['/', '/login?code=dummy-code&state=dummy-state', '/logout'])(
+		'uses origin-only referrers on %s without suppressing native POST origins',
+		async (path) => {
+			const f = fixture(path);
+			authorize(f);
+			const response = await invoke(f.event);
+			expect(response.headers.get('referrer-policy')).toBe('strict-origin');
+			expect(response.headers.get('cache-control')).toBe('no-store');
+		}
+	);
+
+	it('also sets origin-only referrers on the anonymous sign-in page and callback redirects/errors', async () => {
+		expect((await invoke(fixture().event)).headers.get('referrer-policy')).toBe('strict-origin');
+		for (const status of [303, 400]) {
+			const resolve = vi.fn(async () => new Response(null, { status }));
+			const response = await invoke(fixture('/login?code=dummy&state=dummy').event, resolve);
+			expect(response.status).toBe(status);
+			expect(response.headers.get('referrer-policy')).toBe('strict-origin');
+		}
+	});
+
+	it.each([undefined, 'null', 'https://attacker.invalid'])(
+		'rejects logout with origin %s before touching authentication cookies',
+		async (origin) => {
+			const f = fixture('/logout', 'POST', origin);
+			f.event.request.headers.set('content-type', 'application/x-www-form-urlencoded');
+			authorize(f);
+			f.writes.length = 0;
+			const resolve = vi.fn(async () => logout(f.event as Parameters<typeof logout>[0]));
+			expect((await invoke(f.event, resolve)).status).toBe(403);
+			expect(resolve).not.toHaveBeenCalled();
+			expect(f.writes).toEqual([]);
+			expect(hasHostedSession(f.event)).toBe(true);
+		}
+	);
+
+	it('allows exact-origin logout and expires all three secure authentication cookies', async () => {
+		const f = fixture('/logout', 'POST', STAGING_ORIGIN);
+		f.event.request.headers.set('content-type', 'application/x-www-form-urlencoded');
+		authorize(f);
+		f.writes.length = 0;
+		const resolve = vi.fn(async () => logout(f.event as Parameters<typeof logout>[0]));
+		await expect(invoke(f.event, resolve)).rejects.toMatchObject({ status: 303, location: '/' });
+		expect(resolve).toHaveBeenCalledOnce();
+		expect(hasHostedSession(f.event)).toBe(false);
+		expect(f.writes.map(({ name }) => name)).toEqual([
+			HOSTED_SESSION_COOKIE,
+			ACCESS_TOKEN_KEY,
+			REFRESH_TOKEN_KEY
+		]);
+		for (const write of f.writes) {
+			expect(write.value).toBe('');
+			expect(write.options).toMatchObject({
+				httpOnly: true,
+				secure: true,
+				sameSite: 'lax',
+				path: '/',
+				maxAge: 0
+			});
+		}
 	});
 
 	it('does not allow a noncanonical origin even with a valid authorization proof', async () => {

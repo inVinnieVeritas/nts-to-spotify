@@ -6,7 +6,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 	if (!configuration) return resolve(event);
 	const headers = {
 		'Cache-Control': 'no-store',
-		'Referrer-Policy': 'no-referrer',
+		// no-referrer makes native form POSTs send Origin: null. Keep their origin
+		// for CSRF checks, but never disclose paths or OAuth callback query values.
+		'Referrer-Policy': 'strict-origin',
 		'X-Content-Type-Options': 'nosniff'
 	};
 	// adapter-node's fixed ORIGIN also becomes event.url for requests to run.app.

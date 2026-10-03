@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import CatalogSchedule from '../../../components/catalog-schedule.svelte';
+	import CatalogPlaylistAutomation from '../../../components/catalog-playlist-automation.svelte';
 	import {
 		Badge,
 		Button,
@@ -1657,6 +1658,11 @@
 					</div>
 				{/if}
 				<CatalogSchedule
+					showAlias={activeShowAlias}
+					cloudConnected={cloudState === 'active'}
+					{scanning}
+				/>
+				<CatalogPlaylistAutomation
 					showAlias={activeShowAlias}
 					cloudConnected={cloudState === 'active'}
 					{scanning}

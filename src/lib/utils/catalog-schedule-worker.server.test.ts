@@ -92,6 +92,54 @@ async function fixture(count = 2) {
 	};
 }
 describe('unattended catalogue batches', () => {
+	it('runs the playlist boundary only after saved matching releases the scan lease', async () => {
+		const f = await fixture(1);
+		const notifications = vi.fn(async () => {});
+		f.deps.notify = notifications;
+		f.deps.afterBatch = vi.fn(async (show) => {
+			expect(show).toBe('channeling');
+			expect((await f.load())!.progress.episodes['episode-0'].status).toBe('done');
+			const claim = await f.store.acquire('playlist');
+			expect(claim.lease).toBeDefined();
+			await f.store.release(claim.lease!.id);
+			return undefined;
+		});
+		await runScheduledScan(f.deps);
+		expect(f.deps.afterBatch).toHaveBeenCalledTimes(1);
+		expect(notifications).toHaveBeenCalledWith('matches-ready', 'channeling', ['episode-0']);
+	});
+	it('does not enter the playlist boundary after a matching failure or cooldown', async () => {
+		const f = await fixture(1);
+		f.deps.afterBatch = vi.fn();
+		f.deps.match = async () => {
+			throw new SpotifyRateLimitError(30785);
+		};
+		await runScheduledScan(f.deps);
+		expect(f.deps.afterBatch).not.toHaveBeenCalled();
+	});
+	it('saves only confident new choices while leaving uncertain candidates for review', async () => {
+		const f = await fixture(1);
+		f.deps.match = async () =>
+			[true, false].map((confident, i) => ({
+				artist: 'Fixture',
+				title: `Track ${i}`,
+				confident,
+				fallback: !confident,
+				matches: [
+					{
+						artist: 'Fixture',
+						title: `Track ${i}`,
+						uri: `spotify:track:${String(i).padStart(22, '0')}`,
+						href: `https://open.spotify.com/track/${String(i).padStart(22, '0')}`
+					}
+				]
+			}));
+		await runScheduledScan(f.deps);
+		expect((await f.load())!.progress.episodes['episode-0'].tracks.map((t) => t.checked)).toEqual([
+			true,
+			false
+		]);
+	});
 	afterEach(() => vi.restoreAllMocks());
 	it('is opt-in and does no progress/NTS/Spotify work when disabled or not due', async () => {
 		const f = await fixture();

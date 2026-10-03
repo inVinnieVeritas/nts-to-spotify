@@ -14,7 +14,7 @@ import type { SpotifyRateLimitReason } from './spotify.server';
 const FIRESTORE = 'https://firestore.googleapis.com/v1/';
 export const schedulesEnabled = () => env.NTS_CATALOG_SCHEDULES === '1';
 type Stored<T> = { version: string; value: T };
-type Lease = { id: string; kind: 'manual' | 'scheduled'; until: number };
+type Lease = { id: string; kind: 'manual' | 'scheduled' | 'playlist'; until: number };
 type Coordination = { leases: Lease[]; cooldownUntil: number; reason: SpotifyRateLimitReason };
 const isCoordination = (value: unknown): value is Coordination => {
 	if (!value || typeof value !== 'object') return false;
@@ -29,7 +29,7 @@ const isCoordination = (value: unknown): value is Coordination => {
 			(l) =>
 				typeof l.id === 'string' &&
 				l.id.length <= 100 &&
-				['manual', 'scheduled'].includes(l.kind) &&
+				['manual', 'scheduled', 'playlist'].includes(l.kind) &&
 				Number.isSafeInteger(l.until) &&
 				l.until > 0
 		)
@@ -81,9 +81,19 @@ export class ScheduleStore {
 				throw new CloudProgressError('conflict');
 			throw new CloudProgressError('unavailable');
 		}
+		const committed = await response.json();
+		const nextVersion = committed.writeResults?.[0]?.updateTime;
+		if (typeof nextVersion !== 'string') throw new CloudProgressError('unavailable');
+		return nextVersion;
 	}
 	getSchedule(show: string) {
 		return this.read(this.path('schedules', show), isCatalogSchedule);
+	}
+	getAutomation<T>(id: string, validate: (value: unknown) => value is T) {
+		return this.read(this.path('automation', id), validate);
+	}
+	putAutomation<T>(id: string, value: T, version: string | null) {
+		return this.write(this.path('automation', id), value, version);
 	}
 	async putSchedule(schedule: CatalogSchedule, version: string | null) {
 		if (!isCatalogSchedule(schedule)) throw new CloudProgressError('invalid');
@@ -139,8 +149,8 @@ export class ScheduleStore {
 			}
 			const leases = c.leases.filter((l) => l.until > now);
 			if (
-				leases.some((l) => l.kind === 'scheduled') ||
-				(kind === 'scheduled' && leases.length) ||
+				leases.some((l) => l.kind !== 'manual') ||
+				(kind !== 'manual' && leases.length) ||
 				leases.length >= 4
 			)
 				return null;
@@ -152,6 +162,19 @@ export class ScheduleStore {
 	async owns(id: string, now = Date.now()) {
 		const stored = await this.read(this.path('automation', 'scan-coordination'), isCoordination);
 		return stored?.value.leases.some((l) => l.id === id && l.until > now + 30_000) ?? false;
+	}
+	async renew(id: string, now = Date.now()) {
+		let renewed = false;
+		await this.changeCoordination((c) => {
+			renewed = false;
+			if (!c.leases.some((l) => l.id === id && l.until > now)) return null;
+			renewed = true;
+			return {
+				...c,
+				leases: c.leases.map((l) => (l.id === id ? { ...l, until: now + 5 * 60_000 } : l))
+			};
+		});
+		if (!renewed) throw new CloudProgressError('conflict');
 	}
 	async release(id: string) {
 		await this.changeCoordination((c) => ({ ...c, leases: c.leases.filter((l) => l.id !== id) }));

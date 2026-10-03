@@ -36,6 +36,10 @@ export default defineConfig(
 	})),
 	svelte.configs.base,
 	{
+		files: ['static/notifications-worker.js'],
+		languageOptions: { globals: globals.serviceworker }
+	},
+	{
 		files: browserFiles,
 		languageOptions: {
 			globals: globals.browser

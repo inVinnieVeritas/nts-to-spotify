@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import CatalogNotifications from '../components/catalog-notifications.svelte';
 	import { Button, Divider, LoginWithSpotify, Logo, Panel } from '$components';
 	import { onDestroy, onMount } from 'svelte';
 	import {
@@ -438,6 +439,7 @@
 			</p>
 		</div>
 	</div>
+	<CatalogNotifications />
 </Panel>
 
 <style lang="postcss">
