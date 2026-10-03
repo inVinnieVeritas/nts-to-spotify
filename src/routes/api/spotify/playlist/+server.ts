@@ -21,6 +21,7 @@ import {
 	fingerprintSpotifyPlaylistPreview,
 	fingerprintSpotifyPlaylist,
 	isSpotifyPlaylistFingerprint,
+	spotifyPlaylistDescriptionMatches,
 	spotifyPlaylistItemTrackUri
 } from '$lib/utils/playlist-preview.server';
 
@@ -738,7 +739,8 @@ export const _handlePlaylistRequest = async (
 			const mismatches: string[] = [];
 			if (current.snapshotId !== payload.expectedSnapshotId) mismatches.push('snapshot');
 			if (current.name !== payload.name) mismatches.push('title');
-			if (current.description !== payload.description) mismatches.push('description');
+			if (!spotifyPlaylistDescriptionMatches(current.description, payload.description))
+				mismatches.push('description');
 			if (current.public !== payload.public) mismatches.push('visibility');
 			if (payload.expectedTracks && mismatches.length === 0) {
 				// Explicit recovery verifies the complete acknowledged prefix, not just
@@ -789,7 +791,7 @@ export const _handlePlaylistRequest = async (
 			if (
 				currentSnapshot.snapshotId !== payload.expectedSnapshotId ||
 				currentSnapshot.name !== payload.name ||
-				currentSnapshot.description !== payload.description ||
+				!spotifyPlaylistDescriptionMatches(currentSnapshot.description, payload.description) ||
 				currentSnapshot.public !== payload.public
 			) {
 				throw new SpotifyPlaylistFailure('stale-sync');

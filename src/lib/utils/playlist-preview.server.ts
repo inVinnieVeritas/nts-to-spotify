@@ -69,6 +69,12 @@ const retainedSequence = (
 const arraysEqual = <T>(left: readonly T[], right: readonly T[]) =>
 	left.length === right.length && left.every((value, index) => value === right[index]);
 
+// Spotify has been observed returning ASCII apostrophes as &#x27;. Compare the
+// read value to that single representation of the requested text; never decode
+// either string, strip HTML, or normalize raw fingerprints/read-to-read fences.
+export const spotifyPlaylistDescriptionMatches = (actual: string, requested: string): boolean =>
+	actual === requested || actual === requested.replaceAll("'", '&#x27;');
+
 export const compareSpotifyPlaylist = (
 	current: SpotifyPlaylistState,
 	target: SpotifyPlaylistTarget
@@ -91,7 +97,10 @@ export const compareSpotifyPlaylist = (
 		retainedSequence(target.tracks, sharedCounts)
 	);
 	const titleChanged = current.name !== target.name;
-	const descriptionChanged = current.description !== target.description;
+	const descriptionChanged = !spotifyPlaylistDescriptionMatches(
+		current.description,
+		target.description
+	);
 	const visibilityChanged = current.public !== target.public;
 
 	return {

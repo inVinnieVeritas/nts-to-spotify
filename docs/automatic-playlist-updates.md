@@ -50,8 +50,13 @@ Channeling must remain manual and its copied third-party playlist must remain un
 A settlement rejection now includes only fixed mismatch field names: `snapshot`, `title`,
 `description`, `visibility`, or (during explicit recovery) `tracks`. Neither the UI nor the
 response exposes the differing values. A mismatch is not proof of propagation delay or an external edit.
-Metadata and snapshot fingerprints remain exact. No description decoding or HTML stripping is used;
-an unexpected upstream representation remains blocked until its cause is established.
+Metadata and snapshot fingerprints remain exact. Description-to-target comparison accepts only
+the requested text or that same text with ASCII apostrophes represented as `&#x27;`, as confirmed
+by a read-only Spotify response. This is a one-pass encoding comparison, not HTML decoding or
+stripping: literal entity text, double encoding and other description differences remain distinct.
+The original requested description is still sent unchanged. Raw read-to-read metadata checks and
+external-change fingerprints are not normalized. An unexpected upstream representation remains
+blocked until its cause is established.
 
 For a saved, non-ambiguous acknowledged prefix (for example 100 of 257):
 

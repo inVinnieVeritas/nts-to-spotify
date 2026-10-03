@@ -352,6 +352,99 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(fetcher.mock.calls).toHaveLength(2);
 		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
 	});
+	it.each([
+		["Jim O'Rourke", 'Jim O&#x27;Rourke', true],
+		['Literal &#x27; text', 'Literal &#x27; text', true],
+		['Literal &#x27; text', "Literal ' text", false],
+		["Jim O'Rourke", 'Jim O&amp;#x27;Rourke', false],
+		["Jim O'Rourke", 'Jim O&#x27;Rourke external edit', false]
+	])(
+		'uses narrow description equivalence for preview, settlement and append (%s)',
+		async (requested, actual, matches) => {
+			const items = Array.from({ length: 100 }, (_, index) => trackUri(index));
+			const fetcher = playlistReadFetcher(items, { description: actual });
+			const common = {
+				playlistId: PLAYLIST_ID,
+				name: CURRENT_PLAYLIST.name,
+				description: requested,
+				public: CURRENT_PLAYLIST.public
+			};
+			const preview = await POST({
+				request: previewRequest({ ...common, tracks: items }),
+				fetch: fetcher
+			} as never);
+			expect(preview.status).toBe(200);
+			expect(await preview.json()).toMatchObject({
+				descriptionChanged: !matches,
+				synchronized: matches
+			});
+			const settled = await POST({
+				request: requestFor({
+					...common,
+					operation: 'settle',
+					expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+					expectedTracks: items
+				}),
+				fetch: fetcher
+			} as never);
+			expect(settled.status).toBe(matches ? 200 : 409);
+			expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+			fetcher.mockClear();
+			const appended = await POST({
+				request: requestFor({
+					...common,
+					operation: 'append',
+					operationId: 'operation_1234567890',
+					targetFingerprint: 'a'.repeat(64),
+					expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+					position: 100,
+					totalTrackCount: 101,
+					tracks: [trackUri(100)]
+				}),
+				fetch: fetcher.mockImplementation(async (input, init) => {
+					if (String(input).endsWith('/items') && init?.method === 'POST')
+						return jsonResponse({ snapshot_id: 'appended' });
+					if (String(input).endsWith('/v1/me')) return jsonResponse({ id: USER_ID });
+					return jsonResponse({ ...playlistMetadata(), description: actual });
+				})
+			} as never);
+			expect(appended.status).toBe(matches ? 200 : 409);
+			expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(
+				matches ? 1 : 0
+			);
+		}
+	);
+	it('keeps the raw description fence across recovery pagination even for equivalent representations', async () => {
+		let reads = 0;
+		const fetcher = playlistReadFetcher([trackUri(1)]);
+		const read = fetcher.getMockImplementation()!;
+		fetcher.mockImplementation(async (input, init) => {
+			if (String(input).includes('snapshot_id,name,description,public'))
+				return jsonResponse({
+					...playlistMetadata(),
+					description: ++reads === 1 ? 'Jim O&#x27;Rourke' : "Jim O'Rourke"
+				});
+			return read(input, init);
+		});
+		const response = await POST({
+			request: requestFor({
+				operation: 'settle',
+				playlistId: PLAYLIST_ID,
+				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+				name: CURRENT_PLAYLIST.name,
+				description: "Jim O'Rourke",
+				public: CURRENT_PLAYLIST.public,
+				expectedTracks: [trackUri(1)]
+			}),
+			fetch: fetcher
+		} as never);
+		expect(response.status).toBe(409);
+		expect(await response.json()).toMatchObject({
+			error: 'playlist_settling',
+			mismatches: ['description']
+		});
+		expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+	});
 
 	it.each([
 		{ field: 'title', metadata: { name: 'External title' } },

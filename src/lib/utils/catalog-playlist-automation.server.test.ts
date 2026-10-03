@@ -587,97 +587,169 @@ describe('opt-in automatic linked playlist updates', () => {
 			expect(registry!.value.target).toBeUndefined();
 		}
 	);
-	it('recovers a blocked 100/257 acknowledged prefix without another replacement or playlist creation', async () => {
+	it.each([false, true])(
+		'recovers a blocked 100/257 acknowledged prefix without another replacement or playlist creation (apostrophe representation=%s)',
+		async (encoded) => {
+			const f = await fixture();
+			await f.enable();
+			f.change(Array.from({ length: 257 }, (_, i) => track(i + 1)));
+			f.progress.playlist.description =
+				"A comprehensive archive of tracks played on Jim O'Rourke on NTS Radio, covering broadcasts from 20 January 2022 through 6 August 2026. Some tracks unavailable on Spotify may be missing.";
+			const target = automaticPlaylistTarget(f.progress);
+			let stale = true;
+			const upstream = async (input: RequestInfo | URL, init?: RequestInit) => {
+				const response = await f.request(input, init);
+				if (String(input).includes('snapshot_id,name,description,public'))
+					return Response.json({
+						...(await response.json()),
+						description: stale
+							? 'Old coverage description'
+							: encoded
+								? target.description.replaceAll("'", '&#x27;')
+								: target.description
+					});
+				return response;
+			};
+			const request = async (body: unknown) => {
+				const response = await POST({
+					fetch: upstream,
+					request: new Request('https://nts2spotify.vincentvanderveken.com/api/spotify/playlist', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(body)
+					})
+				} as never);
+				return { response, body: await response.json() };
+			};
+			const preview = await request({ operation: 'preview', playlistId, ...target });
+			const clock = Date.now();
+			let saved = {
+				version: 1,
+				revision: 0,
+				catalogueAlias: 'dimension-door',
+				operationId: 'recovery_1234567890',
+				playlistId,
+				targetFingerprint: await fingerprintPlaylistSyncTarget(playlistId, target),
+				totalTrackCount: 257,
+				confirmedPosition: 0,
+				phase: 'interrupted',
+				mode: 'updated',
+				startedAt: clock,
+				updatedAt: clock,
+				restartRequired: true
+			} as CatalogPlaylistSyncRecord;
+			const persist = async (next: CatalogPlaylistSyncRecord) => {
+				saved = structuredClone({ ...next, revision: saved.revision + 1 });
+				return saved;
+			};
+			const first = await runPlaylistSyncBatches({
+				record: saved,
+				target,
+				request,
+				persist,
+				previewFingerprint: preview.body.previewFingerprint,
+				now: () => Date.now(),
+				delay: async () => f.advance(31_000)
+			});
+			expect(first.record.phase).toBe('blocked');
+			expect(first.record.confirmedPosition).toBe(100);
+			expect(first.settlementDiagnostic).toContain('description');
+			expect(f.items).toEqual(target.tracks.slice(0, 100));
+			// A fresh read observes the acknowledged metadata. Do not infer its outcome
+			// from elapsed time: recovery must prove the exact snapshot and ordered prefix.
+			stale = false;
+			const restored = structuredClone(saved);
+			const second = await runPlaylistSyncBatches({
+				record: restored,
+				target,
+				request,
+				persist,
+				recoverAcknowledgedPrefix: true,
+				delay: async () => undefined
+			});
+			expect(second.type).toBe('completed');
+			expect(second.record.operationId).toBe(restored.operationId);
+			expect(second.record.playlistId).toBe(playlistId);
+			expect(second.record.confirmedPosition).toBe(257);
+			expect(f.items).toEqual(target.tracks);
+			expect(
+				f
+					.writes()
+					.filter((r) => r.url.endsWith('/items'))
+					.map((r) => [r.method, (r.body as { uris: string[] }).uris.length])
+			).toEqual([
+				['PUT', 100],
+				['POST', 100],
+				['POST', 57]
+			]);
+			expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
+			expect(
+				f
+					.writes()
+					.filter((r) => r.url.endsWith('/' + playlistId))
+					.map((r) => r.body)
+			).toEqual([{ name: target.name, description: target.description, public: target.public }]);
+			expect(f.progress.playlist.linkedPlaylistId).toBe(playlistId);
+			expect(
+				(await request({ operation: 'preview', playlistId, ...target })).body.synchronized
+			).toBe(true);
+		}
+	);
+	it('verifies automatic updates against apostrophe-encoded reads using raw observed baselines', async () => {
 		const f = await fixture();
+		f.progress.playlist.description = "Jim O'Rourke archive";
+		f.setOverride((url) =>
+			url.includes('snapshot_id,name,description,public')
+				? Response.json({
+						id: playlistId,
+						owner: { id: 'owner' },
+						snapshot_id: 'initial',
+						name: f.progress.playlist.title,
+						description: 'Jim O&#x27;Rourke archive',
+						public: false
+					})
+				: undefined
+		);
 		await f.enable();
-		f.change(Array.from({ length: 257 }, (_, i) => track(i + 1)));
-		f.progress.playlist.description = 'New coverage description';
-		const target = automaticPlaylistTarget(f.progress);
-		let stale = true;
-		const upstream = async (input: RequestInfo | URL, init?: RequestInit) => {
+		f.setOverride(undefined);
+		f.change();
+		// Preserve the fixture's real changing snapshot while encoding only description reads.
+		const upstream: typeof fetch = async (input, init) => {
 			const response = await f.request(input, init);
-			if (stale && String(input).includes('snapshot_id,name,description,public'))
+			if (String(input).includes('snapshot_id,name,description,public')) {
+				const metadata = await response.json();
 				return Response.json({
-					...(await response.json()),
-					description: 'Old coverage description'
+					...metadata,
+					description: metadata.description.replaceAll("'", '&#x27;')
 				});
+			}
 			return response;
 		};
-		const request = async (body: unknown) => {
-			const response = await POST({
-				fetch: upstream,
-				request: new Request('https://nts2spotify.vincentvanderveken.com/api/spotify/playlist', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(body)
-				})
-			} as never);
-			return { response, body: await response.json() };
-		};
-		const preview = await request({ operation: 'preview', playlistId, ...target });
-		const clock = Date.now();
-		let saved = {
-			version: 1,
-			revision: 0,
-			catalogueAlias: 'dimension-door',
-			operationId: 'recovery_1234567890',
-			playlistId,
-			targetFingerprint: await fingerprintPlaylistSyncTarget(playlistId, target),
-			totalTrackCount: 257,
-			confirmedPosition: 0,
-			phase: 'interrupted',
-			mode: 'updated',
-			startedAt: clock,
-			updatedAt: clock,
-			restartRequired: true
-		} as CatalogPlaylistSyncRecord;
-		const persist = async (next: CatalogPlaylistSyncRecord) => {
-			saved = structuredClone({ ...next, revision: saved.revision + 1 });
-			return saved;
-		};
-		const first = await runPlaylistSyncBatches({
-			record: saved,
-			target,
-			request,
-			persist,
-			previewFingerprint: preview.body.previewFingerprint,
-			now: () => Date.now(),
-			delay: async () => f.advance(31_000)
-		});
-		expect(first.record.phase).toBe('blocked');
-		expect(first.record.confirmedPosition).toBe(100);
-		expect(first.settlementDiagnostic).toContain('description');
-		expect(f.items).toEqual(target.tracks.slice(0, 100));
-		// A fresh read observes the acknowledged metadata. Do not infer its outcome
-		// from elapsed time: recovery must prove the exact snapshot and ordered prefix.
-		stale = false;
-		const restored = structuredClone(saved);
-		const second = await runPlaylistSyncBatches({
-			record: restored,
-			target,
-			request,
-			persist,
-			recoverAcknowledgedPrefix: true,
-			delay: async () => undefined
-		});
-		expect(second.type).toBe('completed');
-		expect(second.record.operationId).toBe(restored.operationId);
-		expect(second.record.playlistId).toBe(playlistId);
-		expect(f.items).toEqual(target.tracks);
-		expect(
-			f
-				.writes()
-				.filter((r) => r.url.endsWith('/items'))
-				.map((r) => [r.method, (r.body as { uris: string[] }).uris.length])
-		).toEqual([
-			['PUT', 100],
-			['POST', 100],
-			['POST', 57]
-		]);
-		expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
-		expect((await request({ operation: 'preview', playlistId, ...target })).body.synchronized).toBe(
-			true
+		const service = new AutomaticPlaylistService(
+			f.store,
+			upstream,
+			f.auth,
+			Date.now,
+			async () => ({ progress: structuredClone(f.progress), version: 'updated' }),
+			async () => {},
+			async () => 'updated'
 		);
+		const reviewed = structuredClone(f.progress);
+		await service.run('dimension-door', f.signal);
+		expect((await f.state()).status).toBe('updated');
+		expect(f.items).toEqual(automaticPlaylistTarget(f.progress).tracks);
+		expect(f.progress).toEqual(reviewed);
+		expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
+		expect(f.writes().find((r) => r.url.endsWith('/' + playlistId))?.body).toMatchObject({
+			description: "Jim O'Rourke archive"
+		});
+		const exact = await service.execute(
+			{ operation: 'preview', playlistId, ...automaticPlaylistTarget(f.progress) },
+			'dummy-access',
+			f.signal
+		);
+		expect(exact.body.synchronized).toBe(true);
+		expect((await f.state()).baseline).toBe(exact.body.stateFingerprint);
 	});
 	it('public status omits tokens, targets, lease data and recovery diagnostics', async () => {
 		const f = await fixture();
