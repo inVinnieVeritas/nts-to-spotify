@@ -159,7 +159,9 @@
 					? canRecoverAcknowledgedPlaylistSync(localSyncRecord)
 						? 'Verify and resume Spotify synchronization'
 						: 'Apply Spotify update'
-					: 'Compare with Spotify playlist'
+					: preview?.synchronized
+						? 'Nothing to sync'
+						: 'Compare with Spotify playlist'
 			: creationPending
 				? 'Creation outcome pending'
 				: 'Create Spotify playlist'
@@ -167,6 +169,7 @@
 	$: comparing = Boolean(
 		catalogueMode && linkedPlaylistId && !resumableSync && (!preview || preview.synchronized)
 	);
+	$: synchronizedComparison = Boolean(comparing && preview?.synchronized);
 
 	const failureMessage = (payload: unknown) => {
 		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -868,7 +871,8 @@
 					size="sm"
 					variant="outline"
 					disabled={working}
-					on:click={dismissPreview}>Dismiss preview</Button
+					on:click={synchronizedComparison ? handleClick : dismissPreview}
+					>{synchronizedComparison ? 'Compare again' : 'Dismiss preview'}</Button
 				>
 			</div>
 		{/if}
@@ -878,6 +882,7 @@
 				type="button"
 				icon="spotify"
 				disabled={(comparing ? comparisonDisabled : disabled) ||
+					synchronizedComparison ||
 					working ||
 					!tabOwner ||
 					syncEligibility.disabled ||
@@ -885,7 +890,9 @@
 					(data.tracks.length === 0 && !linkedPlaylistId) ||
 					(catalogueMode && creationPending && !linkedPlaylistId)}
 				loading={working}
-				on:click={handleClick}>{buttonLabel}</Button
+				on:click={() => {
+					if (!synchronizedComparison) handleClick();
+				}}>{buttonLabel}</Button
 			>
 		{:else}
 			<LoginWithSpotify label="Login to import" />
