@@ -159,7 +159,9 @@
 					? canRecoverAcknowledgedPlaylistSync(localSyncRecord)
 						? 'Verify and resume Spotify synchronization'
 						: 'Apply Spotify update'
-					: 'Compare with Spotify playlist'
+					: preview?.synchronized
+						? 'Nothing to sync'
+						: 'Compare with Spotify playlist'
 			: creationPending
 				? 'Creation outcome pending'
 				: 'Create Spotify playlist'
@@ -167,6 +169,7 @@
 	$: comparing = Boolean(
 		catalogueMode && linkedPlaylistId && !resumableSync && (!preview || preview.synchronized)
 	);
+	$: synchronizedComparison = Boolean(comparing && preview?.synchronized);
 
 	const failureMessage = (payload: unknown) => {
 		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -849,14 +852,17 @@
 							Public/private visibility {preview.visibilityChanged ? 'will change' : 'is unchanged'}
 						</li>
 					</ul>
-					<p class="font-small-beast update-warning">
-						Updating replaces the linked Spotify playlist contents. Manual changes made directly in
-						Spotify will be removed.
-					</p>
 					{#if canRecoverAcknowledgedPlaylistSync(localSyncRecord)}
 						<p class="font-small-beast">
-							Resume first verifies the acknowledged snapshot, metadata and exact ordered tracks. It
-							appends only the remaining tracks and does not replace the confirmed prefix.
+							Resume checks the exact acknowledged tracks, their order and playlist settings. If
+							they match and Spotify's current version stays stable during the check, it accepts
+							that version and appends only the remaining tracks. Changed contents or settings
+							remain blocked.
+						</p>
+					{:else}
+						<p class="font-small-beast update-warning">
+							Updating replaces the linked Spotify playlist contents. Manual changes made directly
+							in Spotify will be removed.
 						</p>
 					{/if}
 				{/if}
@@ -865,7 +871,8 @@
 					size="sm"
 					variant="outline"
 					disabled={working}
-					on:click={dismissPreview}>Dismiss preview</Button
+					on:click={synchronizedComparison ? handleClick : dismissPreview}
+					>{synchronizedComparison ? 'Compare again' : 'Dismiss preview'}</Button
 				>
 			</div>
 		{/if}
@@ -875,6 +882,7 @@
 				type="button"
 				icon="spotify"
 				disabled={(comparing ? comparisonDisabled : disabled) ||
+					synchronizedComparison ||
 					working ||
 					!tabOwner ||
 					syncEligibility.disabled ||
@@ -882,7 +890,9 @@
 					(data.tracks.length === 0 && !linkedPlaylistId) ||
 					(catalogueMode && creationPending && !linkedPlaylistId)}
 				loading={working}
-				on:click={handleClick}>{buttonLabel}</Button
+				on:click={() => {
+					if (!synchronizedComparison) handleClick();
+				}}>{buttonLabel}</Button
 			>
 		{:else}
 			<LoginWithSpotify label="Login to import" />

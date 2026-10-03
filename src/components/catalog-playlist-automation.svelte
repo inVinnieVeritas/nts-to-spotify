@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import Button from './button.svelte';
 	import {
 		isAutomaticPlaylistPublicState,
 		automaticPlaylistStatusText,
@@ -120,53 +119,92 @@
 </script>
 
 {#if visible}
-	<section class="cloud-progress font-small-beast" aria-label="Automatic Spotify playlist updates">
-		<h3>Automatically update Spotify playlist</h3>
-		<p>
-			Off by default. Only your existing app-created linked playlist can be updated. Confident new
-			matches are selected; uncertain matches stay available for review. Your saved manual choices
-			are preserved.
-		</p>
-		<p>Background Spotify authorization: {connected ? 'connected' : 'disconnected'}.</p>
-		<Button
-			size="sm"
-			variant="outline"
-			disabled={busy}
-			on:click={() => action(connected ? 'disconnect' : 'connect')}
-			>{connected ? 'Disconnect background Spotify' : 'Authorize background Spotify'}</Button
-		>
-		<Button
-			size="sm"
-			variant="outline"
-			disabled={busy || scanning || (!state?.enabled && (!connected || !cloudConnected))}
-			on:click={() => action(state?.enabled ? 'disable' : 'enable')}
-			>{state?.enabled
-				? 'Pause automatic playlist updates'
-				: 'Enable automatic playlist updates'}</Button
-		>
-		<Button size="sm" variant="outline" disabled={busy} on:click={() => load(showAlias)}
-			>Refresh playlist status</Button
-		>
-		<div aria-live="polite" role="status">
-			{#if state}<p>{automaticPlaylistStatusText(state)}</p>
-				{#if state.lastUpdatedAt}<p>
-						Last automatic update: {new Date(state.lastUpdatedAt).toLocaleString()} · {state.added} tracks
-						added.
-					</p>{/if}
-				<p>{state.awaitingReview} track occurrences awaiting review.</p>
-				{#if state.retryUntil > now}<p>
-						{formatCooldownDuration(Math.ceil((state.retryUntil - now) / 1000))} remaining.
-					</p>{/if}
-			{:else}<p>Automatic playlist updates are off for this catalogue.</p>{/if}
-			{#if message}<p>{message}</p>{/if}
+	<section class="settings-card" aria-labelledby="playlist-automation-heading">
+		<div class="settings-heading">
+			<h3 id="playlist-automation-heading">Automatic playlist updates</h3>
+			<span class="status-badge" class:active={state?.enabled}>{state?.enabled ? 'On' : 'Off'}</span
+			>
 		</div>
-		<p>
-			Disconnect removes the server's saved authorization, not Spotify playlists. To revoke the app
-			itself, use <a
-				href="https://www.spotify.com/account/apps/"
-				target="_blank"
-				rel="noopener noreferrer">Spotify account apps</a
-			>. Reauthorization is required when Spotify expires or revokes the refresh token.
+		<p class="settings-description">
+			Keep your linked Spotify playlist up to date with confident matches. Uncertain matches stay
+			available for review.
 		</p>
+		<dl class="settings-summary">
+			<div>
+				<dt>Background Spotify authorization</dt>
+				<dd>
+					<span class="status-badge" class:active={connected}
+						>{connected ? 'Connected' : 'Disconnected'}</span
+					>
+				</dd>
+			</div>
+		</dl>
+		<div class="settings-actions">
+			<button
+				type="button"
+				class="control-button primary"
+				disabled={busy || scanning || (!state?.enabled && (!connected || !cloudConnected))}
+				on:click={() => action(state?.enabled ? 'disable' : 'enable')}
+				>{state?.enabled ? 'Pause playlist updates' : 'Enable playlist updates'}</button
+			>
+			{#if !connected}<button
+					type="button"
+					class="control-button"
+					disabled={busy}
+					on:click={() => action('connect')}>Authorize background Spotify</button
+				>{/if}
+			<button type="button" class="control-button" disabled={busy} on:click={() => load(showAlias)}
+				>Refresh status</button
+			>
+		</div>
+		<div aria-live="polite" role="status">
+			{#if state}
+				<p class="settings-note">{automaticPlaylistStatusText(state)}</p>
+				<dl class="settings-summary two-column">
+					{#if state.lastUpdatedAt}<div>
+							<dt>Last automatic update</dt>
+							<dd>{new Date(state.lastUpdatedAt).toLocaleString()}</dd>
+						</div>
+						<div>
+							<dt>Tracks added in last update</dt>
+							<dd>{state.added}</dd>
+						</div>{/if}
+					<div>
+						<dt>Track occurrences awaiting review</dt>
+						<dd>{state.awaitingReview}</dd>
+					</div>
+				</dl>
+				{#if state.retryUntil > now}<p class="settings-feedback">
+						Waiting: {formatCooldownDuration(Math.ceil((state.retryUntil - now) / 1000))} remaining.
+					</p>{/if}
+			{:else}<p class="settings-note">
+					Automatic playlist updates are off for this catalogue.
+				</p>{/if}
+			{#if message}<p class="settings-feedback">{message}</p>{/if}
+		</div>
+		<details class="settings-details">
+			<summary>Playlist safeguards and Spotify access</summary>
+			<p>
+				Off by default. Only your existing app-created linked playlist can be updated. Automatic
+				updates replace its contents with your selected tracks; external edits pause automation.
+				Your saved manual choices are preserved.
+			</p>
+			<p>
+				Disconnect removes the server's saved authorization for all catalogues, not Spotify
+				playlists. To revoke the app itself, use <a
+					href="https://www.spotify.com/account/apps/"
+					target="_blank"
+					rel="noopener noreferrer">Spotify account apps</a
+				>. Reauthorization is required when Spotify expires or revokes the refresh token.
+			</p>
+			{#if connected}<div class="settings-actions">
+					<button
+						type="button"
+						class="control-button danger"
+						disabled={busy}
+						on:click={() => action('disconnect')}>Disconnect background Spotify</button
+					>
+				</div>{/if}
+		</details>
 	</section>
 {/if}

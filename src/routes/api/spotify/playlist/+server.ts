@@ -68,7 +68,7 @@ type PlaylistVerifyRequest = { operation: 'verify'; playlistId: string };
 type PlaylistSettleRequest = Omit<
 	PlaylistAppendRequest,
 	'operation' | 'operationId' | 'targetFingerprint' | 'position' | 'totalTrackCount' | 'tracks'
-> & { operation: 'settle'; expectedTracks?: string[] };
+> & { operation: 'settle'; expectedTracks?: string[]; recoverSnapshot?: boolean };
 type PlaylistRequest =
 	| PlaylistCreateRequest
 	| PlaylistPreviewRequest
@@ -208,6 +208,9 @@ export const _parseRequest = async (
 			typeof value.description !== 'string' ||
 			value.description.length > 300 ||
 			typeof value.public !== 'boolean' ||
+			(value.recoverSnapshot !== undefined && typeof value.recoverSnapshot !== 'boolean') ||
+			(value.recoverSnapshot === true &&
+				(!Array.isArray(value.expectedTracks) || value.expectedTracks.length === 0)) ||
 			(value.expectedTracks !== undefined &&
 				(!Array.isArray(value.expectedTracks) ||
 					value.expectedTracks.length > SPOTIFY_PLAYLIST_MAX_TRACKS ||
@@ -221,6 +224,7 @@ export const _parseRequest = async (
 			name: value.name.trim(),
 			description: value.description,
 			public: value.public,
+			...(value.recoverSnapshot === true ? { recoverSnapshot: true } : {}),
 			...(value.expectedTracks === undefined
 				? {}
 				: { expectedTracks: value.expectedTracks as string[] })
@@ -729,6 +733,9 @@ export const _handlePlaylistRequest = async (
 			});
 		}
 		if (payload.operation === 'settle') {
+			// Snapshot adoption is an explicit manual recovery, never a worker retry.
+			if (background && payload.recoverSnapshot)
+				throw new SpotifyPlaylistFailure('request-rejected');
 			const current = await readOwnedPlaylistSnapshot(
 				event,
 				headers,
@@ -737,14 +744,15 @@ export const _handlePlaylistRequest = async (
 				signal
 			);
 			const mismatches: string[] = [];
-			if (current.snapshotId !== payload.expectedSnapshotId) mismatches.push('snapshot');
+			if (current.snapshotId !== payload.expectedSnapshotId && !payload.recoverSnapshot)
+				mismatches.push('snapshot');
 			if (current.name !== payload.name) mismatches.push('title');
 			if (!spotifyPlaylistDescriptionMatches(current.description, payload.description))
 				mismatches.push('description');
 			if (current.public !== payload.public) mismatches.push('visibility');
 			if (payload.expectedTracks && mismatches.length === 0) {
-				// Explicit recovery verifies the complete acknowledged prefix, not just
-				// membership/counts. Re-read metadata after pagination to fence changes.
+				// A different version may be adopted only by explicit manual recovery
+				// with the complete exact ordered prefix and a stable metadata fence.
 				const items = await readPlaylistItems(event, headers, payload.playlistId, signal);
 				if (
 					items.length !== payload.expectedTracks.length ||
@@ -777,7 +785,8 @@ export const _handlePlaylistRequest = async (
 			return json({
 				mode: 'settled',
 				playlistId: payload.playlistId,
-				snapshotId: current.snapshotId
+				snapshotId: current.snapshotId,
+				...(payload.recoverSnapshot ? { acknowledgedPrefixVerified: true } : {})
 			});
 		}
 		if (payload.operation === 'append') {
