@@ -891,6 +891,9 @@ export const runPlaylistSyncBatches = async (input: {
 					public: input.target.public,
 					...(verifyAcknowledgedPrefix
 						? { expectedTracks: input.target.tracks.slice(0, record.confirmedPosition) }
+						: {}),
+					...(input.recoverAcknowledgedPrefix && verifyAcknowledgedPrefix
+						? { recoverSnapshot: true }
 						: {})
 				},
 				input.signal
@@ -900,11 +903,19 @@ export const runPlaylistSyncBatches = async (input: {
 				if (
 					value?.mode !== 'settled' ||
 					value.playlistId !== playlistId ||
-					value.snapshotId !== record.snapshotId
+					typeof value.snapshotId !== 'string' ||
+					!SAFE_SNAPSHOT.test(value.snapshotId) ||
+					(value.snapshotId !== record.snapshotId &&
+						!(
+							input.recoverAcknowledgedPrefix &&
+							verifyAcknowledgedPrefix &&
+							value.acknowledgedPrefixVerified === true
+						))
 				)
 					return stop('blocked', 'unavailable', 'invalid_response');
 				await save({
 					...record,
+					snapshotId: value.snapshotId as string,
 					phase: 'ready',
 					reason: undefined,
 					retryUntil: undefined,
@@ -1011,6 +1022,9 @@ export const runPlaylistSyncBatches = async (input: {
 			});
 			mutationOutstanding = false;
 			first = false;
+			// Explicit recovery needs a new content proof after each acknowledged batch.
+			// Ordinary synchronization retains its lightweight, exact-snapshot settlement.
+			verifyAcknowledgedPrefix = Boolean(input.recoverAcknowledgedPrefix);
 			const waiting = await settle();
 			if (waiting) return waiting;
 		}

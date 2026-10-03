@@ -849,14 +849,17 @@
 							Public/private visibility {preview.visibilityChanged ? 'will change' : 'is unchanged'}
 						</li>
 					</ul>
-					<p class="font-small-beast update-warning">
-						Updating replaces the linked Spotify playlist contents. Manual changes made directly in
-						Spotify will be removed.
-					</p>
 					{#if canRecoverAcknowledgedPlaylistSync(localSyncRecord)}
 						<p class="font-small-beast">
-							Resume first verifies the acknowledged snapshot, metadata and exact ordered tracks. It
-							appends only the remaining tracks and does not replace the confirmed prefix.
+							Resume checks the exact acknowledged tracks, their order and playlist settings. If
+							they match and Spotify's current version stays stable during the check, it accepts
+							that version and appends only the remaining tracks. Changed contents or settings
+							remain blocked.
+						</p>
+					{:else}
+						<p class="font-small-beast update-warning">
+							Updating replaces the linked Spotify playlist contents. Manual changes made directly
+							in Spotify will be removed.
 						</p>
 					{/if}
 				{/if}

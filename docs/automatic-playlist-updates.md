@@ -50,7 +50,13 @@ Channeling must remain manual and its copied third-party playlist must remain un
 A settlement rejection now includes only fixed mismatch field names: `snapshot`, `title`,
 `description`, `visibility`, or (during explicit recovery) `tracks`. Neither the UI nor the
 response exposes the differing values. A mismatch is not proof of propagation delay or an external edit.
-Metadata and snapshot fingerprints remain exact. Description-to-target comparison accepts only
+Automatic synchronization and ordinary settlement keep exact snapshot checks. Explicit manual
+acknowledged-prefix recovery can adopt a different currently observed snapshot only after reading
+the complete exact ordered prefix and matching metadata, then re-reading metadata to ensure the
+snapshot and raw fields stayed unchanged throughout pagination. The server marks this verified
+response; the client persists its snapshot through the existing revision CAS before any append.
+This read-only recovery is unavailable to background requests. No mismatching tracks, extra items,
+changed settings, or unstable reads are accepted. Description-to-target comparison accepts only
 the requested text or that same text with ASCII apostrophes represented as `&#x27;`, as confirmed
 by a read-only Spotify response. This is a one-pass encoding comparison, not HTML decoding or
 stripping: literal entity text, double encoding and other description differences remain distinct.
@@ -64,10 +70,10 @@ For a saved, non-ambiguous acknowledged prefix (for example 100 of 257):
    Keep its playlist link and reviewed choices; do not forget the link or clear synchronization records.
 2. Wait for any displayed lease/cooldown deadline. Compare with Spotify explicitly.
 3. If incomplete, use **Verify and resume Spotify synchronization**. It requires the unchanged target,
-   operation/revision lease, exact acknowledged snapshot, metadata, and complete ordered prefix before
+   operation/revision lease, matching metadata, stable observed snapshot, and complete ordered prefix before
    appending 100 and 57 remaining tracks. It does not repeat the first replacement or create a playlist.
-4. If verification still fails, stop and record the fixed mismatch names. A different snapshot or
-   genuine metadata/content difference still blocks writes; do not keep restarting Apply.
+4. If verification still fails, stop and record the fixed mismatch names. A genuine metadata/content
+   difference or changing snapshot still blocks writes; do not keep restarting Apply.
 5. Compare again after completion; it should report exact synchronization. A completely synchronized
    fresh preview already needs no mutation.
 

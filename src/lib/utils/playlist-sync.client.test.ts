@@ -67,6 +67,88 @@ const prefix = {
 type Body = Record<string, unknown>;
 
 describe('acknowledged prefix recovery', () => {
+	it('persists the read-verified snapshot before appending only the remaining 57 tracks at 200/257', async () => {
+		const record = await state(257, {
+			...prefix,
+			confirmedPosition: 200,
+			phase: 'blocked',
+			reason: 'external-change'
+		});
+		const http = upstream(257, target(257).tracks.slice(0, 200));
+		let saved = record;
+		const outcome = await runPlaylistSyncBatches({
+			record,
+			target: target(257),
+			recoverAcknowledgedPrefix: true,
+			now: () => NOW,
+			delay: async () => undefined,
+			persist: async (next) => {
+				saved = structuredClone(next);
+			},
+			request: async (raw) => {
+				const body = raw as Body;
+				if (body.operation === 'settle' && body.expectedSnapshotId === 's1') {
+					expect(body.recoverSnapshot).toBe(true);
+					expect(body.expectedTracks).toEqual(target(257).tracks.slice(0, 200));
+					return result({
+						mode: 'settled',
+						playlistId: ID,
+						snapshotId: 'read-verified',
+						acknowledgedPrefixVerified: true
+					});
+				}
+				if (body.operation === 'append') {
+					expect(saved.snapshotId).toBe('read-verified');
+					expect(body.expectedSnapshotId).toBe('read-verified');
+				}
+				return http.request(raw);
+			}
+		});
+		expect(outcome.type).toBe('completed');
+		expect(http.items()).toEqual(target(257).tracks);
+		expect(http.requests.filter((r) => r.operation === 'append').map((r) => r.tracks)).toEqual([
+			target(257).tracks.slice(200)
+		]);
+		expect(http.requests.some((r) => ['apply-batch', 'create'].includes(String(r.operation)))).toBe(
+			false
+		);
+		expect(http.requests.find((r) => r.operation === 'settle')?.expectedTracks).toEqual(
+			target(257).tracks
+		);
+	});
+	it.each([false, true])(
+		'refuses a changed snapshot without explicit recovery and server proof (proof %s)',
+		async (proof) => {
+			const request = vi.fn(async () =>
+				result({
+					mode: 'settled',
+					playlistId: ID,
+					snapshotId: 'different',
+					acknowledgedPrefixVerified: proof
+				})
+			);
+			const outcome = await run(await state(257, prefix), request);
+			expect(outcome.type).toBe('interrupted');
+			expect(outcome.record.snapshotId).toBe('s1');
+			expect(request.mock.calls).toHaveLength(1);
+		}
+	);
+	it('refuses explicit recovery when a changed snapshot lacks the server prefix proof', async () => {
+		const request = vi.fn(async () =>
+			result({ mode: 'settled', playlistId: ID, snapshotId: 'different' })
+		);
+		const outcome = await runPlaylistSyncBatches({
+			record: await state(257, { ...prefix, phase: 'blocked', reason: 'external-change' }),
+			target: target(257),
+			recoverAcknowledgedPrefix: true,
+			request,
+			persist: async () => undefined,
+			now: () => NOW
+		});
+		expect(outcome.type).toBe('interrupted');
+		expect(outcome.record.snapshotId).toBe('s1');
+		expect(request.mock.calls).toHaveLength(1);
+	});
 	it('revalidates a blocked prefix read-only before appending, without resetting its identity or position', async () => {
 		const record = await state(257, { ...prefix, phase: 'blocked', reason: 'external-change' });
 		const http = upstream(257, target(257).tracks.slice(0, 100));

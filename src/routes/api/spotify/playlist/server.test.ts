@@ -6,10 +6,15 @@ import { getAccessToken } from '$lib/utils/auth.server';
 import { uniqueSpotifyUris } from '$lib/utils/catalog-scan';
 import { fingerprintSpotifyPlaylistPreview } from '$lib/utils/playlist-preview.server';
 import {
+	fingerprintPlaylistSyncTarget,
+	runPlaylistSyncBatches,
+	type CatalogPlaylistSyncRecord
+} from '$lib/utils/playlist-sync.client';
+import {
 	getSpotifySessionMetrics,
 	resetSpotifyServerSessionForTests
 } from '$lib/utils/spotify.server';
-import { POST, _SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES } from './+server';
+import { POST, _handlePlaylistRequest, _SPOTIFY_PLAYLIST_MAX_PAYLOAD_BYTES } from './+server';
 
 const PLAYLIST_ID = 'ABCDEFGHIJKLMNOPQRSTUV';
 const USER_ID = 'current-user';
@@ -351,6 +356,177 @@ describe('/api/spotify/playlist synchronization', () => {
 		});
 		expect(fetcher.mock.calls).toHaveLength(2);
 		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
+	});
+	it('allows explicit snapshot recovery only after a stable full ordered prefix read', async () => {
+		const tracks = Array.from({ length: 200 }, (_, index) => trackUri(index));
+		const fetcher = playlistReadFetcher(tracks, { snapshot_id: 'observed-snapshot' });
+		const response = await POST({
+			fetch: fetcher,
+			request: requestFor({
+				operation: 'settle',
+				playlistId: PLAYLIST_ID,
+				expectedSnapshotId: 'acknowledged-snapshot',
+				name: CURRENT_PLAYLIST.name,
+				description: CURRENT_PLAYLIST.description,
+				public: CURRENT_PLAYLIST.public,
+				expectedTracks: tracks,
+				recoverSnapshot: true
+			})
+		} as never);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			mode: 'settled',
+			playlistId: PLAYLIST_ID,
+			snapshotId: 'observed-snapshot',
+			acknowledgedPrefixVerified: true
+		});
+		expect(fetcher.mock.calls.filter(([url]) => String(url).includes('/items?'))).toHaveLength(2);
+		expect(
+			fetcher.mock.calls.filter(([url]) => String(url).includes('snapshot_id,name'))
+		).toHaveLength(2);
+		expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+	});
+	it.each(['missing', 'empty', 'reordered', 'extra', 'changing', 'title'])(
+		'blocks snapshot recovery with %s evidence',
+		async (scenario) => {
+			const tracks = [trackUri(1), trackUri(2)];
+			const observed =
+				scenario === 'reordered'
+					? [...tracks].reverse()
+					: scenario === 'extra'
+						? [...tracks, trackUri(3)]
+						: tracks;
+			const normal = playlistReadFetcher(observed, {
+				snapshot_id: 'observed-snapshot',
+				...(scenario === 'title' ? { name: 'External title' } : {})
+			});
+			let reads = 0;
+			const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (scenario === 'changing' && String(input).includes('snapshot_id,name') && ++reads === 2)
+					return jsonResponse({ ...playlistMetadata(), snapshot_id: 'changed-during-read' });
+				return normal(input, init);
+			});
+			const response = await POST({
+				fetch: fetcher,
+				request: requestFor({
+					operation: 'settle',
+					playlistId: PLAYLIST_ID,
+					expectedSnapshotId: 'acknowledged-snapshot',
+					name: CURRENT_PLAYLIST.name,
+					description: CURRENT_PLAYLIST.description,
+					public: CURRENT_PLAYLIST.public,
+					recoverSnapshot: true,
+					...(scenario === 'missing' ? {} : { expectedTracks: scenario === 'empty' ? [] : tracks })
+				})
+			} as never);
+			expect(response.status).toBe(['missing', 'empty'].includes(scenario) ? 400 : 409);
+			expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+		}
+	);
+	it('keeps ordinary settlement strict even when supplied tracks match a different snapshot', async () => {
+		const tracks = [trackUri(1)];
+		const response = await POST({
+			fetch: playlistReadFetcher(tracks, { snapshot_id: 'other' }),
+			request: requestFor({
+				operation: 'settle',
+				playlistId: PLAYLIST_ID,
+				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+				name: CURRENT_PLAYLIST.name,
+				description: CURRENT_PLAYLIST.description,
+				public: CURRENT_PLAYLIST.public,
+				expectedTracks: tracks
+			})
+		} as never);
+		expect(response.status).toBe(409);
+		expect((await response.json()).mismatches).toEqual(['snapshot']);
+	});
+	it('never enables snapshot adoption for background workers', async () => {
+		const fetcher = successfulFetcher();
+		const response = await _handlePlaylistRequest(
+			{
+				fetch: fetcher,
+				request: requestFor({
+					operation: 'settle',
+					playlistId: PLAYLIST_ID,
+					expectedSnapshotId: 'old',
+					name: CURRENT_PLAYLIST.name,
+					description: CURRENT_PLAYLIST.description,
+					public: CURRENT_PLAYLIST.public,
+					expectedTracks: [trackUri(1)],
+					recoverSnapshot: true
+				})
+			} as never,
+			new AbortController().signal,
+			{ token: 'worker-token', owner: USER_ID }
+		);
+		expect(response.status).toBe(400);
+		expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+	});
+	it('recovers 200/257 through the real client and endpoint with exactly one 57-item append', async () => {
+		const target = {
+			name: CURRENT_PLAYLIST.name,
+			description: CURRENT_PLAYLIST.description,
+			public: CURRENT_PLAYLIST.public,
+			tracks: Array.from({ length: 257 }, (_, i) => trackUri(i))
+		};
+		const items = target.tracks.slice(0, 200);
+		let snapshot = 'observed-200';
+		const clock = Date.now();
+		let saved: CatalogPlaylistSyncRecord = {
+			version: 1,
+			revision: 0,
+			catalogueAlias: 'jim-o-rourke',
+			operationId: 'recovery_1234567890',
+			playlistId: PLAYLIST_ID,
+			targetFingerprint: await fingerprintPlaylistSyncTarget(PLAYLIST_ID, target),
+			totalTrackCount: 257,
+			confirmedPosition: 200,
+			phase: 'blocked',
+			reason: 'external-change',
+			mode: 'updated',
+			startedAt: clock,
+			updatedAt: clock,
+			snapshotId: 'acknowledged-200',
+			restartRequired: false
+		};
+		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (init?.method === 'POST' && String(input).endsWith('/items')) {
+				expect(saved.snapshotId).toBe('observed-200');
+				items.push(...JSON.parse(String(init.body)).uris);
+				snapshot = 'observed-257';
+				return jsonResponse({ snapshot_id: snapshot }, 201);
+			}
+			return playlistReadFetcher(items, { snapshot_id: snapshot })(input, init);
+		});
+		const outcome = await runPlaylistSyncBatches({
+			record: structuredClone(saved),
+			target,
+			recoverAcknowledgedPrefix: true,
+			now: () => clock,
+			delay: async () => undefined,
+			persist: async (next) => {
+				saved = structuredClone({ ...next, revision: saved.revision + 1 });
+				return saved;
+			},
+			request: async (body) => {
+				const response = await POST({
+					fetch: fetcher,
+					request: requestFor(body as Record<string, unknown>)
+				} as never);
+				return { response, body: await response.json() };
+			}
+		});
+		expect(outcome.type).toBe('completed');
+		expect(saved).toMatchObject({
+			confirmedPosition: 257,
+			snapshotId: 'observed-257',
+			operationId: 'recovery_1234567890'
+		});
+		expect(items).toEqual(target.tracks);
+		const writes = fetcher.mock.calls.filter(([, init]) => init?.method);
+		expect(writes).toHaveLength(1);
+		expect(writes[0][1]?.method).toBe('POST');
+		expect(JSON.parse(String(writes[0][1]?.body)).uris).toEqual(target.tracks.slice(200));
 	});
 	it.each([
 		["Jim O'Rourke", 'Jim O&#x27;Rourke', true],
