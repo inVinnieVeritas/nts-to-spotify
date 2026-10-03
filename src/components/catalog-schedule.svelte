@@ -6,7 +6,6 @@
 		type CatalogSchedule,
 		type ScheduleFrequency
 	} from '$lib/utils/catalog-schedule';
-	import Button from './button.svelte';
 	export let showAlias: string;
 	export let cloudConnected = false;
 	export let scanning = false;
@@ -99,55 +98,81 @@
 </script>
 
 {#if visible}
-	<div class="cloud-progress font-small-beast" aria-label="Automatic catalogue scans">
-		<h3>Automatic catalogue scans</h3>
-		<p>
-			Runs while your browser is closed and uses your shared Spotify search allowance. Matches save
-			to cloud for review. Playlist updates remain manual unless separately enabled below.
-		</p>
-		<label for="catalogue-schedule-frequency">Check for new episodes</label>
-		<select id="catalogue-schedule-frequency" bind:value={frequency} disabled={busy || scanning}>
-			<option value="daily">Every day</option><option value="weekly">Every week</option>
-			<option value="fortnightly">Every two weeks</option><option value="monthly"
-				>Every 30 days</option
+	<section class="settings-card" aria-labelledby="catalogue-schedule-heading">
+		<div class="settings-heading">
+			<h3 id="catalogue-schedule-heading">Automatic catalogue scans</h3>
+			<span class="status-badge" class:active={schedule?.enabled}
+				>{schedule?.enabled ? 'On' : 'Off'}</span
 			>
-		</select>
-		<p>
-			Pending and failed episodes continue in batches of up to five, with at least an hour between
-			scheduled runs. Spotify cooldowns take priority.
+		</div>
+		<p class="settings-description">
+			Check for new episodes while your browser is closed. Matching results save to cloud for
+			review.
 		</p>
+		<div class="settings-field">
+			<label for="catalogue-schedule-frequency">Check for new episodes</label>
+			<select id="catalogue-schedule-frequency" bind:value={frequency} disabled={busy || scanning}>
+				<option value="daily">Every day</option><option value="weekly">Every week</option><option
+					value="fortnightly">Every two weeks</option
+				><option value="monthly">Every 30 days</option>
+			</select>
+		</div>
 		{#if schedule?.enabled}
-			<p>
-				Enabled · next eligible run: {date(schedule.nextRunAt)}. It will run on a scheduler check
-				after this time.
-			</p>
-			<Button
-				size="sm"
-				variant="outline"
-				disabled={busy || scanning || !cloudConnected}
-				on:click={() => save(true)}>Save frequency</Button
+			<dl class="settings-summary">
+				<div>
+					<dt>Next eligible run</dt>
+					<dd>{date(schedule.nextRunAt)}</dd>
+				</div>
+			</dl>
+			<p class="settings-muted settings-note">Runs on a scheduler check after this time.</p>
+		{:else}<p class="settings-note">Automatic scans are off for this catalogue.</p>{/if}
+		<div class="settings-actions">
+			{#if schedule?.enabled}
+				<button
+					type="button"
+					class="control-button primary"
+					disabled={busy || scanning || !cloudConnected}
+					on:click={() => save(true)}>Save frequency</button
+				>
+				<button type="button" class="control-button" disabled={busy} on:click={() => save(false)}
+					>Pause scans</button
+				>
+			{:else}
+				<button
+					type="button"
+					class="control-button primary"
+					disabled={busy || scanning || !cloudConnected || !isScheduleFrequency(frequency)}
+					on:click={() => save(true)}>Enable automatic scans</button
+				>
+			{/if}
+			<button type="button" class="control-button" disabled={busy} on:click={() => load(showAlias)}
+				>Refresh status</button
 			>
-			<Button size="sm" variant="outline" disabled={busy} on:click={() => save(false)}
-				>Pause automatic scans</Button
-			>
-		{:else}
-			<p>Automatic scans are off for this catalogue.</p>
-			<Button
-				size="sm"
-				variant="outline"
-				disabled={busy || scanning || !cloudConnected || !isScheduleFrequency(frequency)}
-				on:click={() => save(true)}>Enable automatic scans</Button
-			>
-		{/if}
-		<Button size="sm" variant="outline" disabled={busy} on:click={() => load(showAlias)}
-			>Refresh schedule status</Button
-		>
+		</div>
 		{#if schedule?.lastRunAt}
-			<p>
-				Last run: {date(schedule.lastRunAt)} · {schedule.lastScanned} episodes saved · {schedule.lastSearches}
-				Spotify searches. {statuses[schedule.lastStatus]}
-			</p>
+			<dl class="settings-summary two-column">
+				<div>
+					<dt>Last run</dt>
+					<dd>{date(schedule.lastRunAt)}</dd>
+				</div>
+				<div>
+					<dt>Last run results</dt>
+					<dd>{schedule.lastScanned} episodes saved · {schedule.lastSearches} searches</dd>
+				</div>
+			</dl>
+			<p class="settings-note">{statuses[schedule.lastStatus]}</p>
 		{/if}
-		{#if message}<p role="status">{message}</p>{/if}
-	</div>
+		{#if message}<p class="settings-feedback" role="status">{message}</p>{/if}
+		<details class="settings-details">
+			<summary>How automatic scans work</summary>
+			<p>
+				Scans use your shared Spotify search allowance. Pending and failed episodes continue in
+				batches of up to five, with at least an hour between scheduled runs. Spotify cooldowns take
+				priority.
+			</p>
+			<p>
+				Playlist updates stay manual unless you enable automatic playlist updates separately below.
+			</p>
+		</details>
+	</section>
 {/if}

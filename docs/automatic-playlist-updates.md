@@ -143,10 +143,16 @@ never returned by the history API. Chrome/FCM and Firefox push endpoints are all
 endpoints/private addresses are not accepted. Safari is not currently supported.
 
 The registration control checks this browser's permission and local subscription against the saved
-server device ID. It shows **Notifications enabled on this device** only when all three match,
+server device ID. It shows an **Enabled** badge and **Notifications are enabled on this device** only when all three match,
 including after reload. A saved device entry on its own is not evidence that the current browser
 is registered. Removing the current device makes the enable action available again; blocked browser
-permission directs the user to the site's browser settings.
+permission directs the user to the site's browser settings. Each device has a distinct **Remove**
+button. Removal uses an inline **Confirm removal** / **Cancel** prompt rather than a browser dialog;
+cancelling sends no request and confirmed removal updates the device list and current-device state.
+
+Notification, scan, and playlist settings use spaced cards with normal-case text, status badges,
+and native disabled buttons. Longer delivery and automation explanations are expandable; current
+status, next eligible scan, last-run results, and Spotify authorization remain visible.
 
 **Send test notification** sends only to the current registered device through the real encrypted
 Web Push path. It requires the permitted hosted session and same-origin JSON request. A persistent

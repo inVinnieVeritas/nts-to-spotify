@@ -5,7 +5,7 @@
 		prepareNotificationWorker,
 		type NotificationDeviceState
 	} from '$lib/utils/catalog-notifications.client';
-	import Button from './button.svelte';
+	let pendingRemoval: string | null = null;
 	let deviceState: NotificationDeviceState = { status: 'unknown', id: null };
 	let checking = true;
 	let testRetryUntil = 0;
@@ -97,8 +97,7 @@
 				}));
 			await save({ operation: 'subscribe', label, subscription: subscription.toJSON() });
 			await load();
-			message =
-				'This device is registered. Push is best effort; history remains available even when browser delivery is delayed.';
+			message = 'Device registered. You can now send a test notification.';
 		} catch {
 			message =
 				'Could not enable browser notifications. Check permission and server push configuration.';
@@ -131,7 +130,7 @@
 			if (result.status === 'accepted') {
 				testRetryUntil = Date.now() + 30000;
 				message =
-					'Test accepted by the push service. Check notifications on this device; delivery may be delayed. The test does not add a catalogue event.';
+					'Test sent to the push service. Check notifications on this device; delivery may be delayed.';
 			} else if (
 				result.status === 'rate-limited' &&
 				Number.isSafeInteger(result.retryAfterSeconds) &&
@@ -160,15 +159,12 @@
 	}
 
 	async function remove(id: string) {
-		if (
-			busy ||
-			checking ||
-			!confirm('Stop notifications to this device? Notification history will remain.')
-		)
-			return;
+		if (busy || checking || pendingRemoval !== id) return;
 		busy = true;
 		try {
 			await save({ operation: 'remove', id });
+			devices = devices.filter((device) => device.id !== id);
+			pendingRemoval = null;
 			await load();
 			message = 'Device removed.';
 		} catch {
@@ -181,69 +177,218 @@
 </script>
 
 {#if visible}
-	<section class="cloud-progress font-small-beast" aria-label="Catalogue notifications">
-		<h2>Catalogue notifications</h2>
-		<p>
-			Browser push works on registered devices, including Pixel Chrome. No email or paid
-			notification service. The last 100 events are kept here independently of delivery.
-		</p>
-		<Button
-			size="sm"
-			variant="outline"
-			disabled={busy ||
-				checking ||
-				!publicKey ||
-				['registered', 'blocked', 'unsupported', 'unknown'].includes(deviceState.status)}
-			on:click={subscribe}
-			>{checking
-				? 'Checking this device…'
-				: deviceState.status === 'registered'
-					? 'Notifications enabled on this device'
-					: deviceState.status === 'blocked'
-						? 'Notifications blocked on this device'
-						: deviceState.status === 'unsupported'
-							? 'Browser notifications unavailable'
-							: deviceState.status === 'unknown'
-								? 'Device status unavailable'
-								: 'Enable notifications on this device'}</Button
-		>
-		<Button size="sm" variant="outline" disabled={busy || checking} on:click={load}
-			>Refresh notification history</Button
-		>
-		{#if deviceState.status === 'registered'}
-			<Button
-				size="sm"
-				variant="outline"
-				disabled={busy || checking || !publicKey}
-				on:click={testNotification}>Send test notification</Button
+	<section class="settings-card notifications-card" aria-labelledby="notifications-heading">
+		<div class="settings-heading">
+			<h2 id="notifications-heading">Catalogue notifications</h2>
+			<span
+				class="status-badge"
+				class:active={deviceState.status === 'registered'}
+				class:warning={deviceState.status === 'blocked'}
 			>
-			<p>Notifications are enabled on this device. Use the test button to check delivery.</p>
+				{checking
+					? 'Checking…'
+					: deviceState.status === 'registered'
+						? 'Enabled'
+						: deviceState.status === 'blocked'
+							? 'Blocked'
+							: 'Not enabled'}
+			</span>
+		</div>
+		<p class="settings-description">Get alerts when new episodes or matching results are ready.</p>
+		{#if deviceState.status === 'registered'}
+			<p class="settings-note">Notifications are enabled on this device.</p>
 		{:else if deviceState.status === 'blocked'}
-			<p>Allow notifications in this site's browser settings, then refresh this page.</p>
+			<p class="settings-note">
+				Allow notifications in this site's browser settings, then refresh this page.
+			</p>
+		{:else if deviceState.status === 'unsupported'}
+			<p class="settings-note">This browser does not support notifications.</p>
+		{:else if !checking && deviceState.status === 'unknown'}
+			<p class="settings-note">Device status is unavailable. Refresh to check again.</p>
 		{/if}
-		{#if !publicKey}<p>Browser push has not been configured on the server.</p>{/if}
-		{#if capacityRemaining === 0}<p role="status">
-				Notification event capacity reached. New alerts are paused; contact the installation
-				operator before changing history.
+		<div class="settings-actions">
+			{#if deviceState.status === 'registered'}
+				<button
+					type="button"
+					class="control-button primary"
+					disabled={busy || checking || !publicKey}
+					on:click={testNotification}>Send test notification</button
+				>
+			{:else if deviceState.status === 'unregistered'}
+				<button
+					type="button"
+					class="control-button primary"
+					disabled={busy || checking || !publicKey}
+					on:click={subscribe}>Enable on this device</button
+				>
+			{/if}
+			<button type="button" class="control-button" disabled={busy || checking} on:click={load}
+				>Refresh status</button
+			>
+		</div>
+		{#if !publicKey}<p class="settings-feedback">
+				Browser push has not been configured on the server.
 			</p>{/if}
-		<ul>
-			{#each devices as device (device.id)}<li>
-					{device.label}
-					<button type="button" disabled={busy || checking} on:click={() => remove(device.id)}
-						>Remove device</button
-					>
-				</li>{/each}
-		</ul>
-		<ul>
-			{#each events as event (event.id)}<li>
-					<a href={`/shows/${encodeURIComponent(event.showAlias)}`}
-						>{event.showAlias.replaceAll('-', ' ')}</a
-					>: {event.kind === 'new-episodes' ? 'New episode detected' : 'Matches ready for review'} · {new Date(
-						event.createdAt
-					).toLocaleString()}
-				</li>{/each}
-		</ul>
-		{#if events.length === 0}<p>No recorded events yet.</p>{/if}
-		<p role="status" aria-live="polite">{message}</p>
+		{#if capacityRemaining === 0}<p class="settings-feedback" role="status">
+				Notification history capacity reached. New alerts are paused.
+			</p>{/if}
+		{#if message}<p class="settings-feedback" role="status" aria-live="polite">{message}</p>{/if}
+		<div class="notification-group">
+			<h3>Registered devices <span class="count">{devices.length}</span></h3>
+			<ul class="device-list">
+				{#each devices as device (device.id)}
+					<li class="device-row">
+						<div class="device-info">
+							<strong>{device.label}</strong>{#if device.id === deviceState.id}<span
+									class="device-caption">This device</span
+								>{/if}
+						</div>
+						{#if pendingRemoval !== device.id}
+							<button
+								type="button"
+								class="control-button danger"
+								aria-label={`Remove ${device.label}`}
+								disabled={busy || checking}
+								on:click={() => {
+									pendingRemoval = device.id;
+									message = '';
+								}}>Remove</button
+							>
+						{:else}
+							<div
+								class="remove-confirmation"
+								role="group"
+								aria-label={`Confirm removal of ${device.label}`}
+							>
+								<p>Stop alerts to {device.label}?</p>
+								<div class="confirmation-actions">
+									<button
+										type="button"
+										class="control-button danger"
+										disabled={busy || checking}
+										on:click={() => remove(device.id)}
+										>{busy ? 'Removing…' : 'Confirm removal'}</button
+									>
+									<button
+										type="button"
+										class="control-button"
+										disabled={busy}
+										on:click={() => (pendingRemoval = null)}>Cancel</button
+									>
+								</div>
+							</div>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+			{#if devices.length === 0}<p class="settings-muted">No devices registered yet.</p>{/if}
+		</div>
+		<div class="notification-group">
+			<h3>Recent activity</h3>
+			{#if events.length === 0}
+				<div class="empty-activity">
+					<strong>No catalogue alerts yet</strong>
+					<p>New episode and matching alerts will appear here. Test notifications are separate.</p>
+				</div>
+			{:else}
+				<ul class="event-list">
+					{#each events as event (event.id)}
+						<li>
+							<a href={`/shows/${encodeURIComponent(event.showAlias)}`}
+								>{event.showAlias.replaceAll('-', ' ')}</a
+							>
+							<p>
+								{event.kind === 'new-episodes'
+									? 'New episode detected'
+									: 'Matches ready for review'}
+							</p>
+							<time datetime={new Date(event.createdAt).toISOString()}
+								>{new Date(event.createdAt).toLocaleString()}</time
+							>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
+		<details class="settings-details">
+			<summary>About notifications</summary>
+			<p>
+				Free browser push, including Pixel Chrome. Delivery can be delayed. The last 100 catalogue
+				alerts stay in this history independently of browser delivery. Removing a device stops its
+				alerts and keeps the history.
+			</p>
+		</details>
 	</section>
 {/if}
+
+<style lang="postcss">
+	.notification-group {
+		margin-top: 22px;
+	}
+	.notification-group h3 {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 14px;
+		margin-bottom: 10px;
+	}
+	.count {
+		color: #646b61;
+		font-size: 12px;
+		background: #f0f1ed;
+		padding: 2px 7px;
+		border-radius: 12px;
+	}
+	.device-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		padding: 12px 0;
+		border-top: 1px solid #e7e9e1;
+	}
+	.device-info {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+		flex: 1 1 140px;
+		overflow-wrap: anywhere;
+	}
+	.device-caption {
+		font-size: 12px;
+		color: #687163;
+	}
+	.remove-confirmation {
+		flex: 1 1 100%;
+		padding: 12px;
+		border-radius: 8px;
+		background: #fbf2ee;
+	}
+	.confirmation-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin-top: 8px;
+	}
+	.empty-activity {
+		padding: 14px;
+		border: 1px dashed #d7dbd0;
+		border-radius: 8px;
+	}
+	.empty-activity p {
+		color: #646b61;
+		margin-top: 4px;
+	}
+	.event-list li {
+		padding: 12px 0;
+		border-top: 1px solid #e7e9e1;
+	}
+	.event-list a {
+		font-weight: 700;
+	}
+	time {
+		color: #687163;
+		font-size: 12px;
+	}
+</style>
