@@ -17,7 +17,6 @@ import {
 	isAutomaticPlaylistPublicState,
 	type AutomaticPlaylistPublicState
 } from './catalog-playlist-automation';
-import { fingerprintSpotifyPlaylist } from './playlist-preview.server';
 import {
 	fingerprintPlaylistSyncTarget,
 	isCatalogPlaylistSyncRecord,
@@ -553,22 +552,43 @@ export async function coordinateManualPlaylistRequest(
 		} else if (registry && ['apply-batch', 'append'].includes(body?.operation)) {
 			const final = response.ok && reply.confirmedPosition === reply.totalTrackCount;
 			const target = registry.value.target;
+			let observedBaseline: string | undefined;
+			if (final && target) {
+				// An acknowledgement is not a read observation. Keep the pending target
+				// fence until an exact read confirms it; never invent a raw fingerprint
+				// from requested metadata before it has actually been observed.
+				const previewEvent = {
+					...event,
+					request: new Request(event.request.url, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ operation: 'preview', playlistId, ...target })
+					})
+				};
+				const checked = await _handlePlaylistRequest(
+					previewEvent as Parameters<typeof _handlePlaylistRequest>[0],
+					signal
+				);
+				const observation = await checked.json().catch(() => null);
+				if (checked.status === 429 && isSafeRetryAfterSeconds(observation?.retryAfterSeconds))
+					await store.cooldown(observation.retryAfterSeconds, 'rate-limited');
+				if (
+					checked.ok &&
+					observation?.synchronized === true &&
+					observation.snapshotId === reply.snapshotId &&
+					hash(observation.stateFingerprint)
+				)
+					observedBaseline = observation.stateFingerprint;
+			}
 			await store.putAutomation(
 				registryId(playlistId),
 				{
 					...registry.value,
 					manualUntil: Date.now() + 5 * 60_000,
 					uncertain: response.status >= 500,
-					...(final && target
+					...(observedBaseline
 						? {
-								baseline: fingerprintSpotifyPlaylist({
-									playlistId,
-									snapshotId: reply.snapshotId,
-									name: target.name,
-									description: target.description,
-									public: target.public,
-									items: target.tracks
-								}),
+								baseline: observedBaseline,
 								target: undefined
 							}
 						: {})

@@ -45,6 +45,60 @@ Channeling must remain manual and its copied third-party playlist must remain un
 - Automation settings, encrypted tokens, subscriptions and recovery/outbox records are owner-scoped
   Firestore documents, not browser progress or JSON backups. Restoring a backup never enables writes.
 
+## Recovering acknowledged partial manual synchronization
+
+A settlement rejection now includes only fixed mismatch field names: `snapshot`, `title`,
+`description`, `visibility`, or (during explicit recovery) `tracks`. Neither the UI nor the
+response exposes the differing values. A mismatch is not proof of propagation delay or an external edit.
+Metadata and snapshot fingerprints remain exact. No description decoding or HTML stripping is used;
+an unexpected upstream representation remains blocked until its cause is established.
+
+For a saved, non-ambiguous acknowledged prefix (for example 100 of 257):
+
+1. After deploying the same image to the web service and worker, reload the current cloud catalogue.
+   Keep its playlist link and reviewed choices; do not forget the link or clear synchronization records.
+2. Wait for any displayed lease/cooldown deadline. Compare with Spotify explicitly.
+3. If incomplete, use **Verify and resume Spotify synchronization**. It requires the unchanged target,
+   operation/revision lease, exact acknowledged snapshot, metadata, and complete ordered prefix before
+   appending 100 and 57 remaining tracks. It does not repeat the first replacement or create a playlist.
+4. If verification still fails, stop and record the fixed mismatch names. A different snapshot or
+   genuine metadata/content difference still blocks writes; do not keep restarting Apply.
+5. Compare again after completion; it should report exact synchronization. A completely synchronized
+   fresh preview already needs no mutation.
+
+Dispatching/uncertain records and hosted uncertainty fences remain blocked. This procedure does not
+resolve an ambiguous accepted write or prove exactly-once delivery. If the browser has lost its
+acknowledged record, the app cannot infer that acknowledgement solely from 100 matching playlist items.
+No migration clears records or changes progress/backup versions.
+
+If final hosted read verification fails, the acknowledged result is retained but the pending manual
+target still fences automatic writes. After exact synchronization, explicitly re-enable automation
+only if desired, after the displayed cooldown/lease expires; re-enabling verifies the full state.
+An uncertain registry is never cleared by this recovery path.
+
+For this code-only redeployment, use a clean Cloud Shell checkout of this branch at the fix commit
+reported in the PR. Keep all existing environment, IAM/IAP, secrets and scheduler settings; do not
+regenerate keys, configure a new trigger, or rerun one-time setup. Pin both workloads to one digest:
+
+```bash
+git fetch origin codex/automatic-playlist-updates
+git switch codex/automatic-playlist-updates
+git pull --ff-only origin codex/automatic-playlist-updates
+git rev-parse HEAD # Verify against the reviewed fix commit before building.
+nts_build_id=$(gcloud builds submit . --project=gen-lang-client-0941278185 --region=europe-west1 \
+  --tag=europe-west1-docker.pkg.dev/gen-lang-client-0941278185/nts-staging/app:sync-settlement-fix --format='value(id)')
+nts_digest=$(gcloud builds describe "$nts_build_id" --project=gen-lang-client-0941278185 --region=europe-west1 --format='value(results.images[0].digest)')
+nts_image="europe-west1-docker.pkg.dev/gen-lang-client-0941278185/nts-staging/app@$nts_digest"
+gcloud run services update nts-staging --project=gen-lang-client-0941278185 --region=europe-west1 --image="$nts_image" --no-traffic
+nts_revision=$(gcloud run services describe nts-staging --project=gen-lang-client-0941278185 --region=europe-west1 --format='value(status.latestCreatedRevisionName)')
+gcloud run revisions describe "$nts_revision" --project=gen-lang-client-0941278185 --region=europe-west1
+# Stop unless the exact revision is Ready and existing configuration/secrets remain correct.
+gcloud run jobs update nts-catalog-scans --project=gen-lang-client-0941278185 --region=europe-west1 --image="$nts_image"
+gcloud run services update-traffic nts-staging --project=gen-lang-client-0941278185 --region=europe-west1 --to-revisions="$nts_revision=100"
+```
+
+These instructions have not been executed by this implementation.
+
 ## Spotify authorization
 
 The hosted account gate and Google IAP remain required. The owner clicks **Authorize background

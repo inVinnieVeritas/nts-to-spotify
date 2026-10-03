@@ -74,6 +74,34 @@ export type PlaylistSyncTarget = {
 	tracks: string[];
 };
 
+// Read-only recovery is available only for an acknowledged prefix, never an
+// ambiguous dispatch. Ownership/CAS and the unchanged target are still required.
+export const canRecoverAcknowledgedPlaylistSync = (record: CatalogPlaylistSyncRecord | undefined) =>
+	Boolean(
+		record?.phase === 'blocked' &&
+		record.reason === 'external-change' &&
+		record.playlistId &&
+		record.snapshotId &&
+		record.confirmedPosition > 0 &&
+		!record.restartRequired
+	);
+
+export const playlistSettlementDiagnostic = (body: unknown): string => {
+	const value = body as { mismatches?: unknown } | null;
+	const allowed = ['snapshot', 'title', 'description', 'visibility', 'tracks'];
+	if (
+		!Array.isArray(value?.mismatches) ||
+		value.mismatches.length > allowed.length ||
+		!value.mismatches.every((field) => typeof field === 'string' && allowed.includes(field))
+	)
+		return '';
+	const mismatches = value.mismatches as string[];
+	const fields = allowed.filter((field) => mismatches.includes(field));
+	return fields.length
+		? `Spotify has not confirmed these fields: ${fields.join(', ')}. No further tracks were sent.`
+		: '';
+};
+
 // A preview is an observation, not a mutation acknowledgement. Keep its display
 // authority in memory without changing the durable recovery record or its lease.
 export const playlistSyncRecordStamp = (record: CatalogPlaylistSyncRecord | undefined) =>
@@ -625,7 +653,7 @@ export const persistCreatedPlaylistBeforeSync = async (
 	return (await persist(result.playlistId)) ? result.playlistId : undefined;
 };
 
-export type PlaylistSyncRunResult =
+export type PlaylistSyncRunResult = (
 	| { type: 'completed'; record: CatalogPlaylistSyncRecord }
 	| { type: 'paused'; record: CatalogPlaylistSyncRecord; retryAfterSeconds: number }
 	| {
@@ -633,7 +661,8 @@ export type PlaylistSyncRunResult =
 			record: CatalogPlaylistSyncRecord;
 			error: string;
 			readOnlyPreview?: ClientSpotifyPlaylistPreview;
-	  };
+	  }
+) & { settlementDiagnostic?: string };
 
 export const playlistSyncEligibility = (
 	record: CatalogPlaylistSyncRecord | undefined,
@@ -679,6 +708,7 @@ export const runPlaylistSyncBatches = async (input: {
 	target: PlaylistSyncTarget;
 	previewFingerprint?: string;
 	previewInputSignature?: string;
+	recoverAcknowledgedPrefix?: boolean;
 	request: (body: unknown, signal?: AbortSignal) => Promise<{ response: Response; body: unknown }>;
 	persist: (record: CatalogPlaylistSyncRecord) => Promise<CatalogPlaylistSyncRecord | void>;
 	now?: () => number;
@@ -752,7 +782,10 @@ export const runPlaylistSyncBatches = async (input: {
 	if (record.phase === 'dispatching') {
 		await save({ ...record, phase: 'uncertain', reason: 'uncertain', updatedAt: now() });
 	}
-	if (record.phase === 'blocked')
+	if (
+		record.phase === 'blocked' &&
+		!(input.recoverAcknowledgedPrefix && canRecoverAcknowledgedPlaylistSync(record))
+	)
 		return {
 			type: 'interrupted',
 			record,
@@ -800,6 +833,18 @@ export const runPlaylistSyncBatches = async (input: {
 			return await stop('uncertain', 'uncertain', 'playlist_outcome_uncertain');
 		}
 	}
+	if (input.recoverAcknowledgedPrefix) {
+		if (!canRecoverAcknowledgedPlaylistSync(record))
+			throw new Error('Invalid acknowledged recovery');
+		await save({
+			...record,
+			phase: 'settling',
+			reason: 'settling',
+			retryUntil: undefined,
+			settleUntil: now() + PLAYLIST_SYNC_SETTLE_MS,
+			updatedAt: now()
+		});
+	}
 	if (record.retryUntil) {
 		const settling = Boolean(record.snapshotId);
 		await save({
@@ -818,6 +863,11 @@ export const runPlaylistSyncBatches = async (input: {
 
 	// Three read-only probes per action. Further attempts require a user click
 	// after a persisted deadline; no unbounded poll or replacement loop.
+	// Recheck on every re-entry, including after another settlement interruption.
+	// The check is not an in-memory permission that disappears across reloads.
+	let verifyAcknowledgedPrefix = Boolean(
+		record.snapshotId && !record.restartRequired && record.confirmedPosition > 0
+	);
 	const settle = async (): Promise<PlaylistSyncRunResult | undefined> => {
 		if (!record.snapshotId) return;
 		if (!record.settleUntil)
@@ -828,6 +878,7 @@ export const runPlaylistSyncBatches = async (input: {
 				settleUntil: now() + PLAYLIST_SYNC_SETTLE_MS,
 				updatedAt: now()
 			});
+		let diagnostic = '';
 		for (let attempt = 0; attempt < 3; attempt++) {
 			throwIfAborted(input.signal);
 			const { response, body } = await input.request(
@@ -837,7 +888,10 @@ export const runPlaylistSyncBatches = async (input: {
 					expectedSnapshotId: record.snapshotId,
 					name: input.target.name,
 					description: input.target.description,
-					public: input.target.public
+					public: input.target.public,
+					...(verifyAcknowledgedPrefix
+						? { expectedTracks: input.target.tracks.slice(0, record.confirmedPosition) }
+						: {})
 				},
 				input.signal
 			);
@@ -856,6 +910,7 @@ export const runPlaylistSyncBatches = async (input: {
 					retryUntil: undefined,
 					updatedAt: now()
 				});
+				verifyAcknowledgedPrefix = false;
 				return;
 			}
 			if (
@@ -863,13 +918,20 @@ export const runPlaylistSyncBatches = async (input: {
 				(body as Record<string, unknown> | null)?.error !== 'playlist_settling'
 			)
 				return unavailable(response, body, false);
+			diagnostic = playlistSettlementDiagnostic(body);
 			if (now() >= record.settleUntil!)
 				// Preserve the existing conflict gate. Exhausted settlement reads are
 				// unverified state, not proof of an edit; the UI reports that distinction.
-				return stop('blocked', 'external-change', 'playlist_state_unverified');
+				return {
+					...(await stop('blocked', 'external-change', 'playlist_state_unverified')),
+					settlementDiagnostic: diagnostic
+				};
 			if (attempt < 2) await delay(1000, input.signal);
 		}
-		return stop('settling', 'settling', 'playlist_settling', now() + 5_000);
+		return {
+			...(await stop('settling', 'settling', 'playlist_settling', now() + 5_000)),
+			settlementDiagnostic: diagnostic
+		};
 	};
 
 	let mutationOutstanding = false;

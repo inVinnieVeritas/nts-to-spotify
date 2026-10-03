@@ -29,6 +29,37 @@ const target = (tracks: string[], overrides: Record<string, unknown> = {}) => ({
 });
 
 describe('Spotify playlist preview comparison', () => {
+	it('does not infer description equivalence from escaped text or strip metadata', () => {
+		const plain = 'Jim O\'Rourke & guests <archive> "quoted"';
+		for (const encoded of [
+			'Jim O&#x27;Rourke &amp; guests &lt;archive&gt; &quot;quoted&quot;',
+			'Jim O&#39;Rourke &#38; guests &#60;archive&#62; &#34;quoted&#34;'
+		]) {
+			expect(
+				compareSpotifyPlaylist(
+					current([uri(1)], { description: encoded }),
+					target([uri(1)], { description: plain })
+				).synchronized
+			).toBe(false);
+			expect(fingerprintSpotifyPlaylist(current([uri(1)], { description: encoded }))).not.toBe(
+				fingerprintSpotifyPlaylist(current([uri(1)], { description: plain }))
+			);
+		}
+		for (const [actual, requested] of [
+			['A &amp;amp; B', 'A & B'],
+			['A & B', 'A &amp; B'],
+			['<b>Archive</b>', 'Archive'],
+			['Different description', 'Description'],
+			['Description ', 'Description'],
+			['&#65;rchive', 'Archive']
+		])
+			expect(
+				compareSpotifyPlaylist(
+					current([uri(1)], { description: actual }),
+					target([uri(1)], { description: requested })
+				).descriptionChanged
+			).toBe(true);
+	});
 	it('canonicalizes only exact Spotify track URIs from valid non-local track items', () => {
 		const trackUri = uri(1);
 		expect(canonicalSpotifyTrackUri(trackUri)).toBe(trackUri);

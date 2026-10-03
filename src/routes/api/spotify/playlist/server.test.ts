@@ -346,9 +346,92 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(response.headers.get('Retry-After')).toBe('5');
 		expect(await response.json()).toEqual({
 			error: 'playlist_settling',
-			retryAfterSeconds: 5
+			retryAfterSeconds: 5,
+			mismatches: ['snapshot']
 		});
 		expect(fetcher.mock.calls).toHaveLength(2);
+		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
+	});
+
+	it.each([
+		{ field: 'title', metadata: { name: 'External title' } },
+		{ field: 'description', metadata: { description: 'External description' } },
+		{ field: 'visibility', metadata: { public: false } }
+	])('identifies only the failed $field settlement condition', async ({ field, metadata }) => {
+		const fetcher = playlistReadFetcher([], metadata);
+		const response = await POST({
+			fetch: fetcher,
+			request: requestFor({
+				operation: 'settle',
+				playlistId: PLAYLIST_ID,
+				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+				name: CURRENT_PLAYLIST.name,
+				description: CURRENT_PLAYLIST.description,
+				public: CURRENT_PLAYLIST.public
+			})
+		} as never);
+		expect(response.status).toBe(409);
+		expect(await response.json()).toEqual({
+			error: 'playlist_settling',
+			retryAfterSeconds: 5,
+			mismatches: [field]
+		});
+		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
+	});
+
+	it.each([
+		{ observed: [trackUri(1), trackUri(2)], confirmed: [trackUri(1), trackUri(2)], status: 200 },
+		{ observed: [trackUri(2), trackUri(1)], confirmed: [trackUri(1), trackUri(2)], status: 409 },
+		{
+			observed: [trackUri(1), trackUri(2), trackUri(3)],
+			confirmed: [trackUri(1), trackUri(2)],
+			status: 409
+		},
+		{ observed: [trackUri(1), null], confirmed: [trackUri(1), trackUri(2)], status: 409 }
+	])(
+		'verifies the exact ordered acknowledged prefix read-only ($status)',
+		async ({ observed, confirmed, status }) => {
+			const fetcher = playlistReadFetcher(observed);
+			const response = await POST({
+				fetch: fetcher,
+				request: requestFor({
+					operation: 'settle',
+					playlistId: PLAYLIST_ID,
+					expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+					name: CURRENT_PLAYLIST.name,
+					description: CURRENT_PLAYLIST.description,
+					public: CURRENT_PLAYLIST.public,
+					expectedTracks: confirmed
+				})
+			} as never);
+			expect(response.status).toBe(status);
+			if (status === 409) expect((await response.json()).mismatches).toEqual(['tracks']);
+			expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
+		}
+	);
+
+	it('refuses recovery if metadata changes while reading the prefix', async () => {
+		const normal = playlistReadFetcher([trackUri(1)]);
+		let reads = 0;
+		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (String(input).includes('snapshot_id,name,description,public') && ++reads === 2)
+				return jsonResponse({ ...playlistMetadata(), snapshot_id: 'external-new-snapshot' });
+			return normal(input, init);
+		});
+		const response = await POST({
+			fetch: fetcher,
+			request: requestFor({
+				operation: 'settle',
+				playlistId: PLAYLIST_ID,
+				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+				name: CURRENT_PLAYLIST.name,
+				description: CURRENT_PLAYLIST.description,
+				public: CURRENT_PLAYLIST.public,
+				expectedTracks: [trackUri(1)]
+			})
+		} as never);
+		expect(response.status).toBe(409);
+		expect((await response.json()).mismatches).toEqual(['snapshot']);
 		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
 	});
 

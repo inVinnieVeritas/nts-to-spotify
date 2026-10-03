@@ -19,6 +19,7 @@
 	} from '$lib/utils/playlist-preview.client';
 	import {
 		CATALOG_PLAYLIST_SYNC_VERSION,
+		canRecoverAcknowledgedPlaylistSync,
 		PLAYLIST_SYNC_LEASE_MS,
 		createPlaylistSyncOperationId,
 		fingerprintPlaylistSyncTarget,
@@ -76,6 +77,7 @@
 	let working = false;
 	let message = '';
 	let failure = '';
+	let settlementDiagnostic = '';
 	let responsePlaylistId: string | undefined;
 	let recoveryValue = '';
 	let existingPlaylistValue = '';
@@ -139,6 +141,7 @@
 		previewSyncStamp = undefined;
 		message = '';
 		failure = '';
+		settlementDiagnostic = '';
 	}
 	$: syncFeedback = playlistSyncFeedback(
 		localSyncRecord,
@@ -153,7 +156,9 @@
 			? resumableSync
 				? syncEligibility.label
 				: preview && !preview.synchronized
-					? 'Apply Spotify update'
+					? canRecoverAcknowledgedPlaylistSync(localSyncRecord)
+						? 'Verify and resume Spotify synchronization'
+						: 'Apply Spotify update'
 					: 'Compare with Spotify playlist'
 			: creationPending
 				? 'Creation outcome pending'
@@ -341,6 +346,7 @@
 			previewSyncStamp = ticket.stamp;
 			failure = '';
 			message = '';
+			settlementDiagnostic = '';
 		} catch {
 			if (!current()) return;
 			failure = 'Preview failed. Try again.';
@@ -367,6 +373,7 @@
 		playlistController = controller;
 		failure = '';
 		message = linkedPlaylistId ? 'Applying Spotify update…' : 'Creating Spotify playlist…';
+		settlementDiagnostic = '';
 		if (
 			catalogueMode &&
 			creatingNew &&
@@ -395,14 +402,18 @@
 				localSyncRecord &&
 				localSyncRecord.targetFingerprint !== targetFingerprint &&
 				localSyncRecord.phase !== 'completed' &&
-				!(localSyncRecord.phase === 'blocked' && localSyncRecord.reason === 'external-change')
+				!(
+					localSyncRecord.phase === 'blocked' &&
+					localSyncRecord.reason === 'external-change' &&
+					!canRecoverAcknowledgedPlaylistSync(localSyncRecord)
+				)
 			) {
 				failure =
 					'Restore the synchronization target before continuing. An unfinished operation cannot be replaced with different selections or settings.';
 				return;
 			}
 			let record: CatalogPlaylistSyncRecord =
-				previous && previous.phase !== 'blocked'
+				previous && (previous.phase !== 'blocked' || canRecoverAcknowledgedPlaylistSync(previous))
 					? previous
 					: {
 							version: CATALOG_PLAYLIST_SYNC_VERSION,
@@ -528,6 +539,7 @@
 				target,
 				previewFingerprint,
 				previewInputSignature: requestedSignature,
+				recoverAcknowledgedPrefix: canRecoverAcknowledgedPlaylistSync(record),
 				request: requestApi,
 				persist: async (next) => {
 					const saved = await persistSyncRecord(next);
@@ -537,6 +549,7 @@
 				signal: controller.signal
 			});
 			if (disposed || playlistController !== controller) return;
+			settlementDiagnostic = outcome.settlementDiagnostic ?? '';
 			if (outcome.type === 'completed') {
 				message = `Spotify playlist ${outcome.record.mode === 'created' ? 'created' : 'updated'} with ${outcome.record.totalTrackCount.toLocaleString('en-US')} unique tracks.`;
 				preview = undefined;
@@ -579,6 +592,7 @@
 	const dismissPreview = () => {
 		previewGuard.invalidate();
 		previewSyncStamp = undefined;
+		settlementDiagnostic = '';
 		const dismissed = dismissPlaylistPreview({ preview, message, failure });
 		preview = dismissed.preview;
 		message = dismissed.message;
@@ -792,6 +806,9 @@
 			</div>
 		{/if}
 		{#if linkedPlaylistId}
+			{#if settlementDiagnostic}
+				<p class="font-small-beast" role="status" aria-live="polite">{settlementDiagnostic}</p>
+			{/if}
 			<a class="font-small-beast" href={playlistUrl} target="_blank" rel="noreferrer"
 				>Open playlist</a
 			>
@@ -836,6 +853,12 @@
 						Updating replaces the linked Spotify playlist contents. Manual changes made directly in
 						Spotify will be removed.
 					</p>
+					{#if canRecoverAcknowledgedPlaylistSync(localSyncRecord)}
+						<p class="font-small-beast">
+							Resume first verifies the acknowledged snapshot, metadata and exact ordered tracks. It
+							appends only the remaining tracks and does not replace the confirmed prefix.
+						</p>
+					{/if}
 				{/if}
 				<Button
 					type="button"

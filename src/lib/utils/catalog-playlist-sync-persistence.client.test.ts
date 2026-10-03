@@ -633,7 +633,7 @@ describe('catalogue playlist synchronization persistence', () => {
 			(values.get('show') as { playlist: { linkedPlaylistId: string } }).playlist.linkedPlaylistId
 		).toBe(PLAYLIST_ID);
 	});
-	it.each([181, 1508])(
+	it.each([181, 257, 1508])(
 		'connects creation, durable ID, client, real endpoint and CAS for %i tracks with delayed settlement',
 		async (count) => {
 			const { factory, values } = memoryFactory(),

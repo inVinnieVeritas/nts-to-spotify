@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 vi.mock('$env/dynamic/private', () => ({
 	env: {
 		NTS_FIRESTORE_PROJECT: 'test-project-123',
@@ -34,7 +35,11 @@ import { POST } from '../../routes/api/spotify/playlist/+server';
 import { getSpotifySessionMetrics } from './spotify.server';
 import { loadCloudProgress, saveCloudProgress } from './catalog-cloud.server';
 import { runScheduledScan } from './catalog-schedule-worker.server';
-import { runPlaylistSyncBatches, fingerprintPlaylistSyncTarget } from './playlist-sync.client';
+import {
+	runPlaylistSyncBatches,
+	fingerprintPlaylistSyncTarget,
+	type CatalogPlaylistSyncRecord
+} from './playlist-sync.client';
 import type { CatalogProgress, EpisodeState, ReviewTrack } from './catalog-scan';
 
 const playlistId = 'ABCDEFGHIJKLMNOPQRSTUV';
@@ -484,6 +489,196 @@ describe('opt-in automatic linked playlist updates', () => {
 		expect(f.writes()).toHaveLength(count);
 		expect((await f.state()).status).toBe('unchanged');
 	});
+	it.each([false, true])(
+		'handles a changed description for a hosted manual 257-track target without assuming encoding (escaped=%s)',
+		async (escaped) => {
+			const f = await fixture();
+			await f.enable();
+			f.change(Array.from({ length: 257 }, (_, i) => track(i + 1)));
+			f.progress.playlist.description = "Tracks played on Jim O'Rourke & guests.";
+			let description = 'Old description';
+			f.setOverride((url, init) => {
+				if (url.endsWith('/' + playlistId) && init?.method === 'PUT') {
+					description = JSON.parse(String(init.body)).description;
+					if (escaped) description = description.replaceAll('&', '&amp;').replaceAll("'", '&#x27;');
+				}
+				return undefined;
+			});
+			// Keep snapshot and ordered items real; change only Spotify's description representation.
+			const upstream = async (input: RequestInfo | URL, init?: RequestInit) => {
+				const response = await f.request(input, init);
+				if (String(input).includes('snapshot_id,name,description,public')) {
+					return Response.json({ ...(await response.json()), description });
+				}
+				return response;
+			};
+			const request = async (body: unknown) => {
+				const response = await POST({
+					fetch: upstream,
+					request: new Request('https://nts2spotify.vincentvanderveken.com/api/spotify/playlist', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(body)
+					})
+				} as never);
+				return { response, body: await response.json() };
+			};
+			const target = automaticPlaylistTarget(f.progress);
+			const reviewed = structuredClone(f.progress);
+			const preview = await request({ operation: 'preview', playlistId, ...target });
+			expect(preview.body.descriptionChanged).toBe(true);
+			const clock = Date.now();
+			const outcome = await runPlaylistSyncBatches({
+				record: {
+					version: 1,
+					revision: 0,
+					catalogueAlias: 'dimension-door',
+					operationId: 'manual_123456789012',
+					playlistId,
+					targetFingerprint: await fingerprintPlaylistSyncTarget(playlistId, target),
+					totalTrackCount: 257,
+					confirmedPosition: 0,
+					phase: 'interrupted',
+					mode: 'updated',
+					startedAt: clock,
+					updatedAt: clock,
+					restartRequired: true
+				},
+				target,
+				previewFingerprint: preview.body.previewFingerprint,
+				request,
+				persist: async () => undefined,
+				delay: async () => undefined
+			});
+			if (escaped) {
+				expect(outcome.record.phase).toBe('settling');
+				expect(outcome.record.confirmedPosition).toBe(100);
+				expect(outcome.settlementDiagnostic).toContain('description');
+				expect(f.items).toEqual(target.tracks.slice(0, 100));
+				expect(f.writes().filter((r) => r.url.endsWith('/items'))).toHaveLength(1);
+				expect(f.progress).toEqual(reviewed);
+				return;
+			}
+			expect(outcome.type).toBe('completed');
+			expect(f.items).toEqual(target.tracks);
+			expect(f.progress).toEqual(reviewed);
+			expect(
+				f
+					.writes()
+					.filter((r) => r.url.endsWith('/items'))
+					.map((r) => [r.method, (r.body as { uris: string[] }).uris.length])
+			).toEqual([
+				['PUT', 100],
+				['POST', 100],
+				['POST', 57]
+			]);
+			expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
+			const exact = await request({ operation: 'preview', playlistId, ...target });
+			expect(exact.body.synchronized).toBe(true);
+			const registry = await f.store.getAutomation(
+				'owned-' + createHash('sha256').update(playlistId).digest('hex'),
+				(value: unknown): value is Record<string, unknown> =>
+					Boolean(value && typeof value === 'object')
+			);
+			expect(registry!.value).toMatchObject({
+				baseline: exact.body.stateFingerprint,
+				uncertain: false
+			});
+			expect(registry!.value.target).toBeUndefined();
+		}
+	);
+	it('recovers a blocked 100/257 acknowledged prefix without another replacement or playlist creation', async () => {
+		const f = await fixture();
+		await f.enable();
+		f.change(Array.from({ length: 257 }, (_, i) => track(i + 1)));
+		f.progress.playlist.description = 'New coverage description';
+		const target = automaticPlaylistTarget(f.progress);
+		let stale = true;
+		const upstream = async (input: RequestInfo | URL, init?: RequestInit) => {
+			const response = await f.request(input, init);
+			if (stale && String(input).includes('snapshot_id,name,description,public'))
+				return Response.json({
+					...(await response.json()),
+					description: 'Old coverage description'
+				});
+			return response;
+		};
+		const request = async (body: unknown) => {
+			const response = await POST({
+				fetch: upstream,
+				request: new Request('https://nts2spotify.vincentvanderveken.com/api/spotify/playlist', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(body)
+				})
+			} as never);
+			return { response, body: await response.json() };
+		};
+		const preview = await request({ operation: 'preview', playlistId, ...target });
+		const clock = Date.now();
+		let saved = {
+			version: 1,
+			revision: 0,
+			catalogueAlias: 'dimension-door',
+			operationId: 'recovery_1234567890',
+			playlistId,
+			targetFingerprint: await fingerprintPlaylistSyncTarget(playlistId, target),
+			totalTrackCount: 257,
+			confirmedPosition: 0,
+			phase: 'interrupted',
+			mode: 'updated',
+			startedAt: clock,
+			updatedAt: clock,
+			restartRequired: true
+		} as CatalogPlaylistSyncRecord;
+		const persist = async (next: CatalogPlaylistSyncRecord) => {
+			saved = structuredClone({ ...next, revision: saved.revision + 1 });
+			return saved;
+		};
+		const first = await runPlaylistSyncBatches({
+			record: saved,
+			target,
+			request,
+			persist,
+			previewFingerprint: preview.body.previewFingerprint,
+			now: () => Date.now(),
+			delay: async () => f.advance(31_000)
+		});
+		expect(first.record.phase).toBe('blocked');
+		expect(first.record.confirmedPosition).toBe(100);
+		expect(first.settlementDiagnostic).toContain('description');
+		expect(f.items).toEqual(target.tracks.slice(0, 100));
+		// A fresh read observes the acknowledged metadata. Do not infer its outcome
+		// from elapsed time: recovery must prove the exact snapshot and ordered prefix.
+		stale = false;
+		const restored = structuredClone(saved);
+		const second = await runPlaylistSyncBatches({
+			record: restored,
+			target,
+			request,
+			persist,
+			recoverAcknowledgedPrefix: true,
+			delay: async () => undefined
+		});
+		expect(second.type).toBe('completed');
+		expect(second.record.operationId).toBe(restored.operationId);
+		expect(second.record.playlistId).toBe(playlistId);
+		expect(f.items).toEqual(target.tracks);
+		expect(
+			f
+				.writes()
+				.filter((r) => r.url.endsWith('/items'))
+				.map((r) => [r.method, (r.body as { uris: string[] }).uris.length])
+		).toEqual([
+			['PUT', 100],
+			['POST', 100],
+			['POST', 57]
+		]);
+		expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
+		expect((await request({ operation: 'preview', playlistId, ...target })).body.synchronized).toBe(
+			true
+		);
+	});
 	it('public status omits tokens, targets, lease data and recovery diagnostics', async () => {
 		const f = await fixture();
 		await f.enable();
@@ -498,6 +693,50 @@ describe('opt-in automatic linked playlist updates', () => {
 			'status'
 		]);
 		expect(JSON.stringify([...f.fs.documents.values()])).not.toContain('dummy-refresh');
+	});
+	it('retains a manual target fence and durable cooldown when final read verification is rate limited', async () => {
+		const f = await fixture();
+		await f.enable();
+		f.change();
+		const target = automaticPlaylistTarget(f.progress);
+		const preview = await f.service.execute(
+			{ operation: 'preview', playlistId, ...target },
+			'dummy-access',
+			f.signal
+		);
+		let acknowledged = false;
+		f.setOverride((url, init) => {
+			if (url.endsWith('/items') && init?.method === 'PUT') acknowledged = true;
+			if (acknowledged && url.includes('/items?'))
+				return new Response(null, { status: 429, headers: { 'Retry-After': '30600' } });
+			return undefined;
+		});
+		const response = await POST({
+			fetch: f.request,
+			request: new Request('https://nts2spotify.vincentvanderveken.com/api/spotify/playlist', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					operation: 'apply-batch',
+					playlistId,
+					previewFingerprint: preview.body.previewFingerprint,
+					...target
+				})
+			})
+		} as never);
+		expect(response.status).toBe(200);
+		expect((await response.json()).confirmedPosition).toBe(target.tracks.length);
+		const registry = await f.store.getAutomation(
+			'owned-' + createHash('sha256').update(playlistId).digest('hex'),
+			(value: unknown): value is Record<string, unknown> =>
+				Boolean(value && typeof value === 'object')
+		);
+		expect(registry!.value.target).toEqual(target);
+		expect(registry!.value.uncertain).toBe(false);
+		const claim = await f.store.acquire('playlist');
+		expect(claim.lease).toBeUndefined();
+		expect(claim.cooldownUntil).toBeGreaterThan(Date.now() + 8 * 3600_000);
+		expect(f.writes().filter((r) => r.url.endsWith('/items'))).toHaveLength(1);
 	});
 	it('rejects mismatched owner even with a valid token', async () => {
 		const f = await fixture();

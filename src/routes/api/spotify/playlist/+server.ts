@@ -67,7 +67,7 @@ type PlaylistVerifyRequest = { operation: 'verify'; playlistId: string };
 type PlaylistSettleRequest = Omit<
 	PlaylistAppendRequest,
 	'operation' | 'operationId' | 'targetFingerprint' | 'position' | 'totalTrackCount' | 'tracks'
-> & { operation: 'settle' };
+> & { operation: 'settle'; expectedTracks?: string[] };
 type PlaylistRequest =
 	| PlaylistCreateRequest
 	| PlaylistPreviewRequest
@@ -206,7 +206,11 @@ export const _parseRequest = async (
 			value.name.length > 100 ||
 			typeof value.description !== 'string' ||
 			value.description.length > 300 ||
-			typeof value.public !== 'boolean'
+			typeof value.public !== 'boolean' ||
+			(value.expectedTracks !== undefined &&
+				(!Array.isArray(value.expectedTracks) ||
+					value.expectedTracks.length > SPOTIFY_PLAYLIST_MAX_TRACKS ||
+					!value.expectedTracks.every((uri: unknown) => canonicalSpotifyTrackUri(uri))))
 		)
 			throw new SpotifyPlaylistFailure('request-rejected');
 		return {
@@ -215,7 +219,10 @@ export const _parseRequest = async (
 			expectedSnapshotId: value.expectedSnapshotId,
 			name: value.name.trim(),
 			description: value.description,
-			public: value.public
+			public: value.public,
+			...(value.expectedTracks === undefined
+				? {}
+				: { expectedTracks: value.expectedTracks as string[] })
 		};
 	}
 	if (value.operation === 'append') {
@@ -686,12 +693,8 @@ export const _handlePlaylistRequest = async (
 				playlistId: payload.playlistId,
 				mode: 'preview',
 				previewFingerprint: fingerprintSpotifyPlaylistPreview(current, payload),
-				...(background
-					? {
-							stateFingerprint: fingerprintSpotifyPlaylist(current),
-							snapshotId: current.snapshotId
-						}
-					: {}),
+				stateFingerprint: fingerprintSpotifyPlaylist(current),
+				snapshotId: current.snapshotId,
 				...preview
 			});
 		}
@@ -732,15 +735,40 @@ export const _handlePlaylistRequest = async (
 				payload.playlistId,
 				signal
 			);
-			if (
-				current.snapshotId !== payload.expectedSnapshotId ||
-				current.name !== payload.name ||
-				current.description !== payload.description ||
-				current.public !== payload.public
-			) {
+			const mismatches: string[] = [];
+			if (current.snapshotId !== payload.expectedSnapshotId) mismatches.push('snapshot');
+			if (current.name !== payload.name) mismatches.push('title');
+			if (current.description !== payload.description) mismatches.push('description');
+			if (current.public !== payload.public) mismatches.push('visibility');
+			if (payload.expectedTracks && mismatches.length === 0) {
+				// Explicit recovery verifies the complete acknowledged prefix, not just
+				// membership/counts. Re-read metadata after pagination to fence changes.
+				const items = await readPlaylistItems(event, headers, payload.playlistId, signal);
+				if (
+					items.length !== payload.expectedTracks.length ||
+					items.some((uri, index) => uri !== payload.expectedTracks![index])
+				)
+					mismatches.push('tracks');
+				const after = await readOwnedPlaylistSnapshot(
+					event,
+					headers,
+					userId,
+					payload.playlistId,
+					signal
+				);
+				if (after.snapshotId !== current.snapshotId) mismatches.push('snapshot');
+				if (after.name !== current.name) mismatches.push('title');
+				if (after.description !== current.description) mismatches.push('description');
+				if (after.public !== current.public) mismatches.push('visibility');
+			}
+			if (mismatches.length > 0) {
 				// A mismatching read alone cannot distinguish propagation from an external edit.
 				return json(
-					{ error: 'playlist_settling', retryAfterSeconds: 5 },
+					{
+						error: 'playlist_settling',
+						retryAfterSeconds: 5,
+						mismatches: [...new Set(mismatches)]
+					},
 					{ status: 409, headers: { 'Retry-After': '5' } }
 				);
 			}

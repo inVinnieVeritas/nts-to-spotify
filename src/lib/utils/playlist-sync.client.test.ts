@@ -19,6 +19,8 @@ import {
 	latestPlaylistSyncRecord,
 	playlistSyncRecordStamp,
 	playlistSyncFeedback,
+	canRecoverAcknowledgedPlaylistSync,
+	playlistSettlementDiagnostic,
 	type CatalogPlaylistSyncRecord,
 	type PlaylistSyncTarget
 } from './playlist-sync.client';
@@ -63,6 +65,131 @@ const prefix = {
 	phase: 'ready' as const
 };
 type Body = Record<string, unknown>;
+
+describe('acknowledged prefix recovery', () => {
+	it('revalidates a blocked prefix read-only before appending, without resetting its identity or position', async () => {
+		const record = await state(257, { ...prefix, phase: 'blocked', reason: 'external-change' });
+		const http = upstream(257, target(257).tracks.slice(0, 100));
+		const writes: CatalogPlaylistSyncRecord[] = [];
+		const outcome = await runPlaylistSyncBatches({
+			record,
+			target: target(257),
+			recoverAcknowledgedPrefix: true,
+			now: () => NOW,
+			delay: async () => undefined,
+			request: http.request,
+			persist: async (next) => {
+				writes.push(structuredClone(next));
+			}
+		});
+		expect(outcome.type).toBe('completed');
+		expect(http.requests[0]).toMatchObject({
+			operation: 'settle',
+			expectedSnapshotId: 's1',
+			expectedTracks: target(257).tracks.slice(0, 100)
+		});
+		expect(
+			http.requests
+				.filter((r) => r.operation === 'append')
+				.map((r) => (r.tracks as string[]).length)
+		).toEqual([100, 57]);
+		expect(
+			http.requests.some((r) => r.operation === 'apply-batch' || r.operation === 'create')
+		).toBe(false);
+		expect(
+			writes.every(
+				(r) =>
+					r.operationId === record.operationId && r.playlistId === ID && r.confirmedPosition >= 100
+			)
+		).toBe(true);
+	});
+	it('never recovers ambiguous outcomes or a changed target', async () => {
+		const record = await state(257, { ...prefix, phase: 'blocked', reason: 'uncertain' });
+		const request = vi.fn();
+		expect(canRecoverAcknowledgedPlaylistSync(record)).toBe(false);
+		const outcome = await runPlaylistSyncBatches({
+			record,
+			target: target(257),
+			recoverAcknowledgedPrefix: true,
+			request,
+			now: () => NOW,
+			persist: async () => undefined
+		});
+		expect(outcome.record.reason).toBe('uncertain');
+		expect(request).not.toHaveBeenCalled();
+		await expect(
+			runPlaylistSyncBatches({
+				record: { ...record, reason: 'external-change' },
+				target: { ...target(257), description: 'Changed' },
+				recoverAcknowledgedPrefix: true,
+				request,
+				now: () => NOW,
+				persist: async () => undefined
+			})
+		).rejects.toThrow('target changed');
+	});
+	it('rechecks the full prefix after recovery itself is interrupted and re-entered', async () => {
+		let clock = NOW;
+		const record = await state(257, { ...prefix, phase: 'blocked', reason: 'external-change' });
+		const first = await runPlaylistSyncBatches({
+			record,
+			target: target(257),
+			recoverAcknowledgedPrefix: true,
+			now: () => clock,
+			delay: async () => undefined,
+			persist: async () => undefined,
+			request: async () =>
+				result(
+					{
+						error: 'playlist_settling',
+						retryAfterSeconds: 5,
+						mismatches: ['description']
+					},
+					409
+				)
+		});
+		expect(first.record.phase).toBe('settling');
+		clock += 6000;
+		const requests: Body[] = [];
+		const second = await runPlaylistSyncBatches({
+			record: structuredClone(first.record),
+			target: target(257),
+			now: () => clock,
+			delay: async () => {
+				clock += 31_000;
+			},
+			persist: async () => undefined,
+			request: async (raw) => {
+				requests.push(raw as Body);
+				return result(
+					{ error: 'playlist_settling', retryAfterSeconds: 5, mismatches: ['tracks'] },
+					409
+				);
+			}
+		});
+		expect(second.record.phase).toBe('blocked');
+		expect(second.record.confirmedPosition).toBe(100);
+		expect(
+			requests.every(
+				(r) =>
+					r.operation === 'settle' &&
+					JSON.stringify(r.expectedTracks) === JSON.stringify(target(257).tracks.slice(0, 100))
+			)
+		).toBe(true);
+	});
+	it('only displays fixed field names from settlement diagnostics', () => {
+		expect(playlistSettlementDiagnostic({ mismatches: ['description', 'snapshot'] })).toContain(
+			'snapshot, description'
+		);
+		for (const mismatches of [
+			['secret=token'],
+			['description', 5],
+			'description',
+			Array(6).fill('tracks')
+		])
+			expect(playlistSettlementDiagnostic({ mismatches })).toBe('');
+	});
+});
 
 // Stateful HTTP fixture. Reads and writes are counted separately; settlement
 // cannot accidentally be counted as another successful mutation.
