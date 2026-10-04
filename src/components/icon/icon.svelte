@@ -9,6 +9,7 @@
 	import github from './icons/github.svg?raw';
 
 	import folder from './icons/folder.svg?raw';
+	import cloud from './icons/cloud.svg?raw';
 	import check_circle from './icons/check-circle.svg?raw';
 	import clock from './icons/clock.svg?raw';
 	import x_circle from './icons/x-circle.svg?raw';
@@ -32,6 +33,7 @@
 		stop,
 		github,
 		folder: folder,
+		cloud,
 		'check-circle': check_circle,
 		clock: clock,
 		'x-circle': x_circle,

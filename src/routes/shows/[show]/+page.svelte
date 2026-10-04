@@ -1160,7 +1160,6 @@
 	let reviewTrackCount = 0;
 	let reviewFilterCounts = getCatalogReviewFilterCounts(episodes);
 	let activeReviewCount = 0;
-	let progressLabel = '';
 	$: rawSelectedTracks = episodes.flatMap((episode) =>
 		episode.tracks
 			.filter((track) => track.checked && track.selectedMatch)
@@ -1183,7 +1182,6 @@
 	$: reviewTrackCount = getCatalogReviewTrackCount(episodes);
 	$: activeReviewCount = reviewFilterCounts[reviewFilter];
 	$: scanComplete = completedCount === episodes.length;
-	$: progressLabel = `${completedCount} scanned · ${pendingCount} pending · ${failedCount} failed`;
 
 	const episodeStatus = (episode: EpisodeState) => {
 		if (episode.status === 'pending') return 'Waiting';
@@ -1564,16 +1562,15 @@
 					{/if}
 				</div>
 				<div class="catalogue-state-line">
-					{#if data.user}<span class="scan-progress-caption">{progressLabel}</span>{/if}
 					<span class:connected={Boolean(linkedPlaylistId)}
-						><span aria-hidden="true"><Icon icon="link" /></span>{linkedPlaylistId
+						><span aria-hidden="true"><Icon icon="spotify" /></span>{linkedPlaylistId
 							? 'Spotify playlist linked'
 							: 'No Spotify playlist linked'}</span
 					>
 					<span
 						class:connected={cloudState === 'active'}
 						class:attention={cloudState === 'conflict' || cloudState === 'unavailable'}
-						><span aria-hidden="true"><Icon icon="folder" /></span>{cloudState === 'active'
+						><span aria-hidden="true"><Icon icon="cloud" /></span>{cloudState === 'active'
 							? 'Cloud progress connected'
 							: cloudState === 'checking'
 								? 'Checking cloud progress…'
@@ -2174,10 +2171,6 @@
 		gap: 8px;
 		flex-wrap: wrap;
 	}
-	.scan-progress-caption {
-		color: #687163;
-		font-size: 13px;
-	}
 	.scan-controls {
 		flex: 1 1 180px;
 		min-width: 0;
@@ -2211,16 +2204,29 @@
 		flex-shrink: 0;
 	}
 	.catalogue-state-line {
-		padding-top: 8px;
+		padding-top: 12px;
 		border-top: 1px solid #e5e8df;
-		gap: 12px 24px;
+		gap: 12px 32px;
 		color: #687163;
-		font-size: 13px;
+		font-size: 18px;
+		font-weight: 600;
+		line-height: 1.4;
 	}
 	.catalogue-state-line > span {
 		display: inline-flex;
 		align-items: center;
-		gap: 7px;
+		gap: 12px;
+		min-height: 40px;
+	}
+	.catalogue-state-line span > span {
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+	}
+	.catalogue-state-line :global(svg) {
+		width: 32px;
+		height: 32px;
 	}
 	.catalogue-state-line .connected {
 		color: #28603a;
