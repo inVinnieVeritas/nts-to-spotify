@@ -2,7 +2,7 @@
 	import { page } from '$app/stores';
 	import CatalogNotifications from '../components/catalog-notifications.svelte';
 	import SavedCatalogueCard from '../components/saved-catalogue-card.svelte';
-	import { Button, LoginWithSpotify, Logo, Panel } from '$components';
+	import { Button, Icon, LoginWithSpotify, Logo, Panel } from '$components';
 	import { onDestroy, onMount } from 'svelte';
 	import {
 		applySavedCatalogUpdateOutcome,
@@ -40,6 +40,16 @@
 	let savedCatalogues: SavedCatalogCard[] = [];
 	let catalogueQuery = '';
 	let catalogueSort = 'recent';
+	let catalogueView: 'grid' | 'list' = 'grid';
+	const catalogueViewKey = 'nts-catalogue-view-v1';
+	const setCatalogueView = (view: 'grid' | 'list') => {
+		catalogueView = view;
+		try {
+			localStorage.setItem(catalogueViewKey, view);
+		} catch {
+			// The view still works when browser storage is unavailable.
+		}
+	};
 	const filterCatalogues = <
 		T extends { showName: string; showAlias: string; updatedAt: number; pending: number }
 	>(
@@ -173,6 +183,11 @@
 	};
 
 	onMount(() => {
+		try {
+			if (localStorage.getItem(catalogueViewKey) === 'list') catalogueView = 'list';
+		} catch {
+			// Keep the default grid when browser storage is unavailable.
+		}
 		bridgeConnected = localCloudConnected();
 		const handleBridgeConnected = () => {
 			bridgeConnected = true;
@@ -475,11 +490,13 @@
 				</div>
 				<div class="catalogue-toolbar">
 					<label class="catalogue-search"
-						><span>Find a saved show</span><input
-							type="search"
-							bind:value={catalogueQuery}
-							placeholder="Search catalogues…"
-						/></label
+						><span>Find a saved show</span><span class="catalogue-search-input"
+							><span class="search-icon" aria-hidden="true"><Icon icon="search" /></span><input
+								type="search"
+								bind:value={catalogueQuery}
+								placeholder="Search catalogues…"
+							/></span
+						></label
 					>
 					<label class="catalogue-sort"
 						><span>Sort by</span><select bind:value={catalogueSort}
@@ -487,6 +504,26 @@
 							><option value="pending">Pending episodes</option></select
 						></label
 					>
+					<div class="view-switch" role="group" aria-label="Catalogue view">
+						<button
+							type="button"
+							class:active={catalogueView === 'grid'}
+							aria-label="Grid view"
+							title="Grid view"
+							aria-pressed={catalogueView === 'grid'}
+							on:click={() => setCatalogueView('grid')}
+							><span aria-hidden="true"><Icon icon="grid" /></span></button
+						>
+						<button
+							type="button"
+							class:active={catalogueView === 'list'}
+							aria-label="List view"
+							title="List view"
+							aria-pressed={catalogueView === 'list'}
+							on:click={() => setCatalogueView('list')}
+							><span aria-hidden="true"><Icon icon="list" /></span></button
+						>
+					</div>
 				</div>
 			</div>
 			{#if me && isLocalCloudBridge() && !bridgeConnected}
@@ -532,9 +569,10 @@
 						No saved catalogues match “{catalogueQuery.trim()}”.
 					</p>{/if}
 				{#if visibleSavedCatalogues.length > 0}
-					<div class="catalogue-grid">
+					<div class="catalogue-grid" class:list-view={catalogueView === 'list'}>
 						{#each visibleSavedCatalogues as catalogue (catalogue.showAlias)}
 							<SavedCatalogueCard
+								view={catalogueView}
 								showAlias={catalogue.showAlias}
 								showName={catalogue.showName}
 								cover={catalogue.showCover}
@@ -570,7 +608,9 @@
 								<svelte:fragment slot="actions">
 									<a
 										class="catalogue-control primary"
-										href={`/shows/${encodeURIComponent(catalogue.showAlias)}`}>Open catalogue</a
+										href={`/shows/${encodeURIComponent(catalogue.showAlias)}`}
+										><span class="control-icon" aria-hidden="true"><Icon icon="folder" /></span>Open
+										catalogue</a
 									>
 									<button
 										type="button"
@@ -579,6 +619,7 @@
 											catalogueCheckStates[catalogue.showAlias]
 										) || deletingAlias === catalogue.showAlias}
 										on:click={() => checkForNewEpisodes(catalogue)}
+										><span class="control-icon" aria-hidden="true"><Icon icon="search" /></span
 										>{isSavedCatalogCheckActive(catalogueCheckStates[catalogue.showAlias])
 											? 'Checking NTS…'
 											: 'Check new episodes'}</button
@@ -587,20 +628,36 @@
 											class="catalogue-control"
 											href={catalogue.linkedPlaylistUrl}
 											target="_blank"
-											rel="noopener noreferrer">Open Spotify</a
+											rel="noopener noreferrer"
+											><span class="control-icon" aria-hidden="true"><Icon icon="spotify" /></span
+											>Open Spotify</a
 										>{/if}
 								</svelte:fragment>
 								<svelte:fragment slot="details">
-									<p>Last saved {formatSavedAt(catalogue.updatedAt)}</p>
-									<p>{catalogue.duplicateTracks} exact track duplicates removed.</p>
-									{#if catalogue.lastScanSession}<p>
-											Last scan: {formatCatalogScanSessionSummary(catalogue.lastScanSession)}
+									<p class="detail-line">
+										<span class="detail-icon" aria-hidden="true"><Icon icon="calendar" /></span
+										><span>Last saved {formatSavedAt(catalogue.updatedAt)}</span>
+									</p>
+									<p class="detail-line">
+										<span class="detail-icon" aria-hidden="true"><Icon icon="copy" /></span><span
+											>{catalogue.duplicateTracks} exact track duplicates removed.</span
+										>
+									</p>
+									{#if catalogue.lastScanSession}<p class="detail-line">
+											<span class="detail-icon" aria-hidden="true"><Icon icon="history" /></span
+											><span
+												>Last scan: {formatCatalogScanSessionSummary(
+													catalogue.lastScanSession
+												)}</span
+											>
 										</p>{/if}
 									<div class="detail-actions">
 										<button
 											type="button"
 											class="catalogue-control"
-											on:click={() => downloadBackup(catalogue)}>Download backup</button
+											on:click={() => downloadBackup(catalogue)}
+											><span class="control-icon" aria-hidden="true"><Icon icon="download" /></span
+											>Download backup</button
 										>
 										<button
 											type="button"
@@ -608,6 +665,7 @@
 											disabled={Boolean(deletingAlias) ||
 												catalogueCheckStates[catalogue.showAlias]?.type === 'checking'}
 											on:click={() => deleteLocalProgress(catalogue)}
+											><span class="control-icon" aria-hidden="true"><Icon icon="trash" /></span
 											>{deletingAlias === catalogue.showAlias
 												? 'Deleting…'
 												: 'Delete local progress'}</button
@@ -620,9 +678,10 @@
 				{/if}
 				{#if visibleCloudCatalogues.length > 0}
 					<h3 class="font-base">Saved in cloud</h3>
-					<div class="catalogue-grid">
+					<div class="catalogue-grid" class:list-view={catalogueView === 'list'}>
 						{#each visibleCloudCatalogues as catalogue (catalogue.showAlias)}
 							<SavedCatalogueCard
+								view={catalogueView}
 								showAlias={catalogue.showAlias}
 								showName={catalogue.showName}
 								scanned={catalogue.scanned}
@@ -634,11 +693,15 @@
 									><a
 										class="catalogue-control primary"
 										href={`/shows/${encodeURIComponent(catalogue.showAlias)}`}
-										>Open cloud catalogue</a
+										><span class="control-icon" aria-hidden="true"><Icon icon="folder" /></span>Open
+										cloud catalogue</a
 									></svelte:fragment
 								>
 								<svelte:fragment slot="details"
-									><p>Last saved {formatSavedAt(catalogue.updatedAt)}</p>
+									><p class="detail-line">
+										<span class="detail-icon" aria-hidden="true"><Icon icon="calendar" /></span
+										><span>Last saved {formatSavedAt(catalogue.updatedAt)}</span>
+									</p>
 									<p>Opening loads this cloud copy into your browser.</p></svelte:fragment
 								>
 							</SavedCatalogueCard>
@@ -896,7 +959,54 @@
 		flex-wrap: wrap;
 		gap: 12px;
 		flex: 1 1 360px;
-		max-width: 660px;
+		max-width: 780px;
+	}
+	.catalogue-search-input {
+		position: relative;
+		display: block;
+	}
+	.search-icon {
+		position: absolute;
+		left: 12px;
+		top: 50%;
+		transform: translateY(-50%);
+		display: inline-flex;
+		pointer-events: none;
+	}
+	.catalogue-toolbar .catalogue-search-input input {
+		padding-left: 38px;
+	}
+	.view-switch {
+		display: inline-flex;
+		border: 1px solid #c6c9c0;
+		border-radius: 7px;
+		background: #fff;
+	}
+	.view-switch button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 44px;
+		min-height: 42px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: #5c6059;
+		cursor: pointer;
+	}
+	.view-switch button span {
+		display: inline-flex;
+	}
+	.view-switch button.active {
+		background: #202b25;
+		color: #fff;
+	}
+	.view-switch button:hover:not(.active) {
+		background: #f0f2ec;
+	}
+	.view-switch button:focus-visible {
+		outline: 3px solid #588071;
+		outline-offset: 3px;
 	}
 	.catalogue-toolbar label {
 		display: flex;
@@ -942,6 +1052,11 @@
 		@media (min-width: 1600px) {
 			grid-template-columns: repeat(4, minmax(0, 1fr));
 		}
+	}
+
+	.catalogue-grid.list-view {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 12px;
 	}
 
 	.catalogue-section-heading {

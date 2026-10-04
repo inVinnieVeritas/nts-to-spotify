@@ -1,4 +1,6 @@
 <script lang="ts">
+	import Icon from './icon/icon.svelte';
+
 	export let showAlias: string;
 	export let showName: string;
 	export let cover: string | undefined = undefined;
@@ -8,6 +10,9 @@
 	export let tracks: number | undefined = undefined;
 	export let playlistLinked: boolean | undefined = undefined;
 	export let cloudOnly = false;
+	export let view: 'grid' | 'list' = 'grid';
+	let detailsOpen = false;
+	$: catalogueUrl = `/shows/${encodeURIComponent(showAlias)}`;
 	let failedCover: string | undefined;
 	$: artworkSource =
 		cover && cover !== failedCover ? cover : `/api/nts/artwork/${encodeURIComponent(showAlias)}`;
@@ -23,8 +28,8 @@
 					: 'Not scanned';
 </script>
 
-<article class="catalogue-card" aria-label={showName}>
-	<div class="cover">
+<article class="catalogue-card" class:list-view={view === 'list'} aria-label={showName}>
+	<a class="cover" href={catalogueUrl} aria-label={`Open catalogue: ${showName}`}>
 		{#if artworkSource !== failedArtworkSource}
 			<img
 				src={artworkSource}
@@ -40,43 +45,51 @@
 		{:else}
 			<span aria-hidden="true">NTS</span>
 		{/if}
-	</div>
+	</a>
 	<header class="card-heading">
 		<div class="card-title">
-			<h3><a href={`/shows/${encodeURIComponent(showAlias)}`}>{showName}</a></h3>
+			<h3><a href={catalogueUrl}>{showName}</a></h3>
 			<p class="card-caption">{cloudOnly ? 'Saved in cloud' : 'Saved in this browser'}</p>
 		</div>
 	</header>
-	<div class="scan-overview">
-		<span
-			class="scan-status"
-			class:attention={failed > 0 || pending > 0}
-			class:complete={total > 0 && pending === 0 && failed === 0}>{scanStatus}</span
-		>
-		<span class="scan-fraction">{scanned} / {total} episodes scanned</span>
+	<div class="card-progress">
+		<div class="scan-overview">
+			<span
+				class="scan-status"
+				class:attention={failed > 0 || pending > 0}
+				class:complete={total > 0 && pending === 0 && failed === 0}>{scanStatus}</span
+			>
+			<span class="scan-fraction">{scanned} / {total} episodes scanned</span>
+		</div>
+		<progress value={scanned} max={total || 1} aria-label={`Episodes scanned for ${showName}`}
+		></progress>
 	</div>
-	<progress value={scanned} max={total || 1} aria-label={`Episodes scanned for ${showName}`}
-	></progress>
 	<dl class="card-counts">
-		<div>
-			<dt>Scanned</dt>
+		<div class="scanned-count">
+			<dt>
+				<span class="count-icon" aria-hidden="true"><Icon icon="check-circle" /></span>Scanned
+			</dt>
 			<dd>{scanned}</dd>
 		</div>
-		<div>
-			<dt>Pending</dt>
+		<div class:pending-count={pending > 0}>
+			<dt><span class="count-icon" aria-hidden="true"><Icon icon="clock" /></span>Pending</dt>
 			<dd>{pending}</dd>
 		</div>
 		<div class:failed-count={failed > 0}>
-			<dt>Failed</dt>
+			<dt><span class="count-icon" aria-hidden="true"><Icon icon="x-circle" /></span>Failed</dt>
 			<dd>{failed}</dd>
 		</div>
 	</dl>
 	{#if tracks !== undefined || playlistLinked !== undefined}
 		<div class="playlist-summary">
-			{#if tracks !== undefined}<span
-					><strong>{tracks.toLocaleString()}</strong> selected tracks</span
+			{#if tracks !== undefined}<span class="track-total"
+					><span class="count-icon" aria-hidden="true"><Icon icon="music" /></span><span
+						><strong>{tracks.toLocaleString()}</strong> selected tracks</span
+					></span
 				>{/if}
 			{#if playlistLinked !== undefined}<span class="playlist-state" class:linked={playlistLinked}
+					><span class="count-icon" aria-hidden="true"
+						><Icon icon={playlistLinked ? 'spotify' : 'link'} /></span
 					>{playlistLinked ? 'Playlist linked' : 'No playlist linked'}</span
 				>{/if}
 		</div>
@@ -84,10 +97,10 @@
 	<div class="card-feedback"><slot name="feedback" /></div>
 	<div class="card-actions">
 		<slot name="actions" />
-		<details class="card-details">
+		<details class="card-details" bind:open={detailsOpen}>
 			<summary
-				aria-label={`More: ${cloudOnly ? 'saved details' : 'details and backup'} for ${showName}`}
-				>More</summary
+				aria-label={`${detailsOpen ? 'Less' : 'More'}: ${cloudOnly ? 'saved details' : 'details and backup'} for ${showName}`}
+				>{detailsOpen ? 'Less' : 'More'}</summary
 			>
 			<div class="details-content"><slot name="details" /></div>
 		</details>
@@ -115,6 +128,7 @@
 		margin-bottom: 12px;
 	}
 	.cover {
+		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -128,6 +142,10 @@
 		color: #687163;
 		font-size: 16px;
 		font-weight: 800;
+		text-decoration: none;
+	}
+	.cover:hover img {
+		filter: brightness(0.9);
 	}
 	.cover img {
 		width: 100%;
@@ -223,11 +241,41 @@
 		line-height: 1.25;
 	}
 	.card-counts dt {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
 		font-size: 12px;
 		color: #687163;
 	}
 	.failed-count dd {
 		color: #963f36;
+	}
+	.count-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		flex-shrink: 0;
+	}
+	.count-icon :global(svg) {
+		width: 100%;
+		height: 100%;
+	}
+	.scanned-count .count-icon {
+		color: #28603a;
+	}
+	.pending-count .count-icon {
+		color: #996615;
+	}
+	.failed-count .count-icon {
+		color: #963f36;
+	}
+	.track-total,
+	.playlist-state {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
 	}
 	.playlist-summary {
 		display: flex;
@@ -268,6 +316,7 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
+		gap: 7px;
 		box-sizing: border-box;
 		min-height: 44px;
 		padding: 9px 12px;
@@ -280,6 +329,19 @@
 		text-decoration: none;
 		text-align: center;
 		cursor: pointer;
+	}
+	.catalogue-card :global(.control-icon),
+	.catalogue-card :global(.detail-icon) {
+		display: inline-flex;
+		align-items: center;
+		flex-shrink: 0;
+		width: 16px;
+		height: 16px;
+	}
+	.catalogue-card :global(.control-icon svg),
+	.catalogue-card :global(.detail-icon svg) {
+		width: 100%;
+		height: 100%;
 	}
 	.catalogue-card :global(.catalogue-control:hover:not(:disabled)) {
 		background: #f0f2ec;
@@ -343,6 +405,72 @@
 	}
 	.details-content :global(.catalogue-control) {
 		font-size: 13px;
+	}
+	.details-content :global(.detail-line) {
+		display: flex;
+		align-items: flex-start;
+		gap: 7px;
+	}
+	.catalogue-card.list-view {
+		display: grid;
+		grid-template-columns: 96px minmax(0, 1fr);
+		grid-template-areas:
+			'cover heading'
+			'cover progress'
+			'counts counts'
+			'playlist playlist'
+			'feedback feedback'
+			'actions actions';
+		gap: 12px 16px;
+	}
+	.list-view .cover {
+		grid-area: cover;
+		width: 100%;
+		height: 100%;
+		min-height: 112px;
+		margin: 0;
+		border-radius: 8px;
+	}
+	.list-view .cover img {
+		position: absolute;
+		inset: 0;
+	}
+	.list-view .card-heading {
+		grid-area: heading;
+		margin: 0;
+	}
+	.list-view .card-progress {
+		grid-area: progress;
+	}
+	.list-view .card-counts {
+		grid-area: counts;
+		margin: 0;
+	}
+	.list-view .playlist-summary {
+		grid-area: playlist;
+		margin: 0;
+	}
+	.list-view .card-feedback {
+		grid-area: feedback;
+	}
+	.list-view .card-feedback :global(p) {
+		margin: 0;
+	}
+	.list-view .card-actions {
+		grid-area: actions;
+		margin: 0;
+		align-content: start;
+		align-items: start;
+	}
+	@media (--lg) {
+		.catalogue-card.list-view {
+			grid-template-columns: 140px minmax(180px, 1.4fr) minmax(190px, 1fr) minmax(270px, 1.2fr);
+			grid-template-areas:
+				'cover heading counts actions'
+				'cover progress playlist actions'
+				'cover feedback feedback feedback';
+			gap: 12px 24px;
+		}
 	}
 	@media (max-width: 420px) {
 		.catalogue-card {
