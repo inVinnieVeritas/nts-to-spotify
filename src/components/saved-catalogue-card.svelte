@@ -66,18 +66,18 @@
 	</div>
 	<dl class="card-counts">
 		<div class="scanned-count">
-			<dt>
-				<span class="count-icon" aria-hidden="true"><Icon icon="check-circle" /></span>Scanned
-			</dt>
-			<dd>{scanned}</dd>
+			<dt>Scanned</dt>
+			<dd>
+				<span class="count-icon" aria-hidden="true"><Icon icon="check-circle" /></span>{scanned}
+			</dd>
 		</div>
 		<div class:pending-count={pending > 0}>
-			<dt><span class="count-icon" aria-hidden="true"><Icon icon="clock" /></span>Pending</dt>
-			<dd>{pending}</dd>
+			<dt>Pending</dt>
+			<dd><span class="count-icon" aria-hidden="true"><Icon icon="clock" /></span>{pending}</dd>
 		</div>
 		<div class:failed-count={failed > 0}>
-			<dt><span class="count-icon" aria-hidden="true"><Icon icon="x-circle" /></span>Failed</dt>
-			<dd>{failed}</dd>
+			<dt>Failed</dt>
+			<dd><span class="count-icon" aria-hidden="true"><Icon icon="x-circle" /></span>{failed}</dd>
 		</div>
 	</dl>
 	{#if tracks !== undefined || playlistLinked !== undefined}
@@ -231,10 +231,13 @@
 	.card-counts > div {
 		display: flex;
 		flex-wrap: wrap;
-		align-items: baseline;
+		align-items: center;
 		gap: 4px;
 	}
 	.card-counts dd {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
 		order: -1;
 		font-size: 16px;
 		font-weight: 700;

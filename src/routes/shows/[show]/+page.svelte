@@ -5,7 +5,7 @@
 	import {
 		Badge,
 		Button,
-		Divider,
+		Icon,
 		ImportToSpotify,
 		LoginWithSpotify,
 		Panel,
@@ -1398,286 +1398,403 @@
 	});
 </script>
 
-<Panel padded={false}>
-	<article>
-		<header>
-			<h1 class="font-title">{data.name}: full catalogue</h1>
-			<p class="font-base">{data.description}</p>
-			<div class="summary font-small-beast">
-				<Badge>{episodes.length} episodes</Badge>
-				{#if firstEpisode && lastEpisode}
-					<Badge>{shortDate(firstEpisode.broadcast)} → {shortDate(lastEpisode.broadcast)}</Badge>
-				{/if}
+<Panel wide transparent>
+	<article class="catalogue-page">
+		<header class="catalogue-hero" class:has-artwork={Boolean(data.cover)}>
+			<div class="hero-copy">
+				<a class="back-link" href="/"
+					><span aria-hidden="true"><Icon icon="arrow-right" /></span>Back to saved catalogues</a
+				>
+				<p class="catalogue-eyebrow">Full catalogue</p>
+
+				<h1 class="font-title">{data.name}</h1>
+				<p class="font-base">{data.description}</p>
+				<div class="summary font-small-beast">
+					<Badge>{episodes.length} episodes</Badge>
+					{#if firstEpisode && lastEpisode}
+						<Badge>{shortDate(firstEpisode.broadcast)} → {shortDate(lastEpisode.broadcast)}</Badge>
+					{/if}
+				</div>
 			</div>
-			<Divider />
-
-			{#if !data.user}
-				<div class="login-note">
-					<p class="font-base">Log in first so your review is not lost in a page reload later.</p>
-					<LoginWithSpotify label="Login with Spotify" />
-				</div>
-			{:else}
-				<div class="scan-controls">
-					<Button
-						on:click={() => scanCatalog()}
-						loading={scanning}
-						disabled={!restored ||
-							scanning ||
-							cloudState === 'checking' ||
-							cloudBusy ||
-							progressTransferBusy ||
-							scanComplete ||
-							cooldownRemaining > 0}
-					>
-						{completedCount === 0 ? 'Scan full catalogue' : 'Resume scan'}
-					</Button>
-					{#if scanning}
-						<Button variant="outline" on:click={cancelScan}>Cancel scan</Button>
-					{/if}
-					<p class="font-small-beast">{progressLabel}</p>
-				</div>
-				{#if scanning && scanTiming.active}
-					<p class="scan-session-line font-small-beast" role="status">
-						Current scan: {formatCatalogScanClock(liveScanDurationMs)} · {scanTiming.active
-							.processedEpisodes} episodes processed
-					</p>
-				{/if}
-				{#if spotifySessionMetrics}
-					<div class="search-metrics" aria-label="Spotify Search usage metrics">
-						{#each formatSpotifySessionMetricLines(spotifySessionMetrics) as metricLine}
-							<p class="font-small-beast">{metricLine}</p>
-						{/each}
-						<p class="font-tiny">
-							This is usage observed by this app, not Spotify quota remaining.
-						</p>
-					</div>
-				{/if}
-			{/if}
-			{#if cooldownRemaining > 0}
-				<p class="font-base">
-					{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
-				</p>
-				{#if cooldownReason === 'quota-exceeded'}
-					<p class="font-small-beast">
-						Spotify does not expose the remaining quota or its numerical limit.
-					</p>
-				{/if}
-			{/if}
-			{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
-			{#if latestScanSession}
-				<div class="scan-session-summary">
-					<p class="font-small-beast">
-						Last scan: {formatCatalogScanSessionSummary(latestScanSession)}
-					</p>
-					{#if latestScanSession.longestMatchingRequestMs > 0}
-						<p class="font-small-beast">
-							Longest matching request (client-observed): {formatCatalogScanDuration(
-								latestScanSession.longestMatchingRequestMs
-							)}
-						</p>
-					{/if}
-				</div>
-			{/if}
-			{#if scanTiming.history.length > 0}
-				<details class="scan-history">
-					<summary class="font-small-beast">Scan history ({scanTiming.history.length})</summary>
-					<ol>
-						{#each scanTiming.history as session (session.id)}
-							<li>
-								<p class="font-small-beast">
-									<strong>{formatScanStartedAt(session.startedAt)}</strong> · {formatCatalogScanDuration(
-										session.activeDurationMs
-									)} · {catalogScanOutcomeLabel(session.outcome)}
-								</p>
-								<p class="font-tiny">
-									{session.processedEpisodes} processed · {session.successfulEpisodes} successful ·
-									{session.failedEpisodes} failed
-								</p>
-								{#if session.longestMatchingRequestMs > 0}
-									<p class="font-tiny">
-										Longest matching request: {formatCatalogScanDuration(
-											session.longestMatchingRequestMs
-										)}
-									</p>
-								{/if}
-							</li>
-						{/each}
-					</ol>
-					<p class="font-tiny">
-						Matching-request durations are observed by this browser and are not guaranteed server
-						execution times.
-					</p>
-				</details>
-			{/if}
-			{#if !persistenceAvailable}
-				<p class="font-small-beast">Progress persistence is unavailable.</p>
-			{/if}
+			{#if data.cover}<div class="hero-artwork">
+					<img src={data.cover} alt="" width="800" height="400" />
+				</div>{/if}
 		</header>
-
-		{#if restored}
-			<section class="settings">
-				<label class="font-small-beast">
-					Playlist name
-					<input bind:value={playlistTitle} on:input={captureAndPersistReview} maxlength="100" />
-				</label>
-				<label class="font-small-beast">
-					Description
-					<textarea
-						bind:value={playlistDescription}
-						on:input={captureAndPersistReview}
-						maxlength="300"
-						rows="4"></textarea>
-				</label>
-				<label class="font-small-beast">
-					PLAYLIST ORDER
-					<select
-						value={playlistOrder}
-						on:change={changePlaylistOrder}
-						aria-describedby="playlist-order-help"
-					>
-						<option value="latest-first">Latest episodes first</option>
-						<option value="oldest-first">Oldest episodes first</option>
-					</select>
-					<span id="playlist-order-help" class="playlist-order-help font-tiny">
-						<strong>This choice controls the episode order here and in the Spotify playlist.</strong
-						>
-						Tracks within each episode keep their original order.
-					</span>
-				</label>
-				<label class="visibility font-base">
-					<input
-						type="checkbox"
-						bind:checked={publicPlaylist}
-						on:change={captureAndPersistReview}
-					/>
-					Make playlist public
-				</label>
-				<div class="progress-actions" aria-label="Catalogue progress backup controls">
-					<Button
-						type="button"
-						size="sm"
-						variant="outline"
-						disabled={progressTransferBusy}
-						on:click={downloadProgress}>Download progress</Button
-					>
-					<Button
-						type="button"
-						size="sm"
-						variant="outline"
-						disabled={progressTransferBusy || scanning}
-						on:click={chooseProgressBackup}>Restore progress</Button
-					>
-					<input
-						bind:this={progressFileInput}
-						type="file"
-						accept=".json,application/json"
-						aria-label="Choose catalogue progress backup JSON file"
-						on:change={restoreProgress}
-						hidden
-					/>
-					<Button
-						type="button"
-						size="sm"
-						variant="outline"
-						disabled={progressTransferBusy || scanning}
-						on:click={resetSavedProgress}>Reset saved progress</Button
-					>
+		<section class="catalogue-overview" aria-label="Catalogue scan overview">
+			<dl class="catalogue-stats">
+				<div>
+					<dt>
+						<span class="stat-icon scanned" aria-hidden="true"><Icon icon="check-circle" /></span
+						>Scanned episodes
+					</dt>
+					<dd>{restored ? completedCount : '—'}</dd>
 				</div>
-				{#if progressTransferMessage}
-					<p class="progress-transfer-message font-small-beast" role="status">
-						{progressTransferMessage}
-					</p>
-				{/if}
-				{#if progressTransferError}
-					<p class="progress-transfer-message font-small-beast" role="alert">
-						{progressTransferError}
-					</p>
-				{/if}
-				{#if isLocalCloudBridge() && !bridgeConnected && data.user}
-					<div class="cloud-progress font-small-beast">
-						<p>Cloud progress is available through your signed-in staging site.</p>
-						<Button size="sm" variant="outline" on:click={connectLocalCloud}
-							>Connect local Vite to cloud</Button
-						>
+				<div>
+					<dt>
+						<span class="stat-icon" class:pending={pendingCount > 0} aria-hidden="true"
+							><Icon icon="clock" /></span
+						>Pending episodes
+					</dt>
+					<dd>{restored ? pendingCount : '—'}</dd>
+				</div>
+				<div>
+					<dt>
+						<span class="stat-icon" class:failed={failedCount > 0} aria-hidden="true"
+							><Icon icon="x-circle" /></span
+						>Failed episodes
+					</dt>
+					<dd>{restored ? failedCount : '—'}</dd>
+				</div>
+				<div>
+					<dt>
+						<span class="stat-icon" aria-hidden="true"><Icon icon="music" /></span>Unique selected
+						tracks
+					</dt>
+					<dd>{restored ? selectedTracks.length.toLocaleString() : '—'}</dd>
+				</div>
+				<div>
+					<dt>
+						<span class="stat-icon" aria-hidden="true"><Icon icon="copy" /></span>Exact duplicates
+						removed
+					</dt>
+					<dd>{restored ? duplicateCount.toLocaleString() : '—'}</dd>
+				</div>
+			</dl>
+			<div class="overview-content">
+				{#if !data.user}
+					<div class="login-note">
+						<p class="font-base">Log in first so your review is not lost in a page reload later.</p>
+						<LoginWithSpotify label="Login with Spotify" />
 					</div>
+				{:else}
+					<div class="scan-controls">
+						<Button
+							on:click={() => scanCatalog()}
+							icon="play"
+							loading={scanning}
+							disabled={!restored ||
+								scanning ||
+								cloudState === 'checking' ||
+								cloudBusy ||
+								progressTransferBusy ||
+								scanComplete ||
+								cooldownRemaining > 0}
+						>
+							{scanComplete
+								? 'Scan complete'
+								: completedCount === 0
+									? 'Scan full catalogue'
+									: 'Resume scan'}
+						</Button>
+						{#if scanning}
+							<Button variant="outline" icon="stop" on:click={cancelScan}>Cancel scan</Button>
+						{/if}
+						<p class="scan-progress-caption">{progressLabel}</p>
+					</div>
+					{#if scanning && scanTiming.active}
+						<p class="scan-session-line font-small-beast" role="status">
+							Current scan: {formatCatalogScanClock(liveScanDurationMs)} · {scanTiming.active
+								.processedEpisodes} episodes processed
+						</p>
+					{/if}
+					{#if spotifySessionMetrics}
+						<div class="search-metrics" aria-label="Spotify Search usage metrics">
+							{#each formatSpotifySessionMetricLines(spotifySessionMetrics) as metricLine}
+								<p class="font-small-beast">{metricLine}</p>
+							{/each}
+							<p class="font-tiny">
+								This is usage observed by this app, not Spotify quota remaining.
+							</p>
+						</div>
+					{/if}
 				{/if}
-				{#if bridgeConnected && data.user && !cloudSyncAvailable(data.user.id)}
-					<p role="alert">
-						The local Spotify account differs from the hosted account. Sign in to the same account
-						before syncing.
+				{#if cooldownRemaining > 0}
+					<p class="font-base">
+						{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
 					</p>
+					{#if cooldownReason === 'quota-exceeded'}
+						<p class="font-small-beast">
+							Spotify does not expose the remaining quota or its numerical limit.
+						</p>
+					{/if}
 				{/if}
-				{#if cloudState !== 'local'}
-					<div class="cloud-progress font-small-beast" aria-label="Cloud progress">
-						{#if cloudState === 'checking'}
-							<p role="status">Checking saved cloud progress…</p>
-						{:else if cloudState === 'active'}
-							<p role="status">Cloud progress connected. Changes also save in this browser.</p>
-						{:else if cloudState === 'upload'}
-							<p role="status">This show is saved only in this browser.</p>
-							<Button
-								size="sm"
-								variant="outline"
-								disabled={cloudBusy || scanning}
-								on:click={uploadBrowserCopy}>Save this browser’s progress to cloud</Button
-							>
-						{:else if cloudState === 'conflict'}
-							<p role="alert">
-								This browser and the cloud have different progress. Automatic sync is paused.
+				{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
+				{#if latestScanSession}
+					<div class="scan-session-summary">
+						<p class="font-small-beast">
+							Last scan: {formatCatalogScanSessionSummary(latestScanSession)}
+						</p>
+						{#if latestScanSession.longestMatchingRequestMs > 0}
+							<p class="font-small-beast">
+								Longest matching request (client-observed): {formatCatalogScanDuration(
+									latestScanSession.longestMatchingRequestMs
+								)}
 							</p>
-							{#if cloudCopy}
-								<p>
-									Cloud copy: {getCatalogSummaryCounts(Object.values(cloudCopy.progress.episodes))
-										.scanned} scanned episodes. This browser: {completedCount} scanned episodes.
-								</p>
-							{/if}
-							<p>Download a progress backup before choosing which copy to keep.</p>
-							<Button
-								size="sm"
-								variant="outline"
-								disabled={cloudBusy || scanning}
-								on:click={() => useCloudCopy()}>Use cloud copy here</Button
-							>
-							<Button
-								size="sm"
-								variant="outline"
-								disabled={cloudBusy || scanning}
-								on:click={uploadBrowserCopy}>Replace cloud with this browser</Button
-							>
-						{:else}
-							<p role="alert">
-								Cloud progress is unavailable. This browser still saves progress locally.
-							</p>
-							<Button
-								size="sm"
-								variant="outline"
-								disabled={cloudBusy || scanning}
-								on:click={retryCloud}>Retry cloud connection</Button
-							>
 						{/if}
 					</div>
 				{/if}
-				<CatalogSchedule
-					showAlias={activeShowAlias}
-					cloudConnected={cloudState === 'active'}
-					{scanning}
-				/>
-				<CatalogPlaylistAutomation
-					showAlias={activeShowAlias}
-					cloudConnected={cloudState === 'active'}
-					{scanning}
-				/>
-				<p class="font-small-beast">
-					{reviewTrackCount} tracks need review · {duplicateCount} exact duplicate{duplicateCount ===
-					1
-						? ''
-						: 's'} removed
-				</p>
-			</section>
+				{#if restored}
+					<nav class="catalogue-shortcuts" aria-label="Catalogue sections">
+						<a href="#catalogue-review"
+							><span aria-hidden="true"><Icon icon="list" /></span>Review tracks ({reviewTrackCount})</a
+						>
+						<a href="#playlist-configuration"
+							><span aria-hidden="true"><Icon icon="folder" /></span>Playlist settings</a
+						>
+						{#if linkedPlaylistId}<a
+								href={`https://open.spotify.com/playlist/${linkedPlaylistId}`}
+								target="_blank"
+								rel="noopener noreferrer"
+								><span aria-hidden="true"><Icon icon="spotify" /></span>Open Spotify playlist</a
+							>{/if}
+					</nav>
+				{/if}
+				<div class="catalogue-state-line">
+					<span class:connected={Boolean(linkedPlaylistId)}
+						><span aria-hidden="true"><Icon icon="link" /></span>{linkedPlaylistId
+							? 'Spotify playlist linked'
+							: 'No Spotify playlist linked'}</span
+					>
+					<span
+						class:connected={cloudState === 'active'}
+						class:attention={cloudState === 'conflict' || cloudState === 'unavailable'}
+						><span aria-hidden="true"><Icon icon="folder" /></span>{cloudState === 'active'
+							? 'Cloud progress connected'
+							: cloudState === 'checking'
+								? 'Checking cloud progress…'
+								: cloudState === 'conflict'
+									? 'Cloud progress conflict'
+									: cloudState === 'unavailable'
+										? 'Cloud progress unavailable'
+										: 'Progress in this browser'}</span
+					>
+				</div>
+
+				{#if !persistenceAvailable}
+					<p class="font-small-beast">Progress persistence is unavailable.</p>
+				{/if}
+			</div>
+		</section>
+		{#if restored}
+			<div class="catalogue-workspace">
+				<div class="catalogue-main">
+					<section
+						id="playlist-configuration"
+						class="settings surface"
+						aria-labelledby="playlist-configuration-heading"
+					>
+						<h2 id="playlist-configuration-heading">Playlist configuration</h2>
+
+						<label class="font-small-beast">
+							Playlist name
+							<input
+								bind:value={playlistTitle}
+								on:input={captureAndPersistReview}
+								maxlength="100"
+							/>
+						</label>
+						<label class="font-small-beast">
+							Description
+							<textarea
+								bind:value={playlistDescription}
+								on:input={captureAndPersistReview}
+								maxlength="300"
+								rows="4"></textarea>
+						</label>
+						<label class="font-small-beast">
+							Playlist order
+							<select
+								value={playlistOrder}
+								on:change={changePlaylistOrder}
+								aria-describedby="playlist-order-help"
+							>
+								<option value="latest-first">Latest episodes first</option>
+								<option value="oldest-first">Oldest episodes first</option>
+							</select>
+							<span id="playlist-order-help" class="playlist-order-help font-tiny">
+								<strong
+									>This choice controls the episode order here and in the Spotify playlist.</strong
+								>
+								Tracks within each episode keep their original order.
+							</span>
+						</label>
+						<label class="visibility font-base">
+							<input
+								type="checkbox"
+								bind:checked={publicPlaylist}
+								on:change={captureAndPersistReview}
+							/>
+							Make playlist public
+						</label>
+					</section>
+					<section class="progress-panel surface" aria-labelledby="catalogue-progress-heading">
+						<h2 id="catalogue-progress-heading">Progress and backups</h2>
+
+						<div class="progress-actions" aria-label="Catalogue progress backup controls">
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								disabled={progressTransferBusy}
+								icon="download"
+								on:click={downloadProgress}>Download progress</Button
+							>
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								disabled={progressTransferBusy || scanning}
+								icon="history"
+								on:click={chooseProgressBackup}>Restore progress</Button
+							>
+							<input
+								bind:this={progressFileInput}
+								type="file"
+								accept=".json,application/json"
+								aria-label="Choose catalogue progress backup JSON file"
+								on:change={restoreProgress}
+								hidden
+							/>
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								disabled={progressTransferBusy || scanning}
+								icon="trash"
+								on:click={resetSavedProgress}>Reset saved progress</Button
+							>
+						</div>
+						{#if progressTransferMessage}
+							<p class="progress-transfer-message font-small-beast" role="status">
+								{progressTransferMessage}
+							</p>
+						{/if}
+						{#if progressTransferError}
+							<p class="progress-transfer-message font-small-beast" role="alert">
+								{progressTransferError}
+							</p>
+						{/if}
+						{#if isLocalCloudBridge() && !bridgeConnected && data.user}
+							<div class="cloud-progress font-small-beast">
+								<p>Cloud progress is available through your signed-in staging site.</p>
+								<Button size="sm" variant="outline" on:click={connectLocalCloud}
+									>Connect local Vite to cloud</Button
+								>
+							</div>
+						{/if}
+						{#if bridgeConnected && data.user && !cloudSyncAvailable(data.user.id)}
+							<p role="alert">
+								The local Spotify account differs from the hosted account. Sign in to the same
+								account before syncing.
+							</p>
+						{/if}
+						{#if cloudState !== 'local'}
+							<div class="cloud-progress font-small-beast" aria-label="Cloud progress">
+								{#if cloudState === 'checking'}
+									<p role="status">Checking saved cloud progress…</p>
+								{:else if cloudState === 'active'}
+									<p role="status">Cloud progress connected. Changes also save in this browser.</p>
+								{:else if cloudState === 'upload'}
+									<p role="status">This show is saved only in this browser.</p>
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={cloudBusy || scanning}
+										on:click={uploadBrowserCopy}>Save this browser’s progress to cloud</Button
+									>
+								{:else if cloudState === 'conflict'}
+									<p role="alert">
+										This browser and the cloud have different progress. Automatic sync is paused.
+									</p>
+									{#if cloudCopy}
+										<p>
+											Cloud copy: {getCatalogSummaryCounts(
+												Object.values(cloudCopy.progress.episodes)
+											).scanned} scanned episodes. This browser: {completedCount} scanned episodes.
+										</p>
+									{/if}
+									<p>Download a progress backup before choosing which copy to keep.</p>
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={cloudBusy || scanning}
+										on:click={() => useCloudCopy()}>Use cloud copy here</Button
+									>
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={cloudBusy || scanning}
+										on:click={uploadBrowserCopy}>Replace cloud with this browser</Button
+									>
+								{:else}
+									<p role="alert">
+										Cloud progress is unavailable. This browser still saves progress locally.
+									</p>
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={cloudBusy || scanning}
+										on:click={retryCloud}>Retry cloud connection</Button
+									>
+								{/if}
+							</div>
+						{/if}
+					</section>
+
+					{#if scanTiming.history.length > 0}
+						<details class="scan-history">
+							<summary class="font-small-beast">Scan history ({scanTiming.history.length})</summary>
+							<ol>
+								{#each scanTiming.history as session (session.id)}
+									<li>
+										<p class="font-small-beast">
+											<strong>{formatScanStartedAt(session.startedAt)}</strong> · {formatCatalogScanDuration(
+												session.activeDurationMs
+											)} · {catalogScanOutcomeLabel(session.outcome)}
+										</p>
+										<p class="font-tiny">
+											{session.processedEpisodes} processed · {session.successfulEpisodes} successful
+											·
+											{session.failedEpisodes} failed
+										</p>
+										{#if session.longestMatchingRequestMs > 0}
+											<p class="font-tiny">
+												Longest matching request: {formatCatalogScanDuration(
+													session.longestMatchingRequestMs
+												)}
+											</p>
+										{/if}
+									</li>
+								{/each}
+							</ol>
+							<p class="font-tiny">
+								Matching-request durations are observed by this browser and are not guaranteed
+								server execution times.
+							</p>
+						</details>
+					{/if}
+				</div>
+				<aside class="catalogue-automation" aria-label="Catalogue automation">
+					<CatalogSchedule
+						showAlias={activeShowAlias}
+						cloudConnected={cloudState === 'active'}
+						{scanning}
+					/>
+					<CatalogPlaylistAutomation
+						showAlias={activeShowAlias}
+						cloudConnected={cloudState === 'active'}
+						{scanning}
+					/>
+				</aside>
+			</div>
 		{/if}
 
 		{#if restored}
-			<section class="review-filters" aria-labelledby="catalogue-review-heading">
+			<section
+				id="catalogue-review"
+				class="review-filters"
+				aria-labelledby="catalogue-review-heading"
+			>
 				<h2 id="catalogue-review-heading" class="font-base">Review tracks</h2>
 				<div class="review-filter-buttons" aria-label="Catalogue track review filters">
 					{#each reviewFilters as filter}
@@ -1696,6 +1813,7 @@
 						size="sm"
 						variant="outline"
 						disabled={reviewTrackCount === 0}
+						icon="download"
 						on:click={downloadReviewCsv}
 					>
 						Download review CSV ({reviewTrackCount})
@@ -1800,182 +1918,431 @@
 </Panel>
 
 <style lang="postcss">
-	header,
-	.settings {
-		padding: 24px;
+	.catalogue-page {
 		display: flex;
 		flex-direction: column;
-		gap: 20px;
-
-		@media (--md) {
-			padding: 40px;
-			padding-bottom: 24px;
+		gap: 24px;
+		padding-bottom: 120px;
+		font-size: 14px;
+		line-height: 1.5;
+		letter-spacing: 0;
+		text-transform: none;
+	}
+	.catalogue-hero,
+	.catalogue-overview,
+	.surface,
+	.scan-history,
+	.review-filters,
+	.review-empty,
+	.episode {
+		min-width: 0;
+		border: 1px solid #d8d8cc;
+		border-radius: 12px;
+		background: #fff;
+		box-shadow: 0 6px 24px rgb(0 0 0 / 12%);
+	}
+	.catalogue-hero {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		overflow: hidden;
+		background: rgb(255 255 255 / 94%);
+		backdrop-filter: blur(8px);
+		@media (--lg) {
+			&.has-artwork {
+				grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+			}
 		}
 	}
-
+	.hero-copy {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 14px;
+		padding: 24px;
+		@media (--md) {
+			padding: 32px;
+		}
+	}
+	.hero-copy h1 {
+		font-size: clamp(28px, 2.6vw, 44px);
+		line-height: 1.15;
+		overflow-wrap: anywhere;
+	}
+	.hero-copy > p:not(.catalogue-eyebrow) {
+		max-width: 70ch;
+	}
+	.back-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 32px;
+		font-size: 13px;
+		font-weight: 600;
+		text-decoration: none;
+		color: #505b52;
+	}
+	.back-link span {
+		display: inline-flex;
+		transform: rotate(180deg);
+	}
+	.back-link:hover {
+		text-decoration: underline;
+	}
+	.catalogue-eyebrow {
+		color: #687163;
+		font-size: 12px;
+		font-weight: 600;
+	}
+	.hero-artwork {
+		position: relative;
+		height: 180px;
+		overflow: hidden;
+		@media (--lg) {
+			height: auto;
+			min-height: 240px;
+		}
+	}
+	.hero-artwork img {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+	.catalogue-overview,
+	.surface,
+	.scan-history,
+	.review-filters {
+		padding: 20px;
+		@media (--md) {
+			padding: 24px;
+		}
+	}
+	.catalogue-stats {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 12px;
+		@media (--lg) {
+			grid-template-columns: repeat(5, minmax(0, 1fr));
+		}
+	}
+	.catalogue-stats > div {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+		padding: 12px 12px 12px 50px;
+		border: 1px solid #e5e8df;
+		border-radius: 9px;
+		background: #fafbf8;
+	}
+	.catalogue-stats dt {
+		order: 1;
+		color: #687163;
+		font-size: 12px;
+	}
+	.catalogue-stats dd {
+		order: -1;
+		font-size: 26px;
+		font-weight: 700;
+		line-height: 1.2;
+	}
+	.stat-icon {
+		position: absolute;
+		left: 12px;
+		top: 50%;
+		transform: translateY(-50%);
+		display: inline-flex;
+		width: 26px;
+		height: 26px;
+		flex-shrink: 0;
+		color: #5c665c;
+	}
+	.stat-icon :global(svg) {
+		width: 100%;
+		height: 100%;
+	}
+	.scanned {
+		color: #28603a;
+	}
+	.pending {
+		color: #996615;
+	}
+	.failed {
+		color: #963f36;
+	}
+	.overview-content {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		margin-top: 20px;
+	}
 	.summary,
 	.scan-controls,
 	.login-note,
 	.visibility,
-	.progress-actions {
+	.progress-actions,
+	.catalogue-shortcuts,
+	.catalogue-state-line {
 		display: flex;
 		align-items: center;
 		gap: 12px;
 		flex-wrap: wrap;
 	}
-
-	.settings {
-		border-top: 1px solid var(--color-foreground);
-		border-bottom: 1px solid var(--color-foreground);
-		background: lightgoldenrodyellow;
+	.scan-progress-caption {
+		color: #687163;
+		font-size: 13px;
 	}
-
+	.catalogue-shortcuts a {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 44px;
+		padding: 9px 12px;
+		border: 1px solid #c6c9c0;
+		border-radius: 7px;
+		font-weight: 600;
+		text-decoration: none;
+	}
+	.catalogue-shortcuts a:hover {
+		background: #f0f2ec;
+	}
+	.catalogue-shortcuts span,
+	.catalogue-state-line span > span {
+		display: inline-flex;
+		flex-shrink: 0;
+	}
+	.catalogue-state-line {
+		padding-top: 14px;
+		border-top: 1px solid #e5e8df;
+		gap: 12px 24px;
+		color: #687163;
+		font-size: 13px;
+	}
+	.catalogue-state-line > span {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+	}
+	.catalogue-state-line .connected {
+		color: #28603a;
+	}
+	.catalogue-state-line .attention {
+		color: #963f36;
+	}
+	.catalogue-workspace {
+		display: grid;
+		gap: 24px;
+		grid-template-columns: minmax(0, 1fr);
+		@media (--lg) {
+			grid-template-columns: minmax(0, 1.7fr) minmax(340px, 1fr);
+			align-items: start;
+		}
+	}
+	.catalogue-main,
+	.catalogue-automation {
+		display: flex;
+		flex-direction: column;
+		gap: 20px;
+		min-width: 0;
+	}
+	.catalogue-automation :global(.settings-card) {
+		margin-top: 0;
+	}
+	.settings,
+	.progress-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 18px;
+	}
+	.surface h2,
+	.review-filters h2 {
+		font-size: 20px;
+		line-height: 1.25;
+		font-weight: 700;
+	}
 	.settings label:not(.visibility) {
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		text-transform: uppercase;
+		font-size: 13px;
+		line-height: 1.5;
+		letter-spacing: 0;
+		text-transform: none;
 	}
-
 	.settings textarea,
 	.settings label:not(.visibility) input,
 	.settings select {
+		width: 100%;
+		min-width: 0;
+		min-height: 44px;
+		padding: 10px 12px;
+		border: 1px solid #c6c9c0;
+		border-radius: 7px;
+		background: #fff;
+		color: #20211f;
 		font: inherit;
-		color: inherit;
-		background: var(--color-background);
-		border: 1px solid var(--color-foreground);
-		padding: 10px;
 		resize: vertical;
 	}
-
-	.settings select {
+	.visibility {
+		font-size: 14px;
+		line-height: 1.5;
+		letter-spacing: 0;
 		text-transform: none;
 	}
-
+	.visibility input {
+		width: 18px;
+		height: 18px;
+	}
 	.playlist-order-help {
-		color: var(--color-foreground);
+		color: #687163;
 		line-height: 1.5;
 		margin-top: 4px;
 		text-transform: none;
 	}
-
+	.cloud-progress {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 10px;
+		padding: 14px;
+		border: 1px solid #e5e8df;
+		border-radius: 8px;
+		background: #fafbf8;
+	}
+	.cloud-progress,
+	.progress-transfer-message,
+	.progress-panel > p {
+		font-size: 13px;
+		line-height: 1.5;
+		letter-spacing: 0;
+		text-transform: none;
+	}
 	.progress-transfer-message {
 		margin: 0;
 	}
-
+	.scan-controls :global(button),
+	.progress-actions :global(button),
+	.cloud-progress :global(button),
+	.review-filter-buttons :global(button) {
+		max-width: 100%;
+		min-height: 44px;
+		height: auto;
+		padding: 8px 12px;
+		border-radius: 7px;
+		font-size: 14px;
+		font-weight: 600;
+		line-height: 1.5;
+		letter-spacing: 0;
+		text-transform: none;
+		white-space: normal;
+	}
+	.cloud-progress :global(button > span),
+	.progress-actions :global(button > span) {
+		min-width: 0;
+		max-width: 100%;
+	}
 	.search-metrics {
 		display: grid;
 		gap: 4px;
 	}
-
-	.search-metrics p {
-		margin: 0;
-	}
-
+	.search-metrics p,
 	.scan-session-line,
 	.scan-session-summary p,
 	.scan-history p {
 		margin: 0;
 	}
-
 	.scan-session-summary {
 		display: grid;
 		gap: 4px;
 	}
-
-	.scan-history {
-		margin-top: 10px;
+	.scan-session-summary :global(.font-small-beast),
+	.scan-session-line,
+	.scan-history :global(.font-small-beast) {
+		font-size: 13px;
+		letter-spacing: 0;
+		text-transform: none;
 	}
-
 	.scan-history summary {
 		cursor: pointer;
 		width: fit-content;
+		font-weight: 700;
 	}
-
-	.scan-history summary:focus-visible {
-		outline: 2px solid currentColor;
-		outline-offset: 3px;
-	}
-
 	.scan-history ol {
 		display: grid;
 		gap: 10px;
 		margin: 10px 0;
 		padding-left: 24px;
 	}
-
 	.scan-history li {
 		padding-left: 4px;
 	}
-
 	.review-filters {
-		padding: 20px 24px;
-		border-bottom: 1px solid var(--color-foreground);
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
-
-		@media (--md) {
-			padding-inline: 40px;
-		}
+		scroll-margin-top: 16px;
 	}
-
 	.review-filter-buttons {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		flex-wrap: wrap;
 	}
-
 	.review-empty {
 		padding: 16px 24px;
-		border-bottom: 1px solid var(--color-foreground);
-
-		@media (--md) {
-			padding-inline: 40px;
+	}
+	.episodes {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 24px;
+		align-items: start;
+		@media (min-width: 1400px) {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 	}
-
-	.episodes {
-		display: flex;
-		flex-direction: column;
-	}
-
 	.episode {
-		border-bottom: 1px solid var(--color-foreground);
+		overflow: hidden;
 	}
-
 	.episode-heading {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
 		gap: 16px;
 		padding: 16px 24px;
-		background: hsla(var(--color-foreground-hsl) / 0.04);
-
-		@media (--md) {
-			padding-inline: 40px;
-		}
+		background: #f3f5ef;
+		border-bottom: 1px solid #e5e8df;
 	}
-
+	.episode-heading > div {
+		min-width: 0;
+	}
+	.episode-heading h2 {
+		overflow-wrap: anywhere;
+		font-size: 16px;
+		line-height: 1.4;
+		letter-spacing: 0;
+		text-transform: none;
+	}
 	.episode-heading p:first-child {
-		opacity: 0.55;
+		color: #687163;
 		margin-bottom: 4px;
 	}
-
 	.tracks {
 		counter-reset: track;
 	}
-
 	.retry {
 		padding: 12px 24px;
-
-		@media (--md) {
-			padding-inline: 40px;
-		}
 	}
-
-	article {
-		padding-bottom: calc(44px + 40px);
+	.settings input:focus-visible,
+	.settings select:focus-visible,
+	.settings textarea:focus-visible,
+	.back-link:focus-visible,
+	.catalogue-shortcuts a:focus-visible,
+	.scan-history summary:focus-visible {
+		outline: 3px solid #588071;
+		outline-offset: 3px;
+	}
+	#playlist-configuration {
+		scroll-margin-top: 16px;
 	}
 </style>
