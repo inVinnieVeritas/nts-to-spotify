@@ -1402,10 +1402,12 @@
 	<article class="catalogue-page">
 		<header class="catalogue-hero" class:has-artwork={Boolean(data.cover)}>
 			<div class="hero-copy">
-				<a class="back-link" href="/"
-					><span aria-hidden="true"><Icon icon="arrow-right" /></span>Back to saved catalogues</a
-				>
-				<p class="catalogue-eyebrow">Full catalogue</p>
+				<div class="hero-navigation">
+					<a class="back-link" href="/"
+						><span aria-hidden="true"><Icon icon="arrow-right" /></span>Back to saved catalogues</a
+					>
+					<p class="catalogue-eyebrow">Full catalogue</p>
+				</div>
 
 				<h1 class="font-title">{data.name}</h1>
 				<p class="font-base">{data.description}</p>
@@ -1461,95 +1463,103 @@
 				</div>
 			</dl>
 			<div class="overview-content">
-				{#if !data.user}
-					<div class="login-note">
-						<p class="font-base">Log in first so your review is not lost in a page reload later.</p>
-						<LoginWithSpotify label="Login with Spotify" />
-					</div>
-				{:else}
-					<div class="scan-controls">
-						<Button
-							on:click={() => scanCatalog()}
-							icon="play"
-							loading={scanning}
-							disabled={!restored ||
-								scanning ||
-								cloudState === 'checking' ||
-								cloudBusy ||
-								progressTransferBusy ||
-								scanComplete ||
-								cooldownRemaining > 0}
-						>
-							{scanComplete
-								? 'Scan complete'
-								: completedCount === 0
-									? 'Scan full catalogue'
-									: 'Resume scan'}
-						</Button>
-						{#if scanning}
-							<Button variant="outline" icon="stop" on:click={cancelScan}>Cancel scan</Button>
-						{/if}
-						<p class="scan-progress-caption">{progressLabel}</p>
-					</div>
-					{#if scanning && scanTiming.active}
-						<p class="scan-session-line font-small-beast" role="status">
-							Current scan: {formatCatalogScanClock(liveScanDurationMs)} · {scanTiming.active
-								.processedEpisodes} episodes processed
-						</p>
-					{/if}
-					{#if spotifySessionMetrics}
-						<div class="search-metrics" aria-label="Spotify Search usage metrics">
-							{#each formatSpotifySessionMetricLines(spotifySessionMetrics) as metricLine}
-								<p class="font-small-beast">{metricLine}</p>
-							{/each}
-							<p class="font-tiny">
-								This is usage observed by this app, not Spotify quota remaining.
+				<div class="catalogue-actions">
+					{#if !data.user}
+						<div class="login-note">
+							<p class="font-base">
+								Log in first so your review is not lost in a page reload later.
 							</p>
+							<LoginWithSpotify label="Login with Spotify" />
+						</div>
+					{:else}
+						<div class="scan-controls">
+							<Button
+								on:click={() => scanCatalog()}
+								icon="play"
+								loading={scanning}
+								disabled={!restored ||
+									scanning ||
+									cloudState === 'checking' ||
+									cloudBusy ||
+									progressTransferBusy ||
+									scanComplete ||
+									cooldownRemaining > 0}
+							>
+								{scanComplete
+									? 'Scan complete'
+									: completedCount === 0
+										? 'Scan full catalogue'
+										: 'Resume scan'}
+							</Button>
+							{#if scanning}
+								<Button variant="outline" icon="stop" on:click={cancelScan}>Cancel scan</Button>
+							{/if}
 						</div>
 					{/if}
-				{/if}
-				{#if cooldownRemaining > 0}
-					<p class="font-base">
-						{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
-					</p>
-					{#if cooldownReason === 'quota-exceeded'}
-						<p class="font-small-beast">
-							Spotify does not expose the remaining quota or its numerical limit.
-						</p>
+					{#if restored}
+						<nav class="catalogue-shortcuts" aria-label="Catalogue sections">
+							<a href="#catalogue-review"
+								><span aria-hidden="true"><Icon icon="list" /></span>Review tracks ({reviewTrackCount})</a
+							>
+							<a href="#playlist-configuration"
+								><span aria-hidden="true"><Icon icon="folder" /></span>Playlist settings</a
+							>
+							{#if linkedPlaylistId}<a
+									href={`https://open.spotify.com/playlist/${linkedPlaylistId}`}
+									target="_blank"
+									rel="noopener noreferrer"
+									><span aria-hidden="true"><Icon icon="spotify" /></span>Open Spotify playlist</a
+								>{/if}
+						</nav>
 					{/if}
-				{/if}
-				{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
-				{#if latestScanSession}
-					<div class="scan-session-summary">
-						<p class="font-small-beast">
-							Last scan: {formatCatalogScanSessionSummary(latestScanSession)}
-						</p>
-						{#if latestScanSession.longestMatchingRequestMs > 0}
-							<p class="font-small-beast">
-								Longest matching request (client-observed): {formatCatalogScanDuration(
-									latestScanSession.longestMatchingRequestMs
-								)}
+				</div>
+				<div class="scan-feedback">
+					{#if data.user}
+						{#if scanning && scanTiming.active}
+							<p class="scan-session-line font-small-beast" role="status">
+								Current scan: {formatCatalogScanClock(liveScanDurationMs)} · {scanTiming.active
+									.processedEpisodes} episodes processed
 							</p>
 						{/if}
-					</div>
-				{/if}
-				{#if restored}
-					<nav class="catalogue-shortcuts" aria-label="Catalogue sections">
-						<a href="#catalogue-review"
-							><span aria-hidden="true"><Icon icon="list" /></span>Review tracks ({reviewTrackCount})</a
-						>
-						<a href="#playlist-configuration"
-							><span aria-hidden="true"><Icon icon="folder" /></span>Playlist settings</a
-						>
-						{#if linkedPlaylistId}<a
-								href={`https://open.spotify.com/playlist/${linkedPlaylistId}`}
-								target="_blank"
-								rel="noopener noreferrer"
-								><span aria-hidden="true"><Icon icon="spotify" /></span>Open Spotify playlist</a
-							>{/if}
-					</nav>
-				{/if}
+						{#if spotifySessionMetrics}
+							<div class="search-metrics" aria-label="Spotify Search usage metrics">
+								{#each formatSpotifySessionMetricLines(spotifySessionMetrics) as metricLine}
+									<p class="font-small-beast">{metricLine}</p>
+								{/each}
+								<p class="font-tiny">
+									This is usage observed by this app, not Spotify quota remaining.
+								</p>
+							</div>
+						{/if}
+					{/if}
+					{#if cooldownRemaining > 0}
+						<p class="font-base">
+							{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
+						</p>
+						{#if cooldownReason === 'quota-exceeded'}
+							<p class="font-small-beast">
+								Spotify does not expose the remaining quota or its numerical limit.
+							</p>
+						{/if}
+					{/if}
+					{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
+					{#if latestScanSession}
+						<div class="scan-session-summary">
+							<p class="font-small-beast">
+								Last scan: {formatCatalogScanSessionSummary(latestScanSession)}
+							</p>
+							{#if latestScanSession.longestMatchingRequestMs > 0}
+								<p class="font-small-beast">
+									Longest matching request (client-observed): {formatCatalogScanDuration(
+										latestScanSession.longestMatchingRequestMs
+									)}
+								</p>
+							{/if}
+						</div>
+					{/if}
+				</div>
 				<div class="catalogue-state-line">
+					{#if data.user}<span class="scan-progress-caption">{progressLabel}</span>{/if}
 					<span class:connected={Boolean(linkedPlaylistId)}
 						><span aria-hidden="true"><Icon icon="link" /></span>{linkedPlaylistId
 							? 'Spotify playlist linked'
@@ -1583,7 +1593,17 @@
 						class="settings surface"
 						aria-labelledby="playlist-configuration-heading"
 					>
-						<h2 id="playlist-configuration-heading">Playlist configuration</h2>
+						<div class="configuration-heading">
+							<h2 id="playlist-configuration-heading">Playlist configuration</h2>
+							<label class="visibility font-base">
+								<input
+									type="checkbox"
+									bind:checked={publicPlaylist}
+									on:change={captureAndPersistReview}
+								/>
+								Make playlist public
+							</label>
+						</div>
 
 						<label class="font-small-beast">
 							Playlist name
@@ -1599,70 +1619,66 @@
 								bind:value={playlistDescription}
 								on:input={captureAndPersistReview}
 								maxlength="300"
-								rows="4"></textarea>
+								rows="3"></textarea>
 						</label>
-						<label class="font-small-beast">
-							Playlist order
-							<select
-								value={playlistOrder}
-								on:change={changePlaylistOrder}
-								aria-describedby="playlist-order-help"
-							>
-								<option value="latest-first">Latest episodes first</option>
-								<option value="oldest-first">Oldest episodes first</option>
-							</select>
+						<div class="playlist-order-row">
+							<label class="font-small-beast">
+								Playlist order
+								<select
+									value={playlistOrder}
+									on:change={changePlaylistOrder}
+									aria-describedby="playlist-order-help"
+								>
+									<option value="latest-first">Latest episodes first</option>
+									<option value="oldest-first">Oldest episodes first</option>
+								</select>
+							</label>
 							<span id="playlist-order-help" class="playlist-order-help font-tiny">
 								<strong
 									>This choice controls the episode order here and in the Spotify playlist.</strong
 								>
 								Tracks within each episode keep their original order.
 							</span>
-						</label>
-						<label class="visibility font-base">
-							<input
-								type="checkbox"
-								bind:checked={publicPlaylist}
-								on:change={captureAndPersistReview}
-							/>
-							Make playlist public
-						</label>
+						</div>
 					</section>
 					<section class="progress-panel surface" aria-labelledby="catalogue-progress-heading">
-						<h2 id="catalogue-progress-heading">Progress and backups</h2>
+						<div class="progress-toolbar">
+							<h2 id="catalogue-progress-heading">Progress and backups</h2>
 
-						<div class="progress-actions" aria-label="Catalogue progress backup controls">
-							<Button
-								type="button"
-								size="sm"
-								variant="outline"
-								disabled={progressTransferBusy}
-								icon="download"
-								on:click={downloadProgress}>Download progress</Button
-							>
-							<Button
-								type="button"
-								size="sm"
-								variant="outline"
-								disabled={progressTransferBusy || scanning}
-								icon="history"
-								on:click={chooseProgressBackup}>Restore progress</Button
-							>
-							<input
-								bind:this={progressFileInput}
-								type="file"
-								accept=".json,application/json"
-								aria-label="Choose catalogue progress backup JSON file"
-								on:change={restoreProgress}
-								hidden
-							/>
-							<Button
-								type="button"
-								size="sm"
-								variant="outline"
-								disabled={progressTransferBusy || scanning}
-								icon="trash"
-								on:click={resetSavedProgress}>Reset saved progress</Button
-							>
+							<div class="progress-actions" aria-label="Catalogue progress backup controls">
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={progressTransferBusy}
+									icon="download"
+									on:click={downloadProgress}>Download progress</Button
+								>
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={progressTransferBusy || scanning}
+									icon="history"
+									on:click={chooseProgressBackup}>Restore progress</Button
+								>
+								<input
+									bind:this={progressFileInput}
+									type="file"
+									accept=".json,application/json"
+									aria-label="Choose catalogue progress backup JSON file"
+									on:change={restoreProgress}
+									hidden
+								/>
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									disabled={progressTransferBusy || scanning}
+									icon="trash"
+									on:click={resetSavedProgress}>Reset saved progress</Button
+								>
+							</div>
 						</div>
 						{#if progressTransferMessage}
 							<p class="progress-transfer-message font-small-beast" role="status">
@@ -1689,7 +1705,11 @@
 							</p>
 						{/if}
 						{#if cloudState !== 'local'}
-							<div class="cloud-progress font-small-beast" aria-label="Cloud progress">
+							<div
+								class="cloud-progress font-small-beast"
+								class:cloud-active={cloudState === 'active'}
+								aria-label="Cloud progress"
+							>
 								{#if cloudState === 'checking'}
 									<p role="status">Checking saved cloud progress…</p>
 								{:else if cloudState === 'active'}
@@ -1921,7 +1941,7 @@
 	.catalogue-page {
 		display: flex;
 		flex-direction: column;
-		gap: 24px;
+		gap: 16px;
 		padding-bottom: 120px;
 		font-size: 14px;
 		line-height: 1.5;
@@ -1949,7 +1969,7 @@
 		backdrop-filter: blur(8px);
 		@media (--lg) {
 			&.has-artwork {
-				grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+				grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
 			}
 		}
 	}
@@ -1957,19 +1977,24 @@
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
-		gap: 14px;
-		padding: 24px;
-		@media (--md) {
-			padding: 32px;
-		}
+		gap: 10px;
+		padding: 20px;
 	}
 	.hero-copy h1 {
-		font-size: clamp(28px, 2.6vw, 44px);
+		font-size: clamp(28px, 2.3vw, 38px);
 		line-height: 1.15;
 		overflow-wrap: anywhere;
 	}
 	.hero-copy > p:not(.catalogue-eyebrow) {
 		max-width: 70ch;
+	}
+	.hero-navigation {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 8px 24px;
+		width: 100%;
 	}
 	.back-link {
 		display: inline-flex;
@@ -1999,7 +2024,7 @@
 		overflow: hidden;
 		@media (--lg) {
 			height: auto;
-			min-height: 240px;
+			min-height: 190px;
 		}
 	}
 	.hero-artwork img {
@@ -2013,15 +2038,15 @@
 	.surface,
 	.scan-history,
 	.review-filters {
-		padding: 20px;
-		@media (--md) {
-			padding: 24px;
-		}
+		padding: 16px;
+	}
+	.catalogue-overview {
+		padding: 12px;
 	}
 	.catalogue-stats {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 12px;
+		gap: 8px;
 		@media (--lg) {
 			grid-template-columns: repeat(5, minmax(0, 1fr));
 		}
@@ -2031,7 +2056,7 @@
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
-		padding: 12px 12px 12px 50px;
+		padding: 10px 12px 10px 50px;
 		border: 1px solid #e5e8df;
 		border-radius: 9px;
 		background: #fafbf8;
@@ -2074,8 +2099,29 @@
 	.overview-content {
 		display: flex;
 		flex-direction: column;
-		gap: 14px;
-		margin-top: 20px;
+		gap: 10px;
+		margin-top: 10px;
+	}
+	.catalogue-actions {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.scan-feedback {
+		display: grid;
+		gap: 6px;
+	}
+	.scan-feedback:empty {
+		display: none;
+	}
+	.scan-feedback > p,
+	.scan-feedback .search-metrics p {
+		font-size: 13px;
+		line-height: 1.4;
+		letter-spacing: 0;
+		text-transform: none;
+		margin: 0;
 	}
 	.summary,
 	.scan-controls,
@@ -2086,12 +2132,23 @@
 	.catalogue-state-line {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 8px;
 		flex-wrap: wrap;
 	}
 	.scan-progress-caption {
 		color: #687163;
 		font-size: 13px;
+	}
+	.scan-controls {
+		flex: 1 1 180px;
+		min-width: 0;
+	}
+	.scan-controls :global(button) {
+		flex: 1 1 auto;
+	}
+	.catalogue-shortcuts {
+		flex: 3 1 480px;
+		min-width: 0;
 	}
 	.catalogue-shortcuts a {
 		display: inline-flex;
@@ -2103,6 +2160,8 @@
 		border-radius: 7px;
 		font-weight: 600;
 		text-decoration: none;
+		justify-content: center;
+		flex: 1 1 160px;
 	}
 	.catalogue-shortcuts a:hover {
 		background: #f0f2ec;
@@ -2113,7 +2172,7 @@
 		flex-shrink: 0;
 	}
 	.catalogue-state-line {
-		padding-top: 14px;
+		padding-top: 8px;
 		border-top: 1px solid #e5e8df;
 		gap: 12px 24px;
 		color: #687163;
@@ -2132,10 +2191,10 @@
 	}
 	.catalogue-workspace {
 		display: grid;
-		gap: 24px;
+		gap: 16px;
 		grid-template-columns: minmax(0, 1fr);
 		@media (--lg) {
-			grid-template-columns: minmax(0, 1.7fr) minmax(340px, 1fr);
+			grid-template-columns: minmax(0, 2fr) minmax(340px, 1fr);
 			align-items: start;
 		}
 	}
@@ -2143,17 +2202,51 @@
 	.catalogue-automation {
 		display: flex;
 		flex-direction: column;
-		gap: 20px;
+		gap: 14px;
 		min-width: 0;
 	}
 	.catalogue-automation :global(.settings-card) {
 		margin-top: 0;
+		padding: 16px;
+	}
+	.catalogue-automation :global(.settings-actions),
+	.catalogue-automation :global(.settings-field),
+	.catalogue-automation :global(.settings-summary),
+	.catalogue-automation :global(.settings-note) {
+		margin-top: 8px;
+	}
+	.catalogue-automation :global(.settings-summary:not(.two-column) > div) {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 4px 12px;
+	}
+	.catalogue-automation :global(.settings-details) {
+		margin-top: 10px;
+		padding-top: 8px;
 	}
 	.settings,
 	.progress-panel {
 		display: flex;
 		flex-direction: column;
-		gap: 18px;
+		gap: 12px;
+	}
+	.configuration-heading,
+	.progress-toolbar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 8px 16px;
+	}
+	.playlist-order-row {
+		display: grid;
+		align-items: end;
+		gap: 8px 16px;
+		@media (--md) {
+			grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+		}
 	}
 	.surface h2,
 	.review-filters h2 {
@@ -2185,6 +2278,7 @@
 		resize: vertical;
 	}
 	.visibility {
+		min-height: 44px;
 		font-size: 14px;
 		line-height: 1.5;
 		letter-spacing: 0;
@@ -2209,6 +2303,12 @@
 		border: 1px solid #e5e8df;
 		border-radius: 8px;
 		background: #fafbf8;
+	}
+	.cloud-progress.cloud-active {
+		padding: 0;
+		border: 0;
+		background: none;
+		color: #687163;
 	}
 	.cloud-progress,
 	.progress-transfer-message,
@@ -2253,8 +2353,9 @@
 		margin: 0;
 	}
 	.scan-session-summary {
-		display: grid;
-		gap: 4px;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px 16px;
 	}
 	.scan-session-summary :global(.font-small-beast),
 	.scan-session-line,
