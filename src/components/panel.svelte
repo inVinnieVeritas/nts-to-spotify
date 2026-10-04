@@ -1,9 +1,10 @@
 <script lang="ts">
 	export let padded = true;
+	export let wide = false;
 </script>
 
 <div>
-	<section class:padded data-theme="light">
+	<section class:padded class:wide data-theme="light">
 		<slot />
 	</section>
 </div>
@@ -22,6 +23,13 @@
 		margin-top: 30vh;
 
 		width: min(100%, 600px);
+	}
+
+	section.wide {
+		width: min(100%, 1920px);
+		margin-top: 24px;
+		align-self: center;
+		border-radius: 12px 12px 0 0;
 	}
 
 	.padded {
