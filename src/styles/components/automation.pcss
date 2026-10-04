@@ -39,6 +39,107 @@
 		color: #5c6059;
 	}
 
+	.automation-description {
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+	}
+	.automation-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		width: 40px;
+		height: 40px;
+		border-radius: 8px;
+		background: #f0f2ec;
+		color: #202b25;
+	}
+	.automation-icon svg {
+		width: 28px;
+		height: 28px;
+	}
+	.spotify-icon {
+		background: transparent;
+		color: #168640;
+	}
+	.spotify-icon svg {
+		width: 36px;
+		height: 36px;
+	}
+
+	.automation-switch {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		min-width: 80px;
+		min-height: 44px;
+		padding: 0;
+		border: 0;
+		border-radius: 20px;
+		background: transparent;
+		cursor: pointer;
+	}
+	.switch-rail {
+		position: relative;
+		display: block;
+		width: 76px;
+		height: 32px;
+		border-radius: 20px;
+		background: #656c64;
+		color: #fff;
+	}
+	.switch-thumb {
+		position: absolute;
+		top: 4px;
+		left: 4px;
+		width: 24px;
+		height: 24px;
+		border-radius: 50%;
+		background: #fff;
+		box-shadow: 0 1px 3px rgb(0 0 0 / 20%);
+		transition: transform 160ms ease;
+	}
+	.switch-label {
+		position: absolute;
+		top: 0;
+		right: 9px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		font-size: 13px;
+		font-weight: 700;
+		line-height: 1;
+	}
+	.automation-switch[aria-checked='true'] {
+		.switch-rail {
+			background: #168640;
+		}
+		.switch-thumb {
+			transform: translateX(44px);
+		}
+		.switch-label {
+			left: 9px;
+			right: auto;
+		}
+	}
+	.automation-switch:focus-visible {
+		outline: 3px solid #588071;
+		outline-offset: 3px;
+	}
+	.automation-switch:disabled {
+		opacity: 0.55;
+		cursor: default;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.switch-thumb {
+			transition: none;
+		}
+	}
+
 	.settings-actions {
 		display: flex;
 		flex-wrap: wrap;

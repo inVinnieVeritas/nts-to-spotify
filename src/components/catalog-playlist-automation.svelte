@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import Icon from './icon/icon.svelte';
 	import {
 		isAutomaticPlaylistPublicState,
 		automaticPlaylistStatusText,
@@ -19,12 +20,14 @@
 	let now = Date.now();
 	let timer: ReturnType<typeof setInterval>;
 	let generation = 0;
+	let settingsLoaded = false;
 	async function load(show: string) {
 		const ticket = ++generation;
 		loadedShow = show;
 		state = null;
 		message = '';
 		visible = false;
+		settingsLoaded = false;
 		if (location.origin !== 'https://nts2spotify.vincentvanderveken.com') return;
 		try {
 			const responses = await Promise.all([
@@ -43,6 +46,7 @@
 			if (settings.automation !== null && !isAutomaticPlaylistPublicState(settings.automation))
 				throw new Error();
 			state = settings.automation;
+			settingsLoaded = true;
 			visible = true;
 		} catch {
 			if (mounted && ticket === generation && show === showAlias) {
@@ -122,13 +126,31 @@
 	<section class="settings-card" aria-labelledby="playlist-automation-heading">
 		<div class="settings-heading">
 			<h3 id="playlist-automation-heading">Automatic playlist updates</h3>
-			<span class="status-badge" class:active={state?.enabled}>{state?.enabled ? 'On' : 'Off'}</span
-			>
+			{#if settingsLoaded}
+				<button
+					type="button"
+					class="automation-switch"
+					role="switch"
+					aria-label="Automatic playlist updates"
+					aria-checked={Boolean(state?.enabled)}
+					aria-busy={busy}
+					disabled={busy || scanning || (!state?.enabled && (!connected || !cloudConnected))}
+					on:click={() => action(state?.enabled ? 'disable' : 'enable')}
+				>
+					<span class="switch-rail" aria-hidden="true">
+						<span class="switch-label">{state?.enabled ? 'On' : 'Off'}</span>
+						<span class="switch-thumb"></span>
+					</span>
+				</button>
+			{:else}<span class="status-badge">Unavailable</span>{/if}
 		</div>
-		<p class="settings-description">
-			Keep your linked Spotify playlist up to date with confident matches. Uncertain matches stay
-			available for review.
-		</p>
+		<div class="automation-description">
+			<span class="automation-icon spotify-icon" aria-hidden="true"><Icon icon="spotify" /></span>
+			<p class="settings-description">
+				Keep your linked Spotify playlist up to date with confident matches. Uncertain matches stay
+				available for review.
+			</p>
+		</div>
 		<dl class="settings-summary">
 			<div>
 				<dt>Background Spotify authorization</dt>
@@ -140,13 +162,6 @@
 			</div>
 		</dl>
 		<div class="settings-actions">
-			<button
-				type="button"
-				class="control-button primary"
-				disabled={busy || scanning || (!state?.enabled && (!connected || !cloudConnected))}
-				on:click={() => action(state?.enabled ? 'disable' : 'enable')}
-				>{state?.enabled ? 'Pause playlist updates' : 'Enable playlist updates'}</button
-			>
 			{#if !connected}<button
 					type="button"
 					class="control-button"
@@ -177,10 +192,11 @@
 				{#if state.retryUntil > now}<p class="settings-feedback">
 						Waiting: {formatCooldownDuration(Math.ceil((state.retryUntil - now) / 1000))} remaining.
 					</p>{/if}
-			{:else}<p class="settings-note">
+			{:else if settingsLoaded}<p class="settings-note">
 					Automatic playlist updates are off for this catalogue.
 				</p>{/if}
-			{#if message}<p class="settings-feedback">{message}</p>{/if}
+			{#if busy}<p class="settings-feedback">Saving playlist settings…</p>
+			{:else if message}<p class="settings-feedback">{message}</p>{/if}
 		</div>
 		<details class="settings-details">
 			<summary>Playlist safeguards and Spotify access</summary>

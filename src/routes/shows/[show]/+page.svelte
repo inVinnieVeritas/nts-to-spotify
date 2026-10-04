@@ -1533,14 +1533,19 @@
 						{/if}
 					{/if}
 					{#if cooldownRemaining > 0}
-						<p class="font-base">
-							{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
-						</p>
-						{#if cooldownReason === 'quota-exceeded'}
-							<p class="font-small-beast">
-								Spotify does not expose the remaining quota or its numerical limit.
-							</p>
-						{/if}
+						<div class="cooldown-notice" aria-label="Spotify cooldown">
+							<span class="cooldown-icon" aria-hidden="true"><Icon icon="clock" /></span>
+							<div>
+								<p class="cooldown-message">
+									{formatSpotifyCooldownMessage(cooldownReason, cooldownRemaining)}
+								</p>
+								{#if cooldownReason === 'quota-exceeded'}
+									<p class="cooldown-explanation">
+										Spotify does not expose the remaining quota or its numerical limit.
+									</p>
+								{/if}
+							</div>
+						</div>
 					{/if}
 					{#if scanMessage}<p class="font-base">{scanMessage}</p>{/if}
 					{#if latestScanSession}
@@ -2122,6 +2127,40 @@
 		letter-spacing: 0;
 		text-transform: none;
 		margin: 0;
+	}
+	.cooldown-notice {
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+		padding: 12px 16px;
+		border: 1px solid #d6ac54;
+		border-left-width: 4px;
+		border-radius: 8px;
+		background: #fff4d8;
+		color: #633f09;
+	}
+	.cooldown-notice > div {
+		min-width: 0;
+	}
+	.cooldown-icon {
+		display: inline-flex;
+		flex-shrink: 0;
+		padding-top: 2px;
+	}
+	.cooldown-icon :global(svg) {
+		width: 24px;
+		height: 24px;
+	}
+	.cooldown-message {
+		font-size: 18px;
+		font-weight: 700;
+		line-height: 1.4;
+		overflow-wrap: anywhere;
+	}
+	.cooldown-explanation {
+		margin-top: 4px;
+		font-size: 14px;
+		line-height: 1.4;
 	}
 	.summary,
 	.scan-controls,

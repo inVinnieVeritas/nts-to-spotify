@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import Icon from './icon/icon.svelte';
 	import {
 		isCatalogSchedule,
 		isScheduleFrequency,
@@ -17,6 +18,7 @@
 	let message = '';
 	let loadedShow = '';
 	let mounted = false;
+	let settingsLoaded = false;
 	const date = (timestamp: number) => new Date(timestamp).toLocaleString();
 	const statuses = {
 		waiting: 'More episodes will be scanned on a later run.',
@@ -35,6 +37,7 @@
 		visible = false;
 		schedule = null;
 		version = null;
+		settingsLoaded = false;
 		// Schedule controls belong to the hosted site; the local bridge only transfers progress.
 		if (location.origin !== 'https://nts2spotify.vincentvanderveken.com') return;
 		try {
@@ -50,6 +53,7 @@
 			schedule = body.schedule;
 			version = body.version;
 			frequency = schedule?.frequency ?? 'weekly';
+			settingsLoaded = true;
 		} catch {
 			if (show === showAlias) {
 				visible = true;
@@ -101,14 +105,33 @@
 	<section class="settings-card" aria-labelledby="catalogue-schedule-heading">
 		<div class="settings-heading">
 			<h3 id="catalogue-schedule-heading">Automatic catalogue scans</h3>
-			<span class="status-badge" class:active={schedule?.enabled}
-				>{schedule?.enabled ? 'On' : 'Off'}</span
-			>
+			{#if settingsLoaded}
+				<button
+					type="button"
+					class="automation-switch"
+					role="switch"
+					aria-label="Automatic catalogue scans"
+					aria-checked={Boolean(schedule?.enabled)}
+					aria-busy={busy}
+					disabled={busy ||
+						scanning ||
+						(!schedule?.enabled && (!cloudConnected || !isScheduleFrequency(frequency)))}
+					on:click={() => save(!schedule?.enabled)}
+				>
+					<span class="switch-rail" aria-hidden="true">
+						<span class="switch-label">{schedule?.enabled ? 'On' : 'Off'}</span>
+						<span class="switch-thumb"></span>
+					</span>
+				</button>
+			{:else}<span class="status-badge">Unavailable</span>{/if}
 		</div>
-		<p class="settings-description">
-			Check for new episodes while your browser is closed. Matching results save to cloud for
-			review.
-		</p>
+		<div class="automation-description">
+			<span class="automation-icon" aria-hidden="true"><Icon icon="calendar" /></span>
+			<p class="settings-description">
+				Check for new episodes while your browser is closed. Matching results save to cloud for
+				review.
+			</p>
+		</div>
 		<div class="settings-field">
 			<label for="catalogue-schedule-frequency">Check for new episodes</label>
 			<select id="catalogue-schedule-frequency" bind:value={frequency} disabled={busy || scanning}>
@@ -125,7 +148,9 @@
 				</div>
 			</dl>
 			<p class="settings-muted settings-note">Runs on a scheduler check after this time.</p>
-		{:else}<p class="settings-note">Automatic scans are off for this catalogue.</p>{/if}
+		{:else if settingsLoaded}<p class="settings-note">
+				Automatic scans are off for this catalogue.
+			</p>{/if}
 		<div class="settings-actions">
 			{#if schedule?.enabled}
 				<button
@@ -133,16 +158,6 @@
 					class="control-button primary"
 					disabled={busy || scanning || !cloudConnected}
 					on:click={() => save(true)}>Save frequency</button
-				>
-				<button type="button" class="control-button" disabled={busy} on:click={() => save(false)}
-					>Pause scans</button
-				>
-			{:else}
-				<button
-					type="button"
-					class="control-button primary"
-					disabled={busy || scanning || !cloudConnected || !isScheduleFrequency(frequency)}
-					on:click={() => save(true)}>Enable automatic scans</button
 				>
 			{/if}
 			<button type="button" class="control-button" disabled={busy} on:click={() => load(showAlias)}
@@ -162,7 +177,8 @@
 			</dl>
 			<p class="settings-note">{statuses[schedule.lastStatus]}</p>
 		{/if}
-		{#if message}<p class="settings-feedback" role="status">{message}</p>{/if}
+		{#if busy}<p class="settings-feedback" role="status">Saving scan settings…</p>
+		{:else if message}<p class="settings-feedback" role="status">{message}</p>{/if}
 		<details class="settings-details">
 			<summary>How automatic scans work</summary>
 			<p>

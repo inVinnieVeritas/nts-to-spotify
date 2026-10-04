@@ -355,9 +355,10 @@
 								<p class="font-base">
 									With automatic scans off, check for new episodes from Saved Catalogues or reopen
 									the show, then scan and review pending episodes. On the private hosted site, you
-									can enable “Automatic catalogue scans” after saving progress to cloud. Background
-									runs discover and scan episodes while your browser is closed and save results to
-									cloud for review. This does not enable automatic Spotify playlist updates.
+									can turn on the “Automatic catalogue scans” switch after saving progress to cloud.
+									Background runs discover and scan episodes while your browser is closed and save
+									results to cloud for review. This does not enable automatic Spotify playlist
+									updates.
 								</p>
 							</details>
 							<details>
@@ -376,25 +377,25 @@
 								>
 								<p class="font-base">
 									Yes, on the private hosted site. Save progress to cloud, manually synchronize your
-									linked app-created playlist, authorize background Spotify, then enable “Automatic
-									playlist updates” for that show. Enable automatic catalogue scans separately to
-									find and match new episodes. Confident new matches are selected; uncertain matches
-									stay available for review, and saved manual choices are preserved. Automatic
-									updates replace the linked playlist contents with your selected tracks. Both
-									automation controls are off by default.
+									linked app-created playlist, authorize background Spotify, then turn on the
+									“Automatic playlist updates” switch for that show. Enable automatic catalogue
+									scans separately to find and match new episodes. Confident new matches are
+									selected; uncertain matches stay available for review, and saved manual choices
+									are preserved. Automatic updates replace the linked playlist contents with your
+									selected tracks. Both automation controls are off by default.
 								</p>
 							</details>
 							<details>
 								<summary class="font-base">How do I pause automation or disconnect Spotify?</summary
 								>
 								<p class="font-base">
-									“Pause scans” and “Pause playlist updates” affect that show separately. An already
-									accepted request may finish. Under “Playlist safeguards and Spotify access”,
-									“Disconnect background Spotify” removes the server's saved authorization for all
-									catalogues without deleting playlists. Reauthorize if Spotify expires or revokes
-									access. To revoke the app itself, use Spotify's account apps page. Pause both
-									automation controls before working through a standalone local installation without
-									cloud coordination.
+									Turn the “Automatic catalogue scans” or “Automatic playlist updates” switch off to
+									pause that feature for the show. An already accepted request may finish. Under
+									“Playlist safeguards and Spotify access”, “Disconnect background Spotify” removes
+									the server's saved authorization for all catalogues without deleting playlists.
+									Reauthorize if Spotify expires or revokes access. To revoke the app itself, use
+									Spotify's account apps page. Pause both automation controls before working through
+									a standalone local installation without cloud coordination.
 								</p>
 							</details>
 						</div>
