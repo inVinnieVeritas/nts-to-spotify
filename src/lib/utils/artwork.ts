@@ -1,6 +1,6 @@
 const parseOfficialArtworkUrl = (
 	value: unknown,
-	hostname: string,
+	hostnames: readonly string[],
 	validPath: (pathname: string) => boolean
 ) => {
 	if (typeof value !== 'string' || value.length > 2_048) return undefined;
@@ -8,7 +8,7 @@ const parseOfficialArtworkUrl = (
 		const url = new URL(value);
 		if (
 			url.protocol !== 'https:' ||
-			url.hostname !== hostname ||
+			!hostnames.includes(url.hostname) ||
 			url.port ||
 			url.username ||
 			url.password ||
@@ -25,11 +25,13 @@ const parseOfficialArtworkUrl = (
 };
 
 export const parseOfficialNTSArtworkUrl = (value: unknown) =>
-	parseOfficialArtworkUrl(value, 'media.ntslive.co.uk', (pathname) =>
-		/^\/(?:crop|resize)\/[^/]+\/.+/u.test(pathname)
+	parseOfficialArtworkUrl(
+		value,
+		['media.ntslive.co.uk', 'media2.ntslive.co.uk', 'media3.ntslive.co.uk'],
+		(pathname) => /^\/(?:crop|resize)\/[^/]+\/.+/u.test(pathname)
 	);
 
 export const parseOfficialSpotifyArtworkUrl = (value: unknown) =>
-	parseOfficialArtworkUrl(value, 'i.scdn.co', (pathname) =>
+	parseOfficialArtworkUrl(value, ['i.scdn.co'], (pathname) =>
 		/^\/image\/[A-Za-z0-9]+$/u.test(pathname)
 	);

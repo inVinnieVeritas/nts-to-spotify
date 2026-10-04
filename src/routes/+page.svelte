@@ -2,7 +2,7 @@
 	import { page } from '$app/stores';
 	import CatalogNotifications from '../components/catalog-notifications.svelte';
 	import SavedCatalogueCard from '../components/saved-catalogue-card.svelte';
-	import { Button, Divider, LoginWithSpotify, Logo, Panel } from '$components';
+	import { Button, LoginWithSpotify, Logo, Panel } from '$components';
 	import { onDestroy, onMount } from 'svelte';
 	import {
 		applySavedCatalogUpdateOutcome,
@@ -197,7 +197,7 @@
 	});
 </script>
 
-<Panel wide>
+<Panel wide transparent>
 	<div class="panel">
 		<div class="homepage-intro">
 			<div class="homepage-brand">
@@ -447,10 +447,10 @@
 								>
 								<p class="font-base">
 									The dashboard reads saved browser data and cloud catalogue summaries without
-									Spotify Search requests. The signed-in header may verify your Spotify profile.
-									“Check for new episodes” contacts NTS; matching tracks uses Spotify Search.
-									Enabled background scans can also use the shared search allowance while your
-									browser is closed.
+									Spotify Search requests. Missing artwork loads from NTS without starting a scan.
+									The signed-in header may verify your Spotify profile. “Check for new episodes”
+									contacts NTS; matching tracks uses Spotify Search. Enabled background scans can
+									also use the shared search allowance while your browser is closed.
 								</p>
 							</details>
 						</div>
@@ -463,31 +463,31 @@
 			</div>
 		</div>
 
-		<Divider />
-
 		<section class="saved-catalogues" aria-labelledby="saved-catalogues-heading">
-			<div class="catalogue-section-heading">
-				<h2 id="saved-catalogues-heading">Saved catalogues</h2>
-				{#if !savedCataloguesLoading && savedCatalogues.length + cloudOnlyCatalogues.length > 0}<span
-						class="catalogue-total"
-						aria-label="Saved catalogue count"
-						>{savedCatalogues.length + cloudOnlyCatalogues.length}</span
-					>{/if}
-			</div>
-			<div class="catalogue-toolbar">
-				<label class="catalogue-search"
-					><span>Find a saved show</span><input
-						type="search"
-						bind:value={catalogueQuery}
-						placeholder="Search catalogues…"
-					/></label
-				>
-				<label class="catalogue-sort"
-					><span>Sort by</span><select bind:value={catalogueSort}
-						><option value="recent">Last saved</option><option value="name">Show name</option
-						><option value="pending">Pending episodes</option></select
-					></label
-				>
+			<div class="catalogue-header">
+				<div class="catalogue-section-heading">
+					<h2 id="saved-catalogues-heading">Saved catalogues</h2>
+					{#if !savedCataloguesLoading && savedCatalogues.length + cloudOnlyCatalogues.length > 0}<span
+							class="catalogue-total"
+							aria-label="Saved catalogue count"
+							>{savedCatalogues.length + cloudOnlyCatalogues.length}</span
+						>{/if}
+				</div>
+				<div class="catalogue-toolbar">
+					<label class="catalogue-search"
+						><span>Find a saved show</span><input
+							type="search"
+							bind:value={catalogueQuery}
+							placeholder="Search catalogues…"
+						/></label
+					>
+					<label class="catalogue-sort"
+						><span>Sort by</span><select bind:value={catalogueSort}
+							><option value="recent">Last saved</option><option value="name">Show name</option
+							><option value="pending">Pending episodes</option></select
+						></label
+					>
+				</div>
 			</div>
 			{#if me && isLocalCloudBridge() && !bridgeConnected}
 				<p class="font-base">Connect this local Vite browser to your private cloud progress.</p>
@@ -648,9 +648,7 @@
 			{/if}
 		</section>
 
-		<Divider />
-
-		<div>
+		<div class="homepage-support">
 			<p class="support font-base">Support the project</p>
 			<div class="buttons">
 				<Button
@@ -695,6 +693,30 @@
 		gap: 24px;
 	}
 
+	.homepage-intro,
+	.catalogue-header,
+	.homepage-support {
+		padding: 20px;
+		border: 1px solid rgb(255 255 255 / 65%);
+		border-radius: 12px;
+		background: rgb(255 255 255 / 94%);
+		backdrop-filter: blur(8px);
+		box-shadow: 0 6px 24px rgb(0 0 0 / 12%);
+		@media (--md) {
+			padding: 24px;
+		}
+	}
+	.homepage-support {
+		width: 100%;
+		max-width: 720px;
+	}
+	.catalogue-header {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px 24px;
+	}
 	.homepage-intro {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
@@ -716,6 +738,7 @@
 	.homepage-notifications {
 		width: 100%;
 		max-width: 720px;
+		margin-top: 24px;
 	}
 
 	ol {
@@ -872,7 +895,8 @@
 		align-items: flex-end;
 		flex-wrap: wrap;
 		gap: 12px;
-		width: 100%;
+		flex: 1 1 360px;
+		max-width: 660px;
 	}
 	.catalogue-toolbar label {
 		display: flex;
@@ -908,7 +932,7 @@
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
 		align-items: start;
-		gap: 16px;
+		gap: 24px;
 		@media (--md) {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
@@ -937,6 +961,16 @@
 		border-radius: 16px;
 		background: #f0f1ed;
 		color: #50564e;
+	}
+
+	.saved-catalogues > p,
+	.saved-catalogues > h3 {
+		padding: 12px 16px;
+		border-radius: 8px;
+		background: rgb(255 255 255 / 96%);
+	}
+	.saved-catalogues > h3 {
+		align-self: flex-start;
 	}
 
 	.catalogue-warning {

@@ -9,6 +9,9 @@
 	export let playlistLinked: boolean | undefined = undefined;
 	export let cloudOnly = false;
 	let failedCover: string | undefined;
+	$: artworkSource =
+		cover && cover !== failedCover ? cover : `/api/nts/artwork/${encodeURIComponent(showAlias)}`;
+	let failedArtworkSource: string | undefined;
 	$: total = scanned + pending + failed;
 	$: scanStatus =
 		failed > 0
@@ -22,14 +25,17 @@
 
 <article class="catalogue-card" aria-label={showName}>
 	<div class="cover">
-		{#if cover && cover !== failedCover}
+		{#if artworkSource !== failedArtworkSource}
 			<img
-				src={cover}
+				src={artworkSource}
 				alt=""
 				width="480"
-				height="100"
+				height="140"
 				loading="lazy"
-				on:error={() => (failedCover = cover)}
+				on:error={() => {
+					failedArtworkSource = artworkSource;
+					if (artworkSource === cover) failedCover = cover;
+				}}
 			/>
 		{:else}
 			<span aria-hidden="true">NTS</span>
@@ -95,7 +101,7 @@
 		border: 1px solid #d8d8cc;
 		border-radius: 12px;
 		background: #fff;
-		box-shadow: 0 2px 8px rgb(0 0 0 / 4%);
+		box-shadow: 0 6px 24px rgb(0 0 0 / 16%);
 		color: #20211f;
 		font-size: 14px;
 		line-height: 1.5;
@@ -113,7 +119,7 @@
 		align-items: center;
 		justify-content: center;
 		width: calc(100% + 32px);
-		height: 100px;
+		height: 140px;
 		margin: -16px -16px 14px;
 		flex-shrink: 0;
 		overflow: hidden;
