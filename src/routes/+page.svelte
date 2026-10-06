@@ -304,7 +304,10 @@
 									title-only searches can be inaccurate. Use the review filters to find uncertain
 									matches, fallback results, tracks with no candidates, and part mismatches. Checked
 									tracks are included; excluded tracks stay out. Choose an alternative where needed.
-									You can also download a CSV of the review results.
+									You can also download a CSV of the review results. Dismiss incorrect tracks to
+									hide them from normal review and exclude them from the playlist. Dismissals are
+									saved in browser/cloud progress and backups; the Dismissed filter lets you restore
+									a track without automatically selecting it.
 								</p>
 							</details>
 						</div>

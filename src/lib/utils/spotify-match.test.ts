@@ -1,12 +1,48 @@
 import { describe, expect, it } from 'vitest';
 import type { BasicTrack, Match } from '$lib/types';
-import { isConfidentSpotifyMatch } from './spotify-match';
+import { isConfidentSpotifyMatch, prioritizeConfidentSpotifyMatches } from './spotify-match';
 import {
 	createSpotifyPersistentCacheIdentity,
 	createSpotifyPersistentCacheKey
 } from './spotify-match-cache.server';
 
 const TRACK_ID = '0123456789ABCDEFGHIJKL';
+
+describe('candidate priority', () => {
+	it('puts the requested mix before an Edit and ignores capitalization of MIX', () => {
+		const original = {
+			artist: 'The Gentle People, Aphex Twin',
+			title: 'Journey (Aphex Twin Care Mix)'
+		};
+		const edit = {
+			artist: original.artist,
+			title: 'Journey - Aphex Twin Care Mix [Edit]',
+			uri: 'spotify:track:0123456789ABCDEFGHIJKL',
+			href: 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL'
+		};
+		const mix = { ...edit, artist: 'The Gentle People', title: 'Journey - Aphex Twin Care MIX' };
+		expect(isConfidentSpotifyMatch(original, edit)).toBe(false);
+		expect(isConfidentSpotifyMatch(original, mix)).toBe(true);
+		const candidates = [edit, mix];
+		expect(prioritizeConfidentSpotifyMatches(original, candidates)).toEqual([mix, edit]);
+		expect(candidates).toEqual([edit, mix]);
+	});
+	it('keeps a requested Edit distinct from the full mix and preserves order within groups', () => {
+		const original = track('Song Title [Edit]');
+		const candidates = [
+			match('Song Title'),
+			match('Song Title [Edit]'),
+			match('Song Title [Edit]', 'Unrelated Performer'),
+			match('Song Title - Edit')
+		];
+		expect(prioritizeConfidentSpotifyMatches(original, candidates)).toEqual([
+			candidates[1],
+			candidates[3],
+			candidates[0],
+			candidates[2]
+		]);
+	});
+});
 
 const track = (title: string, artist = 'Artist'): BasicTrack => ({ artist, title });
 const match = (title: string, artist = 'Artist'): Match => ({

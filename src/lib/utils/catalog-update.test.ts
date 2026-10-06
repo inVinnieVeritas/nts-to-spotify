@@ -40,7 +40,8 @@ const savedEpisode = (
 						confident: false,
 						fallback: true,
 						selectedMatch: 'spotify:track:0123456789ABCDEFGHIJKL',
-						checked: false
+						checked: false,
+						dismissed: true
 					}
 				]
 			: [],

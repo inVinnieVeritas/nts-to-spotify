@@ -92,6 +92,25 @@ const jsonEnvelope = (progress = makeProgress()) => {
 };
 
 describe('catalogue progress backup', () => {
+	it('preserves dismissed decisions and explicit restored states through a backup round trip', () => {
+		const progress = makeProgress();
+		const track = progress.episodes.older.tracks[0];
+		track.checked = false;
+		for (const dismissed of [true, false]) {
+			track.dismissed = dismissed;
+			const parsed = parseCatalogBackup(jsonEnvelope(progress), 'show');
+			expect(parsed.progress.episodes.older.tracks[0]).toEqual(track);
+		}
+	});
+	it('rejects invalid dismissal flags and contradictory playlist selections', () => {
+		const envelope = JSON.parse(jsonEnvelope());
+		const track = envelope.progress.episodes.older.tracks[0];
+		track.dismissed = true;
+		expect(() => parseCatalogBackup(JSON.stringify(envelope), 'show')).toThrow();
+		track.checked = false;
+		track.dismissed = 'true';
+		expect(() => parseCatalogBackup(JSON.stringify(envelope), 'show')).toThrow();
+	});
 	it('round trips every whitelisted persisted field', () => {
 		const progress = makeProgress();
 		progress.updatedAt = EXPORTED_AT_MS;

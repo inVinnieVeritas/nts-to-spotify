@@ -135,7 +135,8 @@
 		{ value: 'primary-review', label: 'Primary review' },
 		{ value: 'fallback-review', label: 'Fallback review' },
 		{ value: 'no-candidates', label: 'No candidates' },
-		{ value: 'part-mismatches', label: 'Part mismatches' }
+		{ value: 'part-mismatches', label: 'Part mismatches' },
+		{ value: 'dismissed', label: 'Dismissed' }
 	];
 
 	const shortDate = (date: string) => {
@@ -1162,7 +1163,7 @@
 	let activeReviewCount = 0;
 	$: rawSelectedTracks = episodes.flatMap((episode) =>
 		episode.tracks
-			.filter((track) => track.checked && track.selectedMatch)
+			.filter((track) => !track.dismissed && track.checked && track.selectedMatch)
 			.map((track) => track.selectedMatch as string)
 	);
 	$: selectedTracks = getCatalogExportUris(episodes, playlistOrder);
@@ -1170,7 +1171,7 @@
 	$: playlistPreviewKey = JSON.stringify(
 		episodes.map((episode) => [
 			episode.episodeAlias,
-			episode.tracks.map((track) => [track.checked, track.selectedMatch])
+			episode.tracks.map((track) => [track.checked, track.selectedMatch, Boolean(track.dismissed)])
 		])
 	);
 	$: duplicateCount = rawSelectedTracks.length - selectedTracks.length;
@@ -1845,6 +1846,10 @@
 					Primary results used artist and title. Fallback results used title only and need more
 					caution.
 				</p>
+				<p class="font-small-beast">
+					Dismiss a track to hide it from normal review and exclude it from the playlist. Your
+					decision is saved with progress; restore it from Dismissed.
+				</p>
 			</section>
 			{#if activeReviewCount === 0}
 				<p class="review-empty font-small-beast" role="status">
@@ -1876,12 +1881,14 @@
 							</div>
 						{/if}
 
-						{#if episode.status === 'done'}
+						{#if episode.status === 'done' || reviewFilter === 'dismissed'}
 							<div class="tracks">
 								{#each getCatalogEpisodeReviewTracks(episode, reviewFilter) as track}
 									<Track
 										bind:checked={track.checked}
 										bind:selectedMatch={track.selectedMatch}
+										bind:dismissed={track.dismissed}
+										dismissible
 										on:reviewchange={captureAndPersistTrackReview}
 										original={{ artist: track.artist, title: track.title }}
 										matches={track.matches}
@@ -1891,10 +1898,12 @@
 							</div>
 						{:else if episode.tracks.length > 0}
 							<div class="tracks">
-								{#each episode.tracks as track}
+								{#each episode.tracks.filter((track) => !track.dismissed) as track}
 									<Track
 										bind:checked={track.checked}
 										bind:selectedMatch={track.selectedMatch}
+										bind:dismissed={track.dismissed}
+										dismissible
 										on:reviewchange={captureAndPersistTrackReview}
 										original={{ artist: track.artist, title: track.title }}
 										matches={track.matches}

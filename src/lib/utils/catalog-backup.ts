@@ -221,7 +221,16 @@ const validateReviewTrack = (value: unknown, label: string): ReviewTrack => {
 	const track = asRecord(value, label);
 	assertAllowedKeys(
 		track,
-		['artist', 'title', 'matches', 'confident', 'fallback', 'selectedMatch', 'checked'],
+		[
+			'artist',
+			'title',
+			'matches',
+			'confident',
+			'fallback',
+			'selectedMatch',
+			'checked',
+			'dismissed'
+		],
 		label
 	);
 	if (!Array.isArray(track.matches) || track.matches.length > 100) {
@@ -237,6 +246,10 @@ const validateReviewTrack = (value: unknown, label: string): ReviewTrack => {
 	if (selectedMatch !== null && !matches.some((match) => match.uri === selectedMatch)) {
 		invalid(`${label}.selectedMatch must reference one of the track matches.`);
 	}
+	const checked = requiredBoolean(track.checked, `${label}.checked`);
+	const dismissed =
+		track.dismissed === undefined ? false : requiredBoolean(track.dismissed, `${label}.dismissed`);
+	if (dismissed && checked) invalid(`${label} cannot be both dismissed and selected.`);
 	return {
 		artist: boundedString(track.artist, `${label}.artist`),
 		title: boundedString(track.title, `${label}.title`),
@@ -244,7 +257,8 @@ const validateReviewTrack = (value: unknown, label: string): ReviewTrack => {
 		confident: requiredBoolean(track.confident, `${label}.confident`),
 		fallback: requiredBoolean(track.fallback, `${label}.fallback`),
 		selectedMatch,
-		checked: requiredBoolean(track.checked, `${label}.checked`)
+		checked,
+		...(track.dismissed !== undefined ? { dismissed } : {})
 	};
 };
 
@@ -412,7 +426,8 @@ const copyTrack = (track: ReviewTrack): ReviewTrack => ({
 	confident: track.confident,
 	fallback: track.fallback,
 	selectedMatch: track.selectedMatch,
-	checked: track.checked
+	checked: track.checked,
+	...(track.dismissed !== undefined ? { dismissed: track.dismissed } : {})
 });
 
 const copyEpisode = (episode: EpisodeState): EpisodeState => ({

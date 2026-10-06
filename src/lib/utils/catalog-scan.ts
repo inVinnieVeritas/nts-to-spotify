@@ -12,6 +12,7 @@ const SPOTIFY_PLAYLIST_ID = /^[A-Za-z0-9]{22}$/;
 export type ReviewTrack = MatchedTrack & {
 	selectedMatch: URI | null;
 	checked: boolean;
+	dismissed?: boolean;
 };
 
 export type EpisodeStatus = 'pending' | 'scanning' | 'done' | 'error' | 'rate-limited';
@@ -35,7 +36,13 @@ export type EpisodeState = NTSEpisodeSummary & {
 };
 
 export type CatalogReviewFilter =
-	'all' | 'selected' | 'primary-review' | 'fallback-review' | 'no-candidates' | 'part-mismatches';
+	| 'all'
+	| 'selected'
+	| 'primary-review'
+	| 'fallback-review'
+	| 'no-candidates'
+	| 'part-mismatches'
+	| 'dismissed';
 
 export type CatalogReviewFilterCounts = Record<CatalogReviewFilter, number>;
 
@@ -444,6 +451,8 @@ export const catalogTrackMatchesReviewFilter = (
 	track: ReviewTrack,
 	filter: CatalogReviewFilter
 ) => {
+	if (filter === 'dismissed') return track.dismissed === true;
+	if (track.dismissed) return false;
 	if (filter === 'all') return true;
 	if (filter === 'selected') {
 		return (
@@ -472,10 +481,14 @@ export const getCatalogReviewFilterCounts = (
 		'primary-review': 0,
 		'fallback-review': 0,
 		'no-candidates': 0,
-		'part-mismatches': 0
+		'part-mismatches': 0,
+		dismissed: 0
 	};
 	for (const episode of episodes) {
-		if (episode.status !== 'done') continue;
+		if (episode.status !== 'done') {
+			counts.dismissed += episode.tracks.filter((track) => track.dismissed).length;
+			continue;
+		}
 		for (const track of episode.tracks) {
 			for (const filter of Object.keys(counts) as CatalogReviewFilter[]) {
 				if (catalogTrackMatchesReviewFilter(track, filter)) counts[filter] += 1;
@@ -489,14 +502,16 @@ export const getCatalogEpisodeReviewTracks = (
 	episode: Pick<EpisodeState, 'status' | 'tracks'>,
 	filter: CatalogReviewFilter
 ) =>
-	episode.status === 'done'
+	episode.status === 'done' || filter === 'dismissed'
 		? episode.tracks.filter((track) => catalogTrackMatchesReviewFilter(track, filter))
 		: [];
 
 export const shouldShowCatalogEpisodeForReview = (
 	episode: Pick<EpisodeState, 'status' | 'tracks'>,
 	filter: CatalogReviewFilter
-) => episode.status !== 'done' || getCatalogEpisodeReviewTracks(episode, filter).length > 0;
+) =>
+	(filter !== 'dismissed' && episode.status !== 'done') ||
+	getCatalogEpisodeReviewTracks(episode, filter).length > 0;
 
 export const shouldReturnEpisodeToPending = (status: EpisodeStatus, systemicallyAffected = false) =>
 	status === 'scanning' || status === 'rate-limited' || (systemicallyAffected && status !== 'done');
@@ -632,7 +647,7 @@ export const getCatalogExportUris = (
 			)
 			.flatMap((episode) =>
 				episode.tracks
-					.filter((track) => track.checked && track.selectedMatch)
+					.filter((track) => !track.dismissed && track.checked && track.selectedMatch)
 					.map((track) => track.selectedMatch as string)
 			)
 	);

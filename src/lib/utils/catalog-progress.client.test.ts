@@ -31,7 +31,18 @@ describe('catalogue IndexedDB deadlines', () => {
 			cover: '',
 			genres: [],
 			status: 'done' as const,
-			tracks: []
+			tracks: [
+				{
+					artist: 'Original artist',
+					title: 'Original title',
+					matches: [],
+					selectedMatch: null,
+					checked: false,
+					confident: false,
+					fallback: false,
+					dismissed: true
+				}
+			]
 		};
 		const present = {
 			...omitted,
@@ -67,7 +78,10 @@ describe('catalogue IndexedDB deadlines', () => {
 		expect(put).toHaveBeenCalledWith(
 			expect.objectContaining({
 				episodes: expect.objectContaining({
-					'omitted-oldest': expect.objectContaining({ status: 'done' }),
+					'omitted-oldest': expect.objectContaining({
+						status: 'done',
+						tracks: [expect.objectContaining({ dismissed: true, checked: false })]
+					}),
 					present: expect.objectContaining({ status: 'done' })
 				})
 			})
