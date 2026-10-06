@@ -309,6 +309,88 @@ describe('opt-in automatic linked playlist updates', () => {
 		delete f.progress.playlist.linkedPlaylistId;
 		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toThrow();
 	});
+	it('distinguishes active work from a durable Spotify cooldown before any Spotify reads', async () => {
+		const f = await fixture();
+		f.requests.length = 0;
+		const claim = await f.store.acquire('scheduled');
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'playlist_busy', status: 409, retryUntil: 0 }
+		);
+		await f.store.release(claim.lease!.id);
+		await f.store.cooldown(60, 'rate-limited');
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'spotify_rate_limited', status: 429, retryUntil: expect.any(Number) }
+		);
+		expect(f.requests).toEqual([]);
+		expect(await f.service.get('dimension-door')).toBeNull();
+	});
+	it('reports the manual-action hold and enables read-only after it expires', async () => {
+		const f = await fixture();
+		const retryUntil = Date.now() + 5 * 60_000;
+		await f.store.putAutomation(
+			'owned-' + createHash('sha256').update(playlistId).digest('hex'),
+			{ appCreated: true, manualUntil: retryUntil, uncertain: false },
+			null
+		);
+		f.requests.length = 0;
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'playlist_manual_wait', status: 409, retryUntil }
+		);
+		expect(f.requests).toEqual([]);
+		f.advance(5 * 60_000 + 1);
+		await f.service.configure('dimension-door', true, true, f.signal);
+		expect((await f.state()).enabled).toBe(true);
+		expect(f.writes()).toEqual([]);
+	});
+	it('distinguishes missing cloud progress, linkage and mismatched Spotify contents', async () => {
+		const f = await fixture();
+		vi.spyOn(f.service, 'load').mockResolvedValueOnce(null);
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'save_cloud_progress_first' }
+		);
+		f.progress.playlist.creationPending = true;
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'linked_playlist_required' }
+		);
+		delete f.progress.playlist.creationPending;
+		f.external();
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'playlist_sync_required' }
+		);
+		expect(f.writes()).toEqual([]);
+		expect(await f.service.get('dimension-door')).toBeNull();
+	});
+	it.each([
+		[401, 'spotify_authentication'],
+		[403, 'playlist_inaccessible'],
+		[404, 'playlist_not_found'],
+		[503, 'spotify_unavailable']
+	])('preserves the reason for a read-only Spotify preview failure (%s)', async (status, code) => {
+		const f = await fixture();
+		f.setOverride((url) =>
+			url.includes('/playlists/') ? new Response(null, { status }) : undefined
+		);
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code, status }
+		);
+		expect(f.writes()).toEqual([]);
+		expect(await f.service.get('dimension-door')).toBeNull();
+	});
+	it('reports a preview 429 and preserves its shared retry deadline', async () => {
+		const f = await fixture();
+		f.setOverride((url) =>
+			url.includes('/playlists/')
+				? new Response(null, { status: 429, headers: { 'Retry-After': '60' } })
+				: undefined
+		);
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'spotify_rate_limited', status: 429, retryUntil: expect.any(Number) }
+		);
+		const claim = await f.store.acquire('playlist');
+		expect(claim.lease).toBeUndefined();
+		expect(claim.cooldownUntil).toBeGreaterThan(Date.now());
+		expect(f.writes()).toEqual([]);
+	});
 	it('uses the same playlist, newest first, deduplication, and preserves uncertain/manual choices', async () => {
 		const f = await fixture();
 		await f.enable();
@@ -874,7 +956,11 @@ describe('opt-in automatic linked playlist updates', () => {
 		expect((await f.state()).sync?.phase).toBe('uncertain');
 		f.setOverride(undefined);
 		f.requests.length = 0;
-		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toThrow();
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{
+				code: 'playlist_sync_uncertain'
+			}
+		);
 		expect(f.writes()).toEqual([]);
 	});
 });

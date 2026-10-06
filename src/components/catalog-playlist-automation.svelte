@@ -4,6 +4,7 @@
 	import {
 		isAutomaticPlaylistPublicState,
 		automaticPlaylistStatusText,
+		automaticPlaylistSaveFeedback,
 		type AutomaticPlaylistPublicState
 	} from '$lib/utils/catalog-playlist-automation';
 	import { formatCooldownDuration } from '$lib/utils/catalog-scan';
@@ -17,6 +18,7 @@
 	let connected = false;
 	let state: AutomaticPlaylistPublicState | null = null;
 	let message = '';
+	let actionRetryUntil = 0;
 	let now = Date.now();
 	let timer: ReturnType<typeof setInterval>;
 	let generation = 0;
@@ -26,6 +28,7 @@
 		loadedShow = show;
 		state = null;
 		message = '';
+		actionRetryUntil = 0;
 		visible = false;
 		settingsLoaded = false;
 		if (location.origin !== 'https://nts2spotify.vincentvanderveken.com') return;
@@ -81,6 +84,7 @@
 		busy = true;
 		const show = showAlias;
 		message = '';
+		actionRetryUntil = 0;
 		try {
 			const authorization = operation === 'connect' || operation === 'disconnect';
 			const response = await fetch(
@@ -97,7 +101,16 @@
 					)
 				}
 			);
-			if (!response.ok) throw new Error();
+			if (!response.ok) {
+				const body = await response.json().catch(() => null);
+				const feedback = automaticPlaylistSaveFeedback(body);
+				if (show === showAlias) {
+					message = feedback.message;
+					actionRetryUntil = feedback.retryUntil;
+					if (body?.error === 'spotify_authentication') connected = false;
+				}
+				return;
+			}
 			if (show === showAlias) {
 				await load(show);
 				message = 'Settings saved.';
@@ -105,7 +118,7 @@
 		} catch {
 			if (show === showAlias)
 				message =
-					'Could not save. Reconnect Spotify if needed, save cloud progress, and manually synchronize the app-created linked playlist before enabling.';
+					'Could not reach the server to save playlist settings. Check your connection and try again.';
 		} finally {
 			busy = false;
 		}
@@ -196,7 +209,12 @@
 					Automatic playlist updates are off for this catalogue.
 				</p>{/if}
 			{#if busy}<p class="settings-feedback">Saving playlist settings…</p>
-			{:else if message}<p class="settings-feedback">{message}</p>{/if}
+			{:else if message}<p class="settings-feedback">
+					{message}
+					{#if actionRetryUntil > now}
+						Try again in {formatCooldownDuration(Math.ceil((actionRetryUntil - now) / 1000))}.
+					{/if}
+				</p>{/if}
 		</div>
 		<details class="settings-details">
 			<summary>Playlist safeguards and Spotify access</summary>

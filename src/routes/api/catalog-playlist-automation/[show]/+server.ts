@@ -3,8 +3,11 @@ import { _authorize } from '../../playlist-authorization/+server';
 import { isValidNTSSlug } from '$lib/utils/nts';
 import {
 	AutomaticPlaylistService,
+	AutomaticPlaylistConfigurationError,
 	publicAutomaticPlaylistState
 } from '$lib/utils/catalog-playlist-automation.server';
+import { BackgroundAuthorizationError } from '$lib/utils/playlist-authorization.server';
+import { CloudProgressError } from '$lib/utils/catalog-cloud.server';
 
 function authorize(event: RequestEvent) {
 	return (
@@ -33,8 +36,13 @@ export async function PUT(event: RequestEvent) {
 		if (denied) return denied;
 		const text = await event.request.text();
 		if (text.length > 512) return json({ error: 'invalid_request' }, { status: 400 });
-		const body = JSON.parse(text);
-		if (typeof body.enabled !== 'boolean' || typeof body.confirmAppCreated !== 'boolean')
+		let body;
+		try {
+			body = JSON.parse(text);
+		} catch {
+			return json({ error: 'invalid_request' }, { status: 400 });
+		}
+		if (!body || typeof body.enabled !== 'boolean' || typeof body.confirmAppCreated !== 'boolean')
 			return json({ error: 'invalid_request' }, { status: 400 });
 		const service = new AutomaticPlaylistService();
 		await service.configure(
@@ -45,7 +53,22 @@ export async function PUT(event: RequestEvent) {
 		);
 		const stored = await service.get(event.params.show!);
 		return json({ automation: stored ? publicAutomaticPlaylistState(stored.value) : null });
-	} catch {
-		return json({ error: 'automation_requires_review' }, { status: 409 });
+	} catch (cause) {
+		if (cause instanceof AutomaticPlaylistConfigurationError)
+			return json(
+				{ error: cause.code, ...(cause.retryUntil ? { retryUntil: cause.retryUntil } : {}) },
+				{ status: cause.status }
+			);
+		if (cause instanceof BackgroundAuthorizationError)
+			return json({ error: 'spotify_authentication' }, { status: 401 });
+		if (cause instanceof CloudProgressError)
+			return json(
+				{
+					error:
+						cause.kind === 'conflict' ? 'cloud_progress_conflict' : 'cloud_progress_unavailable'
+				},
+				{ status: cause.kind === 'conflict' ? 409 : 503 }
+			);
+		return json({ error: 'automation_unavailable' }, { status: 503 });
 	}
 }

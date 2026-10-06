@@ -22,6 +22,11 @@ Channeling must remain manual and its copied third-party playlist must remain un
   have a server-side creation registry. Historical app-created links predate that registry: the owner
   must explicitly confirm their origin, and a read-only exact comparison must pass. Ownership alone is
   not proof of historical creation. This is an explicit migration attestation, never automatic adoption.
+- Failed enable requests report the specific blocker instead of one catch-all reconnect/synchronize
+  message. The UI distinguishes active work, the separate five-minute manual-action hold, saved Spotify
+  cooldowns, missing cloud links, unfinished or uncertain writes, playlist differences, authorization,
+  access failures and cloud conflicts. Known waits include a countdown; failed requests retain the
+  saved switch state. Unknown failures are sanitized without exposing credentials or upstream bodies.
 - An exclusive Firestore lease coordinates hosted scans, worker writes and hosted/manual playlist calls.
   Manifest-only revision checks fence catalogue changes before every mutation without loading every
   episode repeatedly. Immutable operation IDs, revision CAS and dispatch-before-write persistence use

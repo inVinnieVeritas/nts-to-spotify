@@ -16,6 +16,7 @@ vi.mock('$lib/utils/hosted-access.server', () => ({
 vi.mock('$lib/utils/catalog-schedule-store.server', () => ({ schedulesEnabled: () => true }));
 vi.mock('$lib/utils/auth.server', () => ({ getAccessToken: async () => 'dummy-access' }));
 vi.mock('$lib/utils/playlist-authorization.server', () => ({
+	BackgroundAuthorizationError: class extends Error {},
 	PlaylistAuthorization: class {
 		connect = mocks.connect;
 		disconnect = mocks.disconnect;
@@ -23,6 +24,7 @@ vi.mock('$lib/utils/playlist-authorization.server', () => ({
 	}
 }));
 vi.mock('$lib/utils/catalog-playlist-automation.server', () => ({
+	AutomaticPlaylistConfigurationError: class extends Error {},
 	AutomaticPlaylistService: class {
 		configure = mocks.configure;
 		get = async () => null;
