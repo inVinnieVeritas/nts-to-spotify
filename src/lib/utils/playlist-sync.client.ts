@@ -703,6 +703,44 @@ export const playlistSyncEligibility = (
 	};
 };
 
+// Acknowledged, stopped work may be superseded only by an explicit new manual
+// operation. This never authorizes appending the old prefix to a changed target.
+export const canRestartAcknowledgedPlaylistSync = (
+	record: CatalogPlaylistSyncRecord | undefined,
+	owner: string,
+	now = Date.now()
+) =>
+	canRecoverAcknowledgedPlaylistSync(record) &&
+	!playlistSyncEligibility(record, owner, now).disabled;
+
+export const prepareAcknowledgedPlaylistRestart = async (
+	record: CatalogPlaylistSyncRecord,
+	target: PlaylistSyncTarget,
+	owner: string,
+	now = Date.now()
+): Promise<CatalogPlaylistSyncRecord> => {
+	if (
+		!isCatalogPlaylistSyncRecord(record, record.catalogueAlias, now) ||
+		!canRestartAcknowledgedPlaylistSync(record, owner, now)
+	)
+		throw new Error('Playlist synchronization cannot be restarted');
+	return {
+		version: CATALOG_PLAYLIST_SYNC_VERSION,
+		revision: record.revision,
+		catalogueAlias: record.catalogueAlias,
+		operationId: createPlaylistSyncOperationId(),
+		playlistId: record.playlistId!,
+		targetFingerprint: await fingerprintPlaylistSyncTarget(record.playlistId!, target),
+		totalTrackCount: target.tracks.length,
+		confirmedPosition: 0,
+		phase: 'interrupted',
+		mode: 'updated',
+		startedAt: now,
+		updatedAt: now,
+		restartRequired: true
+	};
+};
+
 export const runPlaylistSyncBatches = async (input: {
 	record: CatalogPlaylistSyncRecord;
 	target: PlaylistSyncTarget;

@@ -20,6 +20,8 @@ import {
 	playlistSyncRecordStamp,
 	playlistSyncFeedback,
 	canRecoverAcknowledgedPlaylistSync,
+	canRestartAcknowledgedPlaylistSync,
+	prepareAcknowledgedPlaylistRestart,
 	playlistSettlementDiagnostic,
 	type CatalogPlaylistSyncRecord,
 	type PlaylistSyncTarget
@@ -65,6 +67,95 @@ const prefix = {
 	phase: 'ready' as const
 };
 type Body = Record<string, unknown>;
+
+describe('explicit fresh synchronization after acknowledged work stopped', () => {
+	it('replaces the first batch before appending the new 1559-track target, rather than reusing the old acknowledged prefix', async () => {
+		const old = await state(1538, { ...prefix, phase: 'blocked', reason: 'external-change' });
+		const nextTarget = { ...target(1559), tracks: target(1559).tracks.reverse() };
+		const next = await prepareAcknowledgedPlaylistRestart(old, nextTarget, 'owner_1234567890', NOW);
+		const api = upstream(1559, target(1538).tracks.slice(0, 100));
+		const outcome = await runPlaylistSyncBatches({
+			record: next,
+			target: nextTarget,
+			previewFingerprint: 'b'.repeat(64),
+			request: api.request,
+			persist: async () => undefined,
+			now: () => NOW,
+			delay: async () => undefined
+		});
+		expect(outcome.type).toBe('completed');
+		expect(outcome.record.confirmedPosition).toBe(1559);
+		expect(api.requests[0]).toMatchObject({ operation: 'apply-batch', tracks: nextTarget.tracks });
+		expect(api.requests.filter((r) => r.operation === 'append')).toHaveLength(15);
+		expect(api.items()).toEqual(nextTarget.tracks);
+	});
+	it('creates a new zero-position operation for a changed target without mutating the old acknowledgement', async () => {
+		const old = await state(1538, {
+			...prefix,
+			phase: 'blocked',
+			reason: 'external-change',
+			revision: 7
+		});
+		const saved = structuredClone(old);
+		const nextTarget = { ...target(1559), name: 'New archive title', description: 'New dates' };
+		const next = await prepareAcknowledgedPlaylistRestart(old, nextTarget, 'owner_1234567890', NOW);
+		expect(old).toEqual(saved);
+		expect(next).toMatchObject({
+			revision: 7,
+			playlistId: ID,
+			totalTrackCount: 1559,
+			confirmedPosition: 0,
+			phase: 'interrupted',
+			mode: 'updated',
+			restartRequired: true
+		});
+		expect(next.operationId).not.toBe(old.operationId);
+		expect(next.targetFingerprint).toBe(await fingerprintPlaylistSyncTarget(ID, nextTarget));
+		expect(next.snapshotId).toBeUndefined();
+		expect(next.reason).toBeUndefined();
+		expect(isCatalogPlaylistSyncRecord(next, 'amanda', NOW)).toBe(true);
+	});
+
+	it.each([
+		{ phase: 'blocked', reason: 'uncertain' },
+		{
+			phase: 'uncertain',
+			reason: 'uncertain',
+			dispatchStartedAt: NOW,
+			quarantineUntil: NOW + PLAYLIST_SYNC_QUARANTINE_MS
+		},
+		{
+			phase: 'dispatching',
+			reason: undefined,
+			dispatchStartedAt: NOW,
+			quarantineUntil: NOW + PLAYLIST_SYNC_QUARANTINE_MS
+		},
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000 },
+		{ phase: 'ready', reason: undefined },
+		{ phase: 'blocked', reason: 'external-change', confirmedPosition: 0 },
+		{ phase: 'blocked', reason: 'external-change', snapshotId: undefined },
+		{
+			phase: 'blocked',
+			reason: 'external-change',
+			leaseOwner: 'other_owner_12345678',
+			leaseUntil: NOW + PLAYLIST_SYNC_LEASE_MS
+		}
+	] as Partial<CatalogPlaylistSyncRecord>[])(
+		'refuses unsafe or active state: %j',
+		async (change) => {
+			const old = await state(181, {
+				...prefix,
+				phase: 'blocked',
+				reason: 'external-change',
+				...change
+			});
+			expect(canRestartAcknowledgedPlaylistSync(old, 'owner_1234567890', NOW)).toBe(false);
+			await expect(
+				prepareAcknowledgedPlaylistRestart(old, target(200), 'owner_1234567890', NOW)
+			).rejects.toThrow();
+		}
+	);
+});
 
 describe('acknowledged prefix recovery', () => {
 	it('persists the read-verified snapshot before appending only the remaining 57 tracks at 200/257', async () => {

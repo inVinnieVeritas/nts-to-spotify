@@ -20,6 +20,8 @@
 	import {
 		CATALOG_PLAYLIST_SYNC_VERSION,
 		canRecoverAcknowledgedPlaylistSync,
+		canRestartAcknowledgedPlaylistSync,
+		prepareAcknowledgedPlaylistRestart,
 		PLAYLIST_SYNC_LEASE_MS,
 		createPlaylistSyncOperationId,
 		fingerprintPlaylistSyncTarget,
@@ -363,12 +365,18 @@
 		}
 	};
 
-	const synchronizePlaylist = async () => {
+	const synchronizePlaylist = async (restartAcknowledged = false) => {
 		if (!me || disabled || working || !tabOwner || syncEligibility.disabled) return;
 		const creatingNew = !linkedPlaylistId;
 		if (catalogueMode && creatingNew && creationPending) return;
 		if (linkedPlaylistId && !resumableSync && (!preview || preview.synchronized)) return;
+		if (
+			restartAcknowledged &&
+			(!catalogueMode || !canRestartAcknowledgedPlaylistSync(localSyncRecord, tabOwner, syncNow))
+		)
+			return;
 		const requestedSignature = inputSignature;
+		const restartStamp = playlistSyncRecordStamp(localSyncRecord);
 
 		working = true;
 		previewGuard.invalidate();
@@ -391,6 +399,38 @@
 
 		try {
 			const target = playlistTarget();
+			let restartRecord: CatalogPlaylistSyncRecord | undefined;
+			let restartPreview: ClientSpotifyPlaylistPreview | undefined;
+			if (restartAcknowledged) {
+				const oldRecord = localSyncRecord!;
+				const oldStamp = playlistSyncRecordStamp(oldRecord);
+				const current = () =>
+					!disposed &&
+					playlistController === controller &&
+					inputSignature === requestedSignature &&
+					playlistSyncRecordStamp(localSyncRecord) === oldStamp;
+				message = 'Checking Spotify before starting a fresh synchronization…';
+				const fresh = await requestPreview(linkedPlaylistId!, target, controller.signal);
+				if (!current()) return;
+				if (!fresh.response.ok || !fresh.parsed) {
+					failure = fresh.response.ok
+						? 'Spotify returned an invalid preview. Try again.'
+						: failureMessage(fresh.body);
+					return;
+				}
+				preview = fresh.parsed;
+				previewSyncStamp = oldStamp;
+				message = '';
+				if (
+					!window.confirm(
+						`Start a fresh synchronization of this linked playlist with your current ${target.tracks.length.toLocaleString('en-US')} selected tracks? Spotify currently has ${fresh.parsed.retainedCount + fresh.parsed.removedCount} entries. ${fresh.parsed.addedCount} selected tracks are missing and ${fresh.parsed.removedCount} entries are outside your selection. This replaces its contents, title, description and visibility with the current catalogue settings; manual Spotify changes may be removed. The old unfinished synchronization will be superseded.`
+					)
+				)
+					return;
+				restartRecord = await prepareAcknowledgedPlaylistRestart(oldRecord, target, tabOwner);
+				if (!current()) return;
+				restartPreview = fresh.parsed;
+			}
 			const initialPlaylistId = linkedPlaylistId ?? '0000000000000000000000';
 			let targetFingerprint = await fingerprintPlaylistSyncTarget(initialPlaylistId, target);
 			const timestamp = Date.now();
@@ -405,18 +445,21 @@
 				localSyncRecord &&
 				localSyncRecord.targetFingerprint !== targetFingerprint &&
 				localSyncRecord.phase !== 'completed' &&
+				!restartRecord &&
 				!(
 					localSyncRecord.phase === 'blocked' &&
 					localSyncRecord.reason === 'external-change' &&
 					!canRecoverAcknowledgedPlaylistSync(localSyncRecord)
 				)
 			) {
-				failure =
-					'Restore the synchronization target before continuing. An unfinished operation cannot be replaced with different selections or settings.';
+				failure = canRestartAcknowledgedPlaylistSync(localSyncRecord, tabOwner)
+					? 'Your selection or playlist settings changed since this unfinished sync. Use Start fresh synchronization to check Spotify and confirm the current selection.'
+					: 'Restore the synchronization target before continuing. An unfinished operation cannot be replaced with different selections or settings.';
 				return;
 			}
 			let record: CatalogPlaylistSyncRecord =
-				previous && (previous.phase !== 'blocked' || canRecoverAcknowledgedPlaylistSync(previous))
+				restartRecord ??
+				(previous && (previous.phase !== 'blocked' || canRecoverAcknowledgedPlaylistSync(previous))
 					? previous
 					: {
 							version: CATALOG_PLAYLIST_SYNC_VERSION,
@@ -432,7 +475,15 @@
 							startedAt: previous?.startedAt ?? timestamp,
 							updatedAt: timestamp,
 							...(creatingNew ? {} : { restartRequired: true })
-						};
+						});
+			if (
+				restartAcknowledged &&
+				(disposed ||
+					playlistController !== controller ||
+					inputSignature !== requestedSignature ||
+					playlistSyncRecordStamp(localSyncRecord) !== restartStamp)
+			)
+				return;
 			if (catalogueMode && showAlias) {
 				const claimed = await claimCatalogPlaylistSyncLease(
 					record,
@@ -501,14 +552,15 @@
 				record = await persistSyncRecord(record);
 			}
 
-			let previewFingerprint: string | undefined;
+			let previewFingerprint: string | undefined = restartPreview?.previewFingerprint;
 			if (
 				(record.confirmedPosition === 0 || record.restartRequired) &&
 				!['uncertain', 'dispatching'].includes(record.phase)
 			) {
 				message = 'Previewing Spotify state before synchronization…';
-				const previewResult =
-					preview && preview.inputSignature === inputSignature
+				const previewResult = restartPreview
+					? { response: new Response(null), body: null, parsed: restartPreview }
+					: preview && preview.inputSignature === inputSignature
 						? { response: new Response(null), body: null, parsed: preview }
 						: await requestPreview(activePlaylistId, target, controller.signal);
 				if (!previewResult.response.ok || !previewResult.parsed) {
@@ -859,6 +911,10 @@
 							that version and appends only the remaining tracks. Changed contents or settings
 							remain blocked.
 						</p>
+						<p class="font-small-beast update-warning">
+							If new episodes, review choices or playlist settings changed since the unfinished
+							sync, start a fresh synchronization with your current selection instead.
+						</p>
 					{:else}
 						<p class="font-small-beast update-warning">
 							Updating replaces the linked Spotify playlist contents. Manual changes made directly
@@ -875,6 +931,17 @@
 					>{synchronizedComparison ? 'Compare again' : 'Dismiss preview'}</Button
 				>
 			</div>
+		{/if}
+		{#if catalogueMode && canRestartAcknowledgedPlaylistSync(localSyncRecord, tabOwner, syncNow)}
+			<Button
+				type="button"
+				size="sm"
+				variant="outline"
+				disabled={disabled || comparisonDisabled || working || !tabOwner || !me?.id}
+				on:click={() =>
+					runExclusivePlaylistAction(primaryActionGate, () => synchronizePlaylist(true))}
+				>Start fresh synchronization</Button
+			>
 		{/if}
 		{#if me?.id}
 			<Button
