@@ -369,7 +369,13 @@
 		if (!me || disabled || working || !tabOwner || syncEligibility.disabled) return;
 		const creatingNew = !linkedPlaylistId;
 		if (catalogueMode && creatingNew && creationPending) return;
-		if (linkedPlaylistId && !resumableSync && (!preview || preview.synchronized)) return;
+		if (
+			!restartAcknowledged &&
+			linkedPlaylistId &&
+			!resumableSync &&
+			(!preview || preview.synchronized)
+		)
+			return;
 		if (
 			restartAcknowledged &&
 			(!catalogueMode || !canRestartAcknowledgedPlaylistSync(localSyncRecord, tabOwner, syncNow))
