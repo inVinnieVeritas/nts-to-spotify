@@ -643,9 +643,68 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(await response.json()).toEqual({
 			error: 'playlist_settling',
 			retryAfterSeconds: 5,
-			mismatches: [field]
+			mismatches: [field],
+			...(field === 'description'
+				? {
+						descriptionDiagnostic: {
+							requested: CURRENT_PLAYLIST.description,
+							observed: metadata.description
+						}
+					}
+				: {})
 		});
 		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
+	});
+
+	it.each(['Crossed Wires w&#x2F; Amanda Siegel', 'Crossed Wires w/ Amanda\u00a0Siegel'])(
+		'reports the exact owned-playlist description without accepting a representation guess (%s)',
+		async (observed) => {
+			const requested = 'Crossed Wires w/ Amanda Siegel';
+			const fetcher = playlistReadFetcher([], { description: observed });
+			const response = await POST({
+				fetch: fetcher,
+				request: requestFor({
+					operation: 'settle',
+					playlistId: PLAYLIST_ID,
+					expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+					name: CURRENT_PLAYLIST.name,
+					description: requested,
+					public: CURRENT_PLAYLIST.public
+				})
+			} as never);
+			expect(response.status).toBe(409);
+			expect(await response.json()).toEqual({
+				error: 'playlist_settling',
+				retryAfterSeconds: 5,
+				mismatches: ['description'],
+				descriptionDiagnostic: { requested, observed }
+			});
+			expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+		}
+	);
+	it('does not return description diagnostics for a playlist owned by someone else', async () => {
+		const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (init?.method) throw new Error('Unexpected mutation');
+			return jsonResponse(
+				String(input).endsWith('/v1/me')
+					? { id: USER_ID }
+					: { ...playlistMetadata('another-user'), description: 'Other owner private text' }
+			);
+		});
+		const response = await POST({
+			fetch: fetcher,
+			request: requestFor({
+				operation: 'settle',
+				playlistId: PLAYLIST_ID,
+				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+				name: CURRENT_PLAYLIST.name,
+				description: CURRENT_PLAYLIST.description,
+				public: CURRENT_PLAYLIST.public
+			})
+		} as never);
+		expect(response.status).toBe(403);
+		expect(await response.json()).toEqual({ error: 'playlist_not_owned' });
+		expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
 	});
 
 	it.each([

@@ -87,7 +87,7 @@ export const canRecoverAcknowledgedPlaylistSync = (record: CatalogPlaylistSyncRe
 	);
 
 export const playlistSettlementDiagnostic = (body: unknown): string => {
-	const value = body as { mismatches?: unknown } | null;
+	const value = body as { mismatches?: unknown; descriptionDiagnostic?: unknown } | null;
 	const allowed = ['snapshot', 'title', 'description', 'visibility', 'tracks'];
 	if (
 		!Array.isArray(value?.mismatches) ||
@@ -97,9 +97,26 @@ export const playlistSettlementDiagnostic = (body: unknown): string => {
 		return '';
 	const mismatches = value.mismatches as string[];
 	const fields = allowed.filter((field) => mismatches.includes(field));
-	return fields.length
-		? `Spotify has not confirmed these fields: ${fields.join(', ')}. No further tracks were sent.`
-		: '';
+	if (!fields.length) return '';
+	const message = `Spotify has not confirmed these fields: ${fields.join(', ')}. No further tracks were sent.`;
+	const details = value?.descriptionDiagnostic as
+		{ requested?: unknown; observed?: unknown } | undefined;
+	if (
+		!fields.includes('description') ||
+		typeof details?.requested !== 'string' ||
+		typeof details.observed !== 'string' ||
+		details.requested.length > 300 ||
+		details.observed.length > 300
+	)
+		return message;
+	// Render bounded playlist text as text, never HTML. Escape non-ASCII code
+	// units as well as JSON controls so invisible differences remain copyable.
+	const exactText = (text: string) =>
+		JSON.stringify(text).replace(
+			/[^\x20-\x7e]/g,
+			(character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+		);
+	return `${message} Description diagnostic — requested (${details.requested.length} characters): ${exactText(details.requested)}; Spotify returned (${details.observed.length} characters): ${exactText(details.observed)}.`;
 };
 
 // A preview is an observation, not a mutation acknowledgement. Keep its display

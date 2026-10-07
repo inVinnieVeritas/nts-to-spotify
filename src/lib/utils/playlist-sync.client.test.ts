@@ -362,6 +362,38 @@ describe('acknowledged prefix recovery', () => {
 		])
 			expect(playlistSettlementDiagnostic({ mismatches })).toBe('');
 	});
+	it('makes HTML entities and invisible description differences visible without interpreting them', () => {
+		const diagnostic = playlistSettlementDiagnostic({
+			mismatches: ['description'],
+			descriptionDiagnostic: {
+				requested: 'Crossed Wires w/ Amanda Siegel',
+				observed: 'Crossed Wires w&#x2F; Amanda\u00a0Siegel\n'
+			}
+		});
+		expect(diagnostic).toContain('No further tracks were sent.');
+		expect(diagnostic).toContain('requested (30 characters): "Crossed Wires w/ Amanda Siegel"');
+		expect(diagnostic).toContain('"Crossed Wires w&#x2F; Amanda\\u00a0Siegel\\n"');
+		expect(diagnostic).not.toContain('\u00a0');
+	});
+	it.each([
+		null,
+		{ requested: 'Description' },
+		{ requested: 5, observed: 'Description' },
+		{ requested: 'a'.repeat(301), observed: 'Description' },
+		{ requested: 'Description', observed: 'a'.repeat(301) }
+	])('ignores malformed or oversized description diagnostics (%j)', (descriptionDiagnostic) => {
+		expect(
+			playlistSettlementDiagnostic({ mismatches: ['description'], descriptionDiagnostic })
+		).toBe('Spotify has not confirmed these fields: description. No further tracks were sent.');
+	});
+	it('does not display description details for a different mismatch', () => {
+		expect(
+			playlistSettlementDiagnostic({
+				mismatches: ['snapshot'],
+				descriptionDiagnostic: { requested: 'Archive', observed: 'Other archive' }
+			})
+		).toBe('Spotify has not confirmed these fields: snapshot. No further tracks were sent.');
+	});
 });
 
 // Stateful HTTP fixture. Reads and writes are counted separately; settlement

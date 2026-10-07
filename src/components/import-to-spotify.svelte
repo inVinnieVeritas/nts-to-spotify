@@ -868,7 +868,7 @@
 		{/if}
 		{#if linkedPlaylistId}
 			{#if settlementDiagnostic}
-				<p class="font-small-beast" role="status" aria-live="polite">{settlementDiagnostic}</p>
+				<p class="settlement-diagnostic" role="status" aria-live="polite">{settlementDiagnostic}</p>
 			{/if}
 			<a class="font-small-beast" href={playlistUrl} target="_blank" rel="noreferrer"
 				>Open playlist</a
@@ -1010,6 +1010,15 @@
 
 	.playlist-actions > a {
 		padding: 8px;
+	}
+
+	.settlement-diagnostic {
+		max-width: 640px;
+		font-family: monospace;
+		font-size: 14px;
+		line-height: 1.5;
+		text-transform: none;
+		overflow-wrap: anywhere;
 	}
 
 	.creation-recovery input {

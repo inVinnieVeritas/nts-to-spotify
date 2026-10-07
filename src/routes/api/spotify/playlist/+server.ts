@@ -744,6 +744,7 @@ export const _handlePlaylistRequest = async (
 				signal
 			);
 			const mismatches: string[] = [];
+			let observedDescription = current.description;
 			if (current.snapshotId !== payload.expectedSnapshotId && !payload.recoverSnapshot)
 				mismatches.push('snapshot');
 			if (current.name !== payload.name) mismatches.push('title');
@@ -768,7 +769,10 @@ export const _handlePlaylistRequest = async (
 				);
 				if (after.snapshotId !== current.snapshotId) mismatches.push('snapshot');
 				if (after.name !== current.name) mismatches.push('title');
-				if (after.description !== current.description) mismatches.push('description');
+				if (after.description !== current.description) {
+					mismatches.push('description');
+					observedDescription = after.description;
+				}
 				if (after.public !== current.public) mismatches.push('visibility');
 			}
 			if (mismatches.length > 0) {
@@ -777,7 +781,15 @@ export const _handlePlaylistRequest = async (
 					{
 						error: 'playlist_settling',
 						retryAfterSeconds: 5,
-						mismatches: [...new Set(mismatches)]
+						mismatches: [...new Set(mismatches)],
+						...(mismatches.includes('description')
+							? {
+									descriptionDiagnostic: {
+										requested: payload.description,
+										observed: observedDescription
+									}
+								}
+							: {})
 					},
 					{ status: 409, headers: { 'Retry-After': '5' } }
 				);
