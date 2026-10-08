@@ -1025,7 +1025,23 @@
 	}
 
 	.creation-recovery input {
-		min-width: 220px;
+		flex: 1 1 280px;
+		min-width: 0;
+		max-width: 100%;
+		min-height: 44px;
+		box-sizing: border-box;
+		padding: 8px 10px;
+		border: 1px solid #bdbdbd;
+		background-color: #fff;
+		color: #171717;
+		caret-color: #171717;
+		font-size: 16px;
+		text-transform: none;
+
+		&:focus-visible {
+			outline: 2px solid var(--color-foreground);
+			outline-offset: 2px;
+		}
 	}
 
 	.update-preview {
