@@ -678,10 +678,17 @@ export const _handlePlaylistRequest = async (
 		if (background && userId !== background.owner) throw new SpotifyPlaylistFailure('ownership');
 
 		if (payload.operation === 'verify') {
-			await verifyOwnership(event, headers, userId, payload.playlistId, signal);
+			const current = await readPlaylistMetadata(
+				event,
+				headers,
+				userId,
+				payload.playlistId,
+				signal
+			);
 			return json({
 				playlistId: payload.playlistId,
 				url: spotifyPlaylistUrl(payload.playlistId),
+				public: current.public,
 				mode: 'verified'
 			});
 		}

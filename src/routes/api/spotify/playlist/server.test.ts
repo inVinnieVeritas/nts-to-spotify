@@ -1215,11 +1215,15 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(await response.json()).toEqual({
 			playlistId: PLAYLIST_ID,
 			url: `https://open.spotify.com/playlist/${PLAYLIST_ID}`,
+			public: true,
 			mode: 'verified'
 		});
 		expect(fetcher.mock.calls.map(([url, init]) => [String(url), init?.method ?? 'GET'])).toEqual([
 			['https://api.spotify.com/v1/me', 'GET'],
-			[`https://api.spotify.com/v1/playlists/${PLAYLIST_ID}?fields=id,owner(id)`, 'GET']
+			[
+				`https://api.spotify.com/v1/playlists/${PLAYLIST_ID}?fields=id,owner(id),snapshot_id,name,description,public`,
+				'GET'
+			]
 		]);
 	});
 

@@ -61,8 +61,8 @@
 	export let prepareCatalogueCreation: (() => Promise<boolean>) | undefined = undefined;
 	export let persistCatalogueLink: ((playlistId: string) => Promise<boolean>) | undefined =
 		undefined;
-	export let persistExistingCatalogueLink: ((playlistId: string) => Promise<boolean>) | undefined =
-		undefined;
+	export let persistExistingCatalogueLink:
+		((playlistId: string, isPublic: boolean) => Promise<boolean>) | undefined = undefined;
 	export let clearCatalogueCreationPending: (() => Promise<boolean>) | undefined = undefined;
 	export let forgetCatalogueLink: (() => Promise<boolean>) | undefined = undefined;
 	export let data: {
@@ -725,7 +725,8 @@
 			const result = await verifyAndSaveExistingPlaylist({
 				value: existingPlaylistValue,
 				verify: (playlistId) => requestApi({ operation: 'verify', playlistId }, controller.signal),
-				persist: async (playlistId) => (await persistExistingCatalogueLink?.(playlistId)) === true,
+				persist: async (playlistId, isPublic) =>
+					(await persistExistingCatalogueLink?.(playlistId, isPublic)) === true,
 				isCurrent: current
 			});
 			if (!current()) return;

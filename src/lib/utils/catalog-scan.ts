@@ -81,6 +81,7 @@ export type PlaylistDraft = {
 export type CatalogPlaylistLinkState = {
 	linkedPlaylistId?: string;
 	creationPending: boolean;
+	public?: boolean;
 };
 
 export type CatalogRetryState = {
@@ -369,6 +370,45 @@ export const updateGeneratedPlaylistText = (
 			: current.description
 });
 
+// Recognise our exact templates even when their date range predates saved episodes.
+// Both endpoints must be real catalogue broadcasts; edited text stays custom.
+const isHistoricalGeneratedPlaylistText = (
+	value: string,
+	field: 'title' | 'description',
+	showName: string,
+	episodes: Array<Pick<NTSEpisodeSummary, 'broadcast'>>
+) => {
+	const legacyPrefix = `“${showName.toLowerCase()}” `;
+	const legacy = value.startsWith(legacyPrefix);
+	let dates: string[];
+	let formatDate: (date: string) => string;
+	if (field === 'title') {
+		const prefix = legacy ? legacyPrefix : `${showName.toUpperCase()} — NTS FULL ARCHIVE · `;
+		if (!value.startsWith(prefix)) return false;
+		const stamp = value.slice(prefix.length);
+		if (!/^\d{2}\.\d{2}\.\d{2}→\d{2}\.\d{2}\.\d{2}$/.test(stamp)) return false;
+		dates = stamp.split('→');
+		formatDate = shortPlaylistDate;
+	} else {
+		const text = legacy ? value.slice(value.indexOf(' — ', legacyPrefix.length) + 3) : value;
+		const prefix = `A comprehensive archive of tracks played on ${showName} on NTS Radio, covering broadcasts from `;
+		const suffix = '. Some tracks unavailable on Spotify may be missing.';
+		if (!text.startsWith(prefix) || !text.endsWith(suffix)) return false;
+		dates = text.slice(prefix.length, -suffix.length).split(' through ');
+		formatDate = longPlaylistDate;
+	}
+	if (dates.length !== 2) return false;
+	const broadcasts = new Map(episodes.map((episode) => [formatDate(episode.broadcast), episode]));
+	const bounds = dates.map((date) => broadcasts.get(date));
+	if (!bounds[0] || !bounds[1]) return false;
+	const range = [bounds[0], bounds[1]];
+	return (
+		value === createGeneratedPlaylistText(showName, range, 'latest-first')[field] ||
+		value === createLegacyGeneratedPlaylistText(showName, range, 'latest-first')[field] ||
+		value === createLegacyGeneratedPlaylistText(showName, range, 'oldest-first')[field]
+	);
+};
+
 export const updateGeneratedPlaylistTextForCatalog = (
 	current: Pick<GeneratedPlaylistText, 'title' | 'description'>,
 	showName: string,
@@ -379,14 +419,18 @@ export const updateGeneratedPlaylistTextForCatalog = (
 	const previousGenerated = createGeneratedPlaylistText(showName, previousEpisodes, order);
 	const previousLegacy = createLegacyGeneratedPlaylistText(showName, previousEpisodes, order);
 	const nextGenerated = createGeneratedPlaylistText(showName, currentEpisodes, order);
+	const knownEpisodes = [...previousEpisodes, ...currentEpisodes];
 	return {
 		title:
-			current.title === previousGenerated.title || current.title === previousLegacy.title
+			current.title === previousGenerated.title ||
+			current.title === previousLegacy.title ||
+			isHistoricalGeneratedPlaylistText(current.title, 'title', showName, knownEpisodes)
 				? nextGenerated.title
 				: current.title,
 		description:
 			current.description === previousGenerated.description ||
-			current.description === previousLegacy.description
+			current.description === previousLegacy.description ||
+			isHistoricalGeneratedPlaylistText(current.description, 'description', showName, knownEpisodes)
 				? nextGenerated.description
 				: current.description
 	};

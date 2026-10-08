@@ -997,6 +997,69 @@ describe('generated playlist text chronology', () => {
 		});
 	});
 
+	it('repairs stale generated dates even when the saved catalogue already includes newer episodes', () => {
+		const olderEpisodes = [episode('oldest', '2022-01-20'), episode('august', '2026-08-06')];
+		const allEpisodes = [...olderEpisodes, episode('october', '2026-10-01')];
+		const stale = createGeneratedPlaylistText("Jim O'Rourke", olderEpisodes, 'latest-first');
+		const current = createGeneratedPlaylistText("Jim O'Rourke", allEpisodes, 'latest-first');
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				stale,
+				"Jim O'Rourke",
+				allEpisodes,
+				allEpisodes,
+				'latest-first'
+			)
+		).toEqual({
+			title: "JIM O'ROURKE — NTS FULL ARCHIVE · 01.10.26→20.01.22",
+			description: current.description
+		});
+		const legacy = createLegacyGeneratedPlaylistText("Jim O'Rourke", olderEpisodes, 'oldest-first');
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				legacy,
+				"Jim O'Rourke",
+				allEpisodes,
+				allEpisodes,
+				'latest-first'
+			)
+		).toEqual({
+			title: current.title,
+			description: current.description
+		});
+	});
+
+	it('preserves edits and unknown date ranges while repairing each generated field independently', () => {
+		const olderEpisodes = [episode('oldest', '2022-01-20'), episode('august', '2026-08-06')];
+		const allEpisodes = [...olderEpisodes, episode('october', '2026-10-01')];
+		const stale = createGeneratedPlaylistText('Test Show', olderEpisodes, 'latest-first');
+		const current = createGeneratedPlaylistText('Test Show', allEpisodes, 'latest-first');
+		for (const title of [
+			`${stale.title} · my favourites`,
+			'TEST SHOW — NTS FULL ARCHIVE · 07.08.26→20.01.22',
+			'OTHER SHOW — NTS FULL ARCHIVE · 06.08.26→20.01.22'
+		])
+			expect(
+				updateGeneratedPlaylistTextForCatalog(
+					{ title, description: stale.description },
+					'Test Show',
+					allEpisodes,
+					allEpisodes,
+					'latest-first'
+				)
+			).toEqual({ title, description: current.description });
+		const description = `${stale.description} Curated by me.`;
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				{ title: stale.title, description },
+				'Test Show',
+				allEpisodes,
+				allEpisodes,
+				'latest-first'
+			)
+		).toEqual({ title: current.title, description });
+	});
+
 	it('preserves a custom name while updating a generated description', () => {
 		expect(
 			updateGeneratedPlaylistText(

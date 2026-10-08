@@ -495,6 +495,7 @@
 	const applyPlaylistLinkState = (state: CatalogPlaylistLinkState) => {
 		linkedPlaylistId = state.linkedPlaylistId;
 		playlistCreationPending = state.creationPending;
+		if (state.public !== undefined) publicPlaylist = state.public;
 	};
 	const durablePlaylistTransition = (
 		next: CatalogPlaylistLinkState,
@@ -528,12 +529,12 @@
 			{ linkedPlaylistId: playlistId, creationPending: true }
 		);
 	};
-	const persistExistingPlaylist = async (playlistId: string) => {
+	const persistExistingPlaylist = async (playlistId: string, isPublic: boolean) => {
 		if (!isSpotifyPlaylistId(playlistId) || linkedPlaylistId || playlistCreationPending || scanning)
 			return false;
 		const linked = await durablePlaylistTransition(
-			{ linkedPlaylistId: playlistId, creationPending: false },
-			{ creationPending: false }
+			{ linkedPlaylistId: playlistId, creationPending: false, public: isPublic },
+			{ creationPending: false, public: publicPlaylist }
 		);
 		if (linked) queueCloudSave();
 		return linked;
