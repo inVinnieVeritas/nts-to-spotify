@@ -74,6 +74,13 @@ The original requested description is still sent unchanged. Raw read-to-read met
 external-change fingerprints are not normalized. An unexpected upstream representation remains
 blocked until its cause is established.
 
+An acknowledged operation paused in `settling` also offers **Verify and resume Spotify
+synchronization** after its countdown. This explicit manual action verifies the exact prefix
+before continuing and again after each new acknowledged batch, even if another pause occurs.
+It does not enable fresh replacement or recover dispatching/uncertain outcomes. Background
+updates still cannot request snapshot adoption. Settlement keeps three probes per batch, spaced
+five seconds apart as requested by the endpoint, before persisting another user-action countdown.
+
 For a saved, non-ambiguous acknowledged prefix (for example 100 of 257):
 
 1. After deploying the same image to the web service and worker, reload the current cloud catalogue.

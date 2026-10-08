@@ -529,9 +529,13 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(writes[0][1]?.method).toBe('POST');
 		expect(JSON.parse(String(writes[0][1]?.body)).uris).toEqual(target.tracks.slice(200));
 	});
-	it.each(['settling', 'blocked'] as const)(
-		'resumes Amanda from 100/1559 through the real endpoint with slash-encoded reads (%s)',
-		async (phase) => {
+	it.each([
+		{ phase: 'settling' as const, position: 100, verify: false },
+		{ phase: 'blocked' as const, position: 100, verify: true },
+		{ phase: 'settling' as const, position: 300, verify: true }
+	])(
+		'resumes Amanda from $position/1559 ($phase, explicit verification $verify)',
+		async ({ phase, position, verify }) => {
 			const target = {
 				name: CURRENT_PLAYLIST.name,
 				description:
@@ -540,8 +544,8 @@ describe('/api/spotify/playlist synchronization', () => {
 				tracks: Array.from({ length: 1559 }, (_, i) => trackUri(i))
 			};
 			const encodedDescription = target.description.replaceAll('/', '&#x2F;');
-			const items = target.tracks.slice(0, 100);
-			let snapshot = 'observed-100';
+			const items = target.tracks.slice(0, position);
+			let snapshot = 'observed-' + position;
 			const clock = Date.now();
 			let saved: CatalogPlaylistSyncRecord = {
 				version: 1,
@@ -551,7 +555,7 @@ describe('/api/spotify/playlist synchronization', () => {
 				playlistId: PLAYLIST_ID,
 				targetFingerprint: await fingerprintPlaylistSyncTarget(PLAYLIST_ID, target),
 				totalTrackCount: 1559,
-				confirmedPosition: 100,
+				confirmedPosition: position,
 				phase,
 				reason: phase === 'blocked' ? 'external-change' : 'settling',
 				mode: 'updated',
@@ -566,7 +570,11 @@ describe('/api/spotify/playlist synchronization', () => {
 					expect(saved.snapshotId).toBe(snapshot);
 					items.push(...JSON.parse(String(init.body)).uris);
 					snapshot = 'observed-' + items.length;
-					return jsonResponse({ snapshot_id: snapshot }, 201);
+					// Reproduce acknowledged mutation IDs differing from stable read IDs.
+					return jsonResponse(
+						{ snapshot_id: verify ? 'acknowledged-' + items.length : snapshot },
+						201
+					);
 				}
 				if (init?.method) throw new Error('Unexpected replacement or metadata write');
 				return playlistReadFetcher(items, {
@@ -577,7 +585,7 @@ describe('/api/spotify/playlist synchronization', () => {
 			const outcome = await runPlaylistSyncBatches({
 				record: structuredClone(saved),
 				target,
-				recoverAcknowledgedPrefix: phase === 'blocked',
+				recoverAcknowledgedPrefix: verify,
 				now: () => clock,
 				delay: async () => undefined,
 				persist: async (next) => {
@@ -597,12 +605,13 @@ describe('/api/spotify/playlist synchronization', () => {
 			expect(saved.operationId).toBe('amanda_recovery_1234567890');
 			expect(items).toEqual(target.tracks);
 			const writes = fetcher.mock.calls.filter(([, init]) => init?.method);
-			expect(writes).toHaveLength(15);
+			const expectedBatches = Math.ceil((1559 - position) / 100);
+			expect(writes).toHaveLength(expectedBatches);
 			expect(
 				writes.every(([url, init]) => String(url).endsWith('/items') && init?.method === 'POST')
 			).toBe(true);
 			expect(writes.map(([, init]) => JSON.parse(String(init?.body)).uris.length)).toEqual([
-				...Array(14).fill(100),
+				...Array(expectedBatches - 1).fill(100),
 				59
 			]);
 			const preview = await POST({

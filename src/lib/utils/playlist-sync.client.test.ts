@@ -20,6 +20,7 @@ import {
 	playlistSyncRecordStamp,
 	playlistSyncFeedback,
 	canRecoverAcknowledgedPlaylistSync,
+	canVerifyAcknowledgedPlaylistSync,
 	canRestartAcknowledgedPlaylistSync,
 	prepareAcknowledgedPlaylistRestart,
 	playlistSettlementDiagnostic,
@@ -158,6 +159,26 @@ describe('explicit fresh synchronization after acknowledged work stopped', () =>
 });
 
 describe('acknowledged prefix recovery', () => {
+	it('allows explicit prefix verification while settling without allowing a fresh replacement', async () => {
+		const record = await state(1559, {
+			...prefix,
+			confirmedPosition: 300,
+			phase: 'settling',
+			reason: 'settling',
+			settleUntil: NOW + 30_000
+		});
+		expect(canVerifyAcknowledgedPlaylistSync(record)).toBe(true);
+		expect(canRestartAcknowledgedPlaylistSync(record, 'owner_1234567890', NOW)).toBe(false);
+		for (const invalid of [
+			{ ...record, phase: 'uncertain' as const, reason: 'uncertain' as const },
+			{ ...record, phase: 'dispatching' as const },
+			{ ...record, phase: 'blocked' as const, reason: 'uncertain' as const },
+			{ ...record, confirmedPosition: 0 },
+			{ ...record, restartRequired: true },
+			{ ...record, snapshotId: undefined }
+		])
+			expect(canVerifyAcknowledgedPlaylistSync(invalid)).toBe(false);
+	});
 	it('persists the read-verified snapshot before appending only the remaining 57 tracks at 200/257', async () => {
 		const record = await state(257, {
 			...prefix,
@@ -671,6 +692,30 @@ describe('resumable playlist synchronization', () => {
 		expect(api.items()).toEqual(target(181).tracks);
 		expect(api.requests.filter((b) => b.operation === 'apply-batch')).toHaveLength(1);
 		expect(api.requests.filter((b) => b.operation === 'append')).toHaveLength(1);
+	});
+	it('honors the five-second settlement interval so ten-second propagation can settle within three probes', async () => {
+		const api = upstream(181);
+		let clock = NOW;
+		const delay = vi.fn(async (ms: number) => {
+			clock += ms;
+		});
+		const outcome = await run(
+			await state(),
+			async (raw) => {
+				if ((raw as Body).operation === 'settle' && clock < NOW + 10_000)
+					return result(
+						{ error: 'playlist_settling', retryAfterSeconds: 5, mismatches: ['snapshot'] },
+						409
+					);
+				return api.request(raw);
+			},
+			{ now: () => clock, delay }
+		);
+		expect(outcome.type).toBe('completed');
+		expect(delay.mock.calls.map(([ms]) => ms)).toEqual([5000, 5000]);
+		expect(api.items()).toEqual(target(181).tracks);
+		expect(api.requests.filter((r) => r.operation === 'apply-batch')).toHaveLength(1);
+		expect(api.requests.filter((r) => r.operation === 'append')).toHaveLength(1);
 	});
 	it('offers a bounded countdown after three stale reads, then immediate Resume makes no request', async () => {
 		const api = upstream(181);

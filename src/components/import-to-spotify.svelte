@@ -20,6 +20,7 @@
 	import {
 		CATALOG_PLAYLIST_SYNC_VERSION,
 		canRecoverAcknowledgedPlaylistSync,
+		canVerifyAcknowledgedPlaylistSync,
 		canRestartAcknowledgedPlaylistSync,
 		prepareAcknowledgedPlaylistRestart,
 		PLAYLIST_SYNC_LEASE_MS,
@@ -156,7 +157,9 @@
 	$: buttonLabel = catalogueMode
 		? linkedPlaylistId
 			? resumableSync
-				? syncEligibility.label
+				? !syncEligibility.disabled && canVerifyAcknowledgedPlaylistSync(localSyncRecord)
+					? 'Verify and resume Spotify synchronization'
+					: syncEligibility.label
 				: preview && !preview.synchronized
 					? canRecoverAcknowledgedPlaylistSync(localSyncRecord)
 						? 'Verify and resume Spotify synchronization'
@@ -600,7 +603,7 @@
 				target,
 				previewFingerprint,
 				previewInputSignature: requestedSignature,
-				recoverAcknowledgedPrefix: canRecoverAcknowledgedPlaylistSync(record),
+				recoverAcknowledgedPrefix: canVerifyAcknowledgedPlaylistSync(record),
 				request: requestApi,
 				persist: async (next) => {
 					const saved = await persistSyncRecord(next);

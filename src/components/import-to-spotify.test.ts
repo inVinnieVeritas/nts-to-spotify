@@ -124,7 +124,7 @@ const setup = (record = old) => {
 			},
 			changeTitle() { data = { ...data, title: 'Changed during preview' }; refreshDerivedState(); },
 			action: synchronizePlaylist,
-			snapshot() { return { record: localSyncRecord, failure, working, resumableSync, preview }; }
+			snapshot() { return { record: localSyncRecord, failure, working, resumableSync, preview, buttonLabel }; }
 		};`,
 		context
 	);
@@ -135,6 +135,38 @@ const setup = (record = old) => {
 };
 
 describe('fresh synchronization from a reloaded catalogue', () => {
+	it('labels a paused acknowledged prefix as verification and keeps recovery enabled on Resume', async () => {
+		const timestamp = Date.now();
+		const record: sync.CatalogPlaylistSyncRecord = {
+			...old,
+			totalTrackCount: 1559,
+			confirmedPosition: 300,
+			targetFingerprint: await sync.fingerprintPlaylistSyncTarget(playlistId, {
+				name: 'New title',
+				description: 'New dates',
+				public: true,
+				tracks
+			}),
+			phase: 'settling',
+			reason: 'settling',
+			updatedAt: timestamp,
+			settleUntil: timestamp + sync.PLAYLIST_SYNC_SETTLE_MS
+		};
+		const { context, request, confirm, claim, run } = setup(record);
+		expect(context.driver.snapshot()).toMatchObject({
+			resumableSync: true,
+			buttonLabel: 'Verify and resume Spotify synchronization'
+		});
+		await context.driver.action(false);
+		expect(request).not.toHaveBeenCalled();
+		expect(confirm).not.toHaveBeenCalled();
+		expect(claim).toHaveBeenCalledOnce();
+		expect(run).toHaveBeenCalledOnce();
+		expect(run.mock.calls[0][0]).toMatchObject({
+			record: { operationId: record.operationId, confirmedPosition: 300 },
+			recoverAcknowledgedPrefix: true
+		});
+	});
 	it('fetches a fresh preview with no pre-existing preview or resumable operation', async () => {
 		const { context, request, confirm, claim, run } = setup();
 		expect(context.driver.snapshot()).toMatchObject({ resumableSync: false, preview: undefined });
@@ -193,11 +225,21 @@ describe('fresh synchronization from a reloaded catalogue', () => {
 
 	it.each([
 		{ ...old, reason: 'uncertain' as const },
-		{ ...old, leaseOwner: 'another_document_12345', leaseUntil: Date.now() + 60000 }
+		{ ...old, leaseOwner: 'another_document_12345', leaseUntil: Date.now() + 60000 },
+		{
+			...old,
+			phase: 'settling' as const,
+			reason: 'settling' as const,
+			settleUntil: Date.now() + 30_000,
+			leaseOwner: 'another_document_12345',
+			leaseUntil: Date.now() + 60_000
+		}
 	])('keeps uncertain outcomes and foreign leases blocked', async (record) => {
 		const { context, request, claim } = setup(record);
 		await context.driver.action(true);
+		await context.driver.action(false);
 		expect(request).not.toHaveBeenCalled();
 		expect(claim).not.toHaveBeenCalled();
+		expect(context.driver.snapshot().working).toBe(false);
 	});
 });

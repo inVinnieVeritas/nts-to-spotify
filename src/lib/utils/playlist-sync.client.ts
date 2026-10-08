@@ -86,6 +86,20 @@ export const canRecoverAcknowledgedPlaylistSync = (record: CatalogPlaylistSyncRe
 		!record.restartRequired
 	);
 
+// A manual Resume can verify an acknowledged settling prefix without first
+// waiting for it to become blocked. This is separate from fresh replacement
+// eligibility and is never used to recover an ambiguous dispatch.
+export const canVerifyAcknowledgedPlaylistSync = (record: CatalogPlaylistSyncRecord | undefined) =>
+	canRecoverAcknowledgedPlaylistSync(record) ||
+	Boolean(
+		record?.phase === 'settling' &&
+		record.reason === 'settling' &&
+		record.playlistId &&
+		record.snapshotId &&
+		record.confirmedPosition > 0 &&
+		!record.restartRequired
+	);
+
 export const playlistSettlementDiagnostic = (body: unknown): string => {
 	const value = body as { mismatches?: unknown; descriptionDiagnostic?: unknown } | null;
 	const allowed = ['snapshot', 'title', 'description', 'visibility', 'tracks'];
@@ -889,7 +903,7 @@ export const runPlaylistSyncBatches = async (input: {
 		}
 	}
 	if (input.recoverAcknowledgedPrefix) {
-		if (!canRecoverAcknowledgedPlaylistSync(record))
+		if (!canVerifyAcknowledgedPlaylistSync(record))
 			throw new Error('Invalid acknowledged recovery');
 		await save({
 			...record,
@@ -916,7 +930,7 @@ export const runPlaylistSyncBatches = async (input: {
 		});
 	}
 
-	// Three read-only probes per action. Further attempts require a user click
+	// Three read-only probes per batch. Further attempts require a user click
 	// after a persisted deadline; no unbounded poll or replacement loop.
 	// Recheck on every re-entry, including after another settlement interruption.
 	// The check is not an in-memory permission that disappears across reloads.
@@ -992,7 +1006,7 @@ export const runPlaylistSyncBatches = async (input: {
 					...(await stop('blocked', 'external-change', 'playlist_state_unverified')),
 					settlementDiagnostic: diagnostic
 				};
-			if (attempt < 2) await delay(1000, input.signal);
+			if (attempt < 2) await delay(5000, input.signal);
 		}
 		return {
 			...(await stop('settling', 'settling', 'playlist_settling', now() + 5_000)),
