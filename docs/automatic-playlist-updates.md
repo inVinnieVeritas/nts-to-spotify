@@ -77,7 +77,7 @@ blocked until its cause is established.
 An acknowledged operation paused in `settling` also offers **Verify and resume Spotify
 synchronization** after its countdown. This explicit manual action verifies the exact prefix
 before continuing and again after each new acknowledged batch, even if another pause occurs.
-It does not enable fresh replacement or recover dispatching/uncertain outcomes. Background
+Resume does not replace the target or recover dispatching/uncertain outcomes. Background
 updates still cannot request snapshot adoption. Settlement keeps three probes per batch, spaced
 five seconds apart as requested by the endpoint, before persisting another user-action countdown.
 
@@ -100,7 +100,8 @@ acknowledged record, the app cannot infer that acknowledgement solely from 100 m
 No migration clears records or changes progress/backup versions.
 
 If scanning a new episode, changing review choices or changing settings has changed the target of
-an acknowledged operation stopped at the external-change gate, **Start fresh synchronization** offers
+an acknowledged operation paused in settlement or stopped at the external-change gate,
+**Start fresh synchronization** offers
 a separate manual replacement. Finish scanning first. This action reads a fresh owned-playlist preview
 and shows the current counts in an explicit replacement confirmation before changing the local record.
 Cancellation, a failed/invalid preview, or a changed catalogue/record during the preview leaves the old
@@ -112,6 +113,10 @@ the linked playlist and review choices but replaces Spotify contents and metadat
 so direct Spotify edits can be removed. It does not reinterpret the old acknowledged prefix as belonging
 to the new selection. Uncertain/dispatching work, foreign leases and hosted uncertainty fences remain
 blocked. Existing same-target Verify and resume behavior is unchanged.
+
+For a settling record, the new operation must also pass the existing retry/lease deadlines.
+Only a new operation ID at position zero with replacement required may supersede it; changing the
+target within the old operation remains rejected by the revision/lease CAS.
 
 If final hosted read verification fails, the acknowledged result is retained but the pending manual
 target still fences automatic writes. After exact synchronization, explicitly re-enable automation

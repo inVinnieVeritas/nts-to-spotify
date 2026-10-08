@@ -62,7 +62,7 @@ const old: sync.CatalogPlaylistSyncRecord = {
 	reason: 'external-change'
 };
 
-const setup = (record = old) => {
+const setup = (record = old, count = tracks.length) => {
 	const confirm = vi.fn(() => true);
 	const request = vi.fn(async (_fetch: typeof fetch, _body: unknown) => ({
 		response: new Response(null),
@@ -72,7 +72,7 @@ const setup = (record = old) => {
 			previewFingerprint: 'b'.repeat(64),
 			stateFingerprint: 'c'.repeat(64),
 			snapshotId: 'snapshot-live',
-			addedCount: 1459,
+			addedCount: count - 100,
 			retainedCount: 100,
 			removedCount: 0,
 			orderChanged: false,
@@ -88,7 +88,7 @@ const setup = (record = old) => {
 	}));
 	const run = vi.fn(async (input: Parameters<typeof sync.runPlaylistSyncBatches>[0]) => ({
 		type: 'completed',
-		record: { ...input.record, phase: 'completed', confirmedPosition: 1559 }
+		record: { ...input.record, phase: 'completed', confirmedPosition: input.record.totalTrackCount }
 	}));
 	const context = vm.createContext({
 		...sync,
@@ -128,13 +128,47 @@ const setup = (record = old) => {
 		};`,
 		context
 	);
-	context.targetTracks = tracks;
+	context.targetTracks = tracks.slice(0, count);
 	context.targetId = playlistId;
 	context.driver.configure(record);
 	return { context, confirm, request, claim, run };
 };
 
 describe('fresh synchronization from a reloaded catalogue', () => {
+	it('offers a confirmed fresh 224-track target after a changed-target settling operation, keeping the old record on cancellation', async () => {
+		const record: sync.CatalogPlaylistSyncRecord = {
+			...old,
+			phase: 'settling',
+			reason: 'settling',
+			settleUntil: 30_001
+		};
+		const { context, request, confirm, claim, run } = setup(record, 224);
+		expect(sync.canRestartAcknowledgedPlaylistSync(record, 'document_owner_12345')).toBe(true);
+		await context.driver.action(false);
+		expect(context.driver.snapshot().failure).toContain('Use Start fresh synchronization');
+		expect(claim).not.toHaveBeenCalled();
+		confirm.mockReturnValue(false);
+		await context.driver.action(true);
+		expect(request).toHaveBeenCalledOnce();
+		expect(confirm).toHaveBeenCalledWith(expect.stringContaining('224 selected tracks'));
+		expect(claim).not.toHaveBeenCalled();
+		expect(context.driver.snapshot().record).toEqual(record);
+		confirm.mockReturnValue(true);
+		await context.driver.action(true);
+		expect(request).toHaveBeenCalledTimes(2);
+		expect(claim).toHaveBeenCalledOnce();
+		expect(claim.mock.calls[0][0]).toMatchObject({
+			confirmedPosition: 0,
+			totalTrackCount: 224,
+			restartRequired: true,
+			playlistId
+		});
+		expect(claim.mock.calls[0][0].operationId).not.toBe(record.operationId);
+		expect(run.mock.calls[0][0]).toMatchObject({
+			previewFingerprint: 'b'.repeat(64),
+			recoverAcknowledgedPrefix: false
+		});
+	});
 	it('labels a paused acknowledged prefix as verification and keeps recovery enabled on Resume', async () => {
 		const timestamp = Date.now();
 		const record: sync.CatalogPlaylistSyncRecord = {

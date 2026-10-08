@@ -6,6 +6,7 @@ import {
 } from './catalog-backup';
 import { restoreCatalogScanTiming } from './catalog-scan-session';
 import {
+	canRestartAcknowledgedPlaylistSync,
 	isCatalogPlaylistSyncRecord,
 	PLAYLIST_SYNC_LEASE_MS,
 	restoreCatalogPlaylistSyncRecord,
@@ -489,7 +490,8 @@ const claimCatalogPlaylistSyncLeaseUncoordinated = async (
 						current &&
 						current.operationId !== candidate.operationId &&
 						(current.phase === 'completed' ||
-							(current.phase === 'blocked' && current.reason === 'external-change')) &&
+							(current.phase === 'blocked' && current.reason === 'external-change') ||
+							canRestartAcknowledgedPlaylistSync(current, leaseOwner, now)) &&
 						candidate.phase === 'interrupted' &&
 						candidate.confirmedPosition === 0 &&
 						candidate.restartRequired === true &&
@@ -511,6 +513,7 @@ const claimCatalogPlaylistSyncLeaseUncoordinated = async (
 							current.targetFingerprint !== candidate.targetFingerprint &&
 							current.phase !== 'creating' &&
 							current.phase !== 'completed' &&
+							!startsNewOperation &&
 							!(current.phase === 'blocked' && current.reason === 'external-change')) ||
 						(!current && (candidate.revision !== 0 || release)) ||
 						(release && current?.leaseOwner !== leaseOwner)

@@ -70,26 +70,42 @@ const prefix = {
 type Body = Record<string, unknown>;
 
 describe('explicit fresh synchronization after acknowledged work stopped', () => {
-	it('replaces the first batch before appending the new 1559-track target, rather than reusing the old acknowledged prefix', async () => {
-		const old = await state(1538, { ...prefix, phase: 'blocked', reason: 'external-change' });
-		const nextTarget = { ...target(1559), tracks: target(1559).tracks.reverse() };
-		const next = await prepareAcknowledgedPlaylistRestart(old, nextTarget, 'owner_1234567890', NOW);
-		const api = upstream(1559, target(1538).tracks.slice(0, 100));
-		const outcome = await runPlaylistSyncBatches({
-			record: next,
-			target: nextTarget,
-			previewFingerprint: 'b'.repeat(64),
-			request: api.request,
-			persist: async () => undefined,
-			now: () => NOW,
-			delay: async () => undefined
-		});
-		expect(outcome.type).toBe('completed');
-		expect(outcome.record.confirmedPosition).toBe(1559);
-		expect(api.requests[0]).toMatchObject({ operation: 'apply-batch', tracks: nextTarget.tracks });
-		expect(api.requests.filter((r) => r.operation === 'append')).toHaveLength(15);
-		expect(api.items()).toEqual(nextTarget.tracks);
-	});
+	it.each(['blocked', 'settling'] as const)(
+		'replaces the first batch for a changed target from %s, rather than reusing the old acknowledged prefix',
+		async (phase) => {
+			const old = await state(1538, {
+				...prefix,
+				phase,
+				reason: phase === 'blocked' ? 'external-change' : 'settling',
+				...(phase === 'settling' ? { settleUntil: NOW + 30_000 } : {})
+			});
+			const nextTarget = { ...target(1559), tracks: target(1559).tracks.reverse() };
+			const next = await prepareAcknowledgedPlaylistRestart(
+				old,
+				nextTarget,
+				'owner_1234567890',
+				NOW
+			);
+			const api = upstream(1559, target(1538).tracks.slice(0, 100));
+			const outcome = await runPlaylistSyncBatches({
+				record: next,
+				target: nextTarget,
+				previewFingerprint: 'b'.repeat(64),
+				request: api.request,
+				persist: async () => undefined,
+				now: () => NOW,
+				delay: async () => undefined
+			});
+			expect(outcome.type).toBe('completed');
+			expect(outcome.record.confirmedPosition).toBe(1559);
+			expect(api.requests[0]).toMatchObject({
+				operation: 'apply-batch',
+				tracks: nextTarget.tracks
+			});
+			expect(api.requests.filter((r) => r.operation === 'append')).toHaveLength(15);
+			expect(api.items()).toEqual(nextTarget.tracks);
+		}
+	);
 	it('creates a new zero-position operation for a changed target without mutating the old acknowledgement', async () => {
 		const old = await state(1538, {
 			...prefix,
@@ -131,7 +147,10 @@ describe('explicit fresh synchronization after acknowledged work stopped', () =>
 			dispatchStartedAt: NOW,
 			quarantineUntil: NOW + PLAYLIST_SYNC_QUARANTINE_MS
 		},
-		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000 },
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, retryUntil: NOW + 5_000 },
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, confirmedPosition: 0 },
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, restartRequired: true },
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, snapshotId: undefined },
 		{ phase: 'ready', reason: undefined },
 		{ phase: 'blocked', reason: 'external-change', confirmedPosition: 0 },
 		{ phase: 'blocked', reason: 'external-change', snapshotId: undefined },
@@ -159,7 +178,7 @@ describe('explicit fresh synchronization after acknowledged work stopped', () =>
 });
 
 describe('acknowledged prefix recovery', () => {
-	it('allows explicit prefix verification while settling without allowing a fresh replacement', async () => {
+	it('allows separate manual verification or confirmed replacement of an acknowledged settling prefix', async () => {
 		const record = await state(1559, {
 			...prefix,
 			confirmedPosition: 300,
@@ -168,7 +187,7 @@ describe('acknowledged prefix recovery', () => {
 			settleUntil: NOW + 30_000
 		});
 		expect(canVerifyAcknowledgedPlaylistSync(record)).toBe(true);
-		expect(canRestartAcknowledgedPlaylistSync(record, 'owner_1234567890', NOW)).toBe(false);
+		expect(canRestartAcknowledgedPlaylistSync(record, 'owner_1234567890', NOW)).toBe(true);
 		for (const invalid of [
 			{ ...record, phase: 'uncertain' as const, reason: 'uncertain' as const },
 			{ ...record, phase: 'dispatching' as const },

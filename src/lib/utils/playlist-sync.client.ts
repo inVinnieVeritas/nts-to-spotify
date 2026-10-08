@@ -741,7 +741,7 @@ export const canRestartAcknowledgedPlaylistSync = (
 	owner: string,
 	now = Date.now()
 ) =>
-	canRecoverAcknowledgedPlaylistSync(record) &&
+	canVerifyAcknowledgedPlaylistSync(record) &&
 	!playlistSyncEligibility(record, owner, now).disabled;
 
 export const prepareAcknowledgedPlaylistRestart = async (
