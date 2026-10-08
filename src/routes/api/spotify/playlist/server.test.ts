@@ -7,6 +7,7 @@ import { uniqueSpotifyUris } from '$lib/utils/catalog-scan';
 import { fingerprintSpotifyPlaylistPreview } from '$lib/utils/playlist-preview.server';
 import {
 	fingerprintPlaylistSyncTarget,
+	PLAYLIST_SYNC_SETTLE_MS,
 	runPlaylistSyncBatches,
 	type CatalogPlaylistSyncRecord
 } from '$lib/utils/playlist-sync.client';
@@ -528,8 +529,99 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(writes[0][1]?.method).toBe('POST');
 		expect(JSON.parse(String(writes[0][1]?.body)).uris).toEqual(target.tracks.slice(200));
 	});
+	it.each(['settling', 'blocked'] as const)(
+		'resumes Amanda from 100/1559 through the real endpoint with slash-encoded reads (%s)',
+		async (phase) => {
+			const target = {
+				name: CURRENT_PLAYLIST.name,
+				description:
+					'A comprehensive archive of tracks played on Crossed Wires w/ Amanda Siegel on NTS Radio, covering broadcasts from 26 May 2017 through 2 October 2026. Some tracks unavailable on Spotify may be missing.',
+				public: CURRENT_PLAYLIST.public,
+				tracks: Array.from({ length: 1559 }, (_, i) => trackUri(i))
+			};
+			const encodedDescription = target.description.replaceAll('/', '&#x2F;');
+			const items = target.tracks.slice(0, 100);
+			let snapshot = 'observed-100';
+			const clock = Date.now();
+			let saved: CatalogPlaylistSyncRecord = {
+				version: 1,
+				revision: 0,
+				catalogueAlias: 'amanda-siegel',
+				operationId: 'amanda_recovery_1234567890',
+				playlistId: PLAYLIST_ID,
+				targetFingerprint: await fingerprintPlaylistSyncTarget(PLAYLIST_ID, target),
+				totalTrackCount: 1559,
+				confirmedPosition: 100,
+				phase,
+				reason: phase === 'blocked' ? 'external-change' : 'settling',
+				mode: 'updated',
+				startedAt: clock,
+				updatedAt: clock,
+				snapshotId: phase === 'blocked' ? 'old-acknowledged-100' : snapshot,
+				...(phase === 'settling' ? { settleUntil: clock + PLAYLIST_SYNC_SETTLE_MS } : {}),
+				restartRequired: false
+			};
+			const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (init?.method === 'POST' && String(input).endsWith('/items')) {
+					expect(saved.snapshotId).toBe(snapshot);
+					items.push(...JSON.parse(String(init.body)).uris);
+					snapshot = 'observed-' + items.length;
+					return jsonResponse({ snapshot_id: snapshot }, 201);
+				}
+				if (init?.method) throw new Error('Unexpected replacement or metadata write');
+				return playlistReadFetcher(items, {
+					snapshot_id: snapshot,
+					description: encodedDescription
+				})(input, init);
+			});
+			const outcome = await runPlaylistSyncBatches({
+				record: structuredClone(saved),
+				target,
+				recoverAcknowledgedPrefix: phase === 'blocked',
+				now: () => clock,
+				delay: async () => undefined,
+				persist: async (next) => {
+					saved = structuredClone({ ...next, revision: saved.revision + 1 });
+					return saved;
+				},
+				request: async (body) => {
+					const response = await POST({
+						fetch: fetcher,
+						request: requestFor(body as Record<string, unknown>)
+					} as never);
+					return { response, body: await response.json() };
+				}
+			});
+			expect(outcome.type).toBe('completed');
+			expect(saved.confirmedPosition).toBe(1559);
+			expect(saved.operationId).toBe('amanda_recovery_1234567890');
+			expect(items).toEqual(target.tracks);
+			const writes = fetcher.mock.calls.filter(([, init]) => init?.method);
+			expect(writes).toHaveLength(15);
+			expect(
+				writes.every(([url, init]) => String(url).endsWith('/items') && init?.method === 'POST')
+			).toBe(true);
+			expect(writes.map(([, init]) => JSON.parse(String(init?.body)).uris.length)).toEqual([
+				...Array(14).fill(100),
+				59
+			]);
+			const preview = await POST({
+				fetch: fetcher,
+				request: previewRequest({ playlistId: PLAYLIST_ID, ...target })
+			} as never);
+			expect(await preview.json()).toMatchObject({
+				synchronized: true,
+				descriptionChanged: false,
+				addedCount: 0
+			});
+		}
+	);
 	it.each([
 		["Jim O'Rourke", 'Jim O&#x27;Rourke', true],
+		['Crossed Wires w/ Amanda Siegel', 'Crossed Wires w&#x2F; Amanda Siegel', true],
+		["Show w/ Jim O'Rourke", 'Show w&#x2F; Jim O&#x27;Rourke', true],
+		['Crossed Wires w/ Amanda Siegel', 'Crossed Wires w&amp;#x2F; Amanda Siegel', false],
+		['Literal &#x2F; text', 'Literal / text', false],
 		['Literal &#x27; text', 'Literal &#x27; text', true],
 		['Literal &#x27; text', "Literal ' text", false],
 		["Jim O'Rourke", 'Jim O&amp;#x27;Rourke', false],
@@ -590,37 +682,43 @@ describe('/api/spotify/playlist synchronization', () => {
 			);
 		}
 	);
-	it('keeps the raw description fence across recovery pagination even for equivalent representations', async () => {
-		let reads = 0;
-		const fetcher = playlistReadFetcher([trackUri(1)]);
-		const read = fetcher.getMockImplementation()!;
-		fetcher.mockImplementation(async (input, init) => {
-			if (String(input).includes('snapshot_id,name,description,public'))
-				return jsonResponse({
-					...playlistMetadata(),
-					description: ++reads === 1 ? 'Jim O&#x27;Rourke' : "Jim O'Rourke"
-				});
-			return read(input, init);
-		});
-		const response = await POST({
-			request: requestFor({
-				operation: 'settle',
-				playlistId: PLAYLIST_ID,
-				expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
-				name: CURRENT_PLAYLIST.name,
-				description: "Jim O'Rourke",
-				public: CURRENT_PLAYLIST.public,
-				expectedTracks: [trackUri(1)]
-			}),
-			fetch: fetcher
-		} as never);
-		expect(response.status).toBe(409);
-		expect(await response.json()).toMatchObject({
-			error: 'playlist_settling',
-			mismatches: ['description']
-		});
-		expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
-	});
+	it.each([
+		{ plain: "Jim O'Rourke", encoded: 'Jim O&#x27;Rourke' },
+		{ plain: 'Crossed Wires w/ Amanda Siegel', encoded: 'Crossed Wires w&#x2F; Amanda Siegel' }
+	])(
+		'keeps the raw description fence across recovery pagination ($plain)',
+		async ({ plain, encoded }) => {
+			let reads = 0;
+			const fetcher = playlistReadFetcher([trackUri(1)]);
+			const read = fetcher.getMockImplementation()!;
+			fetcher.mockImplementation(async (input, init) => {
+				if (String(input).includes('snapshot_id,name,description,public'))
+					return jsonResponse({
+						...playlistMetadata(),
+						description: ++reads === 1 ? encoded : plain
+					});
+				return read(input, init);
+			});
+			const response = await POST({
+				request: requestFor({
+					operation: 'settle',
+					playlistId: PLAYLIST_ID,
+					expectedSnapshotId: CURRENT_PLAYLIST.snapshotId,
+					name: CURRENT_PLAYLIST.name,
+					description: plain,
+					public: CURRENT_PLAYLIST.public,
+					expectedTracks: [trackUri(1)]
+				}),
+				fetch: fetcher
+			} as never);
+			expect(response.status).toBe(409);
+			expect(await response.json()).toMatchObject({
+				error: 'playlist_settling',
+				mismatches: ['description']
+			});
+			expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
+		}
+	);
 
 	it.each([
 		{ field: 'title', metadata: { name: 'External title' } },
@@ -656,7 +754,7 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(fetcher.mock.calls.every(([_url, init]) => !init?.method)).toBe(true);
 	});
 
-	it.each(['Crossed Wires w&#x2F; Amanda Siegel', 'Crossed Wires w/ Amanda\u00a0Siegel'])(
+	it.each(['Crossed Wires w&amp;#x2F; Amanda Siegel', 'Crossed Wires w/ Amanda\u00a0Siegel'])(
 		'reports the exact owned-playlist description without accepting a representation guess (%s)',
 		async (observed) => {
 			const requested = 'Crossed Wires w/ Amanda Siegel';

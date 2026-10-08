@@ -777,62 +777,72 @@ describe('opt-in automatic linked playlist updates', () => {
 			).toBe(true);
 		}
 	);
-	it('verifies automatic updates against apostrophe-encoded reads using raw observed baselines', async () => {
-		const f = await fixture();
-		f.progress.playlist.description = "Jim O'Rourke archive";
-		f.setOverride((url) =>
-			url.includes('snapshot_id,name,description,public')
-				? Response.json({
-						id: playlistId,
-						owner: { id: 'owner' },
-						snapshot_id: 'initial',
-						name: f.progress.playlist.title,
-						description: 'Jim O&#x27;Rourke archive',
-						public: false
-					})
-				: undefined
-		);
-		await f.enable();
-		f.setOverride(undefined);
-		f.change();
-		// Preserve the fixture's real changing snapshot while encoding only description reads.
-		const upstream: typeof fetch = async (input, init) => {
-			const response = await f.request(input, init);
-			if (String(input).includes('snapshot_id,name,description,public')) {
-				const metadata = await response.json();
-				return Response.json({
-					...metadata,
-					description: metadata.description.replaceAll("'", '&#x27;')
-				});
-			}
-			return response;
-		};
-		const service = new AutomaticPlaylistService(
-			f.store,
-			upstream,
-			f.auth,
-			Date.now,
-			async () => ({ progress: structuredClone(f.progress), version: 'updated' }),
-			async () => {},
-			async () => 'updated'
-		);
-		const reviewed = structuredClone(f.progress);
-		await service.run('dimension-door', f.signal);
-		expect((await f.state()).status).toBe('updated');
-		expect(f.items).toEqual(automaticPlaylistTarget(f.progress).tracks);
-		expect(f.progress).toEqual(reviewed);
-		expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
-		expect(f.writes().find((r) => r.url.endsWith('/' + playlistId))?.body).toMatchObject({
-			description: "Jim O'Rourke archive"
-		});
-		const exact = await service.execute(
-			{ operation: 'preview', playlistId, ...automaticPlaylistTarget(f.progress) },
-			'dummy-access',
-			f.signal
-		);
-		expect(exact.body.synchronized).toBe(true);
-		expect((await f.state()).baseline).toBe(exact.body.stateFingerprint);
-	});
+	it.each([
+		{ description: "Jim O'Rourke archive", encoded: 'Jim O&#x27;Rourke archive' },
+		{
+			description: 'Crossed Wires w/ Amanda Siegel',
+			encoded: 'Crossed Wires w&#x2F; Amanda Siegel'
+		},
+		{ description: "Show w/ Jim O'Rourke", encoded: 'Show w&#x2F; Jim O&#x27;Rourke' }
+	])(
+		'verifies automatic updates against observed encoded reads using raw baselines ($description)',
+		async ({ description, encoded }) => {
+			const f = await fixture();
+			f.progress.playlist.description = description;
+			f.setOverride((url) =>
+				url.includes('snapshot_id,name,description,public')
+					? Response.json({
+							id: playlistId,
+							owner: { id: 'owner' },
+							snapshot_id: 'initial',
+							name: f.progress.playlist.title,
+							description: encoded,
+							public: false
+						})
+					: undefined
+			);
+			await f.enable();
+			f.setOverride(undefined);
+			f.change();
+			// Preserve the real changing snapshot while encoding only description reads.
+			const upstream: typeof fetch = async (input, init) => {
+				const response = await f.request(input, init);
+				if (String(input).includes('snapshot_id,name,description,public')) {
+					const metadata = await response.json();
+					return Response.json({
+						...metadata,
+						description: metadata.description.replaceAll("'", '&#x27;').replaceAll('/', '&#x2F;')
+					});
+				}
+				return response;
+			};
+			const service = new AutomaticPlaylistService(
+				f.store,
+				upstream,
+				f.auth,
+				Date.now,
+				async () => ({ progress: structuredClone(f.progress), version: 'updated' }),
+				async () => {},
+				async () => 'updated'
+			);
+			const reviewed = structuredClone(f.progress);
+			await service.run('dimension-door', f.signal);
+			expect((await f.state()).status).toBe('updated');
+			expect(f.items).toEqual(automaticPlaylistTarget(f.progress).tracks);
+			expect(f.progress).toEqual(reviewed);
+			expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
+			expect(f.writes().find((r) => r.url.endsWith('/' + playlistId))?.body).toMatchObject({
+				description
+			});
+			const exact = await service.execute(
+				{ operation: 'preview', playlistId, ...automaticPlaylistTarget(f.progress) },
+				'dummy-access',
+				f.signal
+			);
+			expect(exact.body.synchronized).toBe(true);
+			expect((await f.state()).baseline).toBe(exact.body.stateFingerprint);
+		}
+	);
 	it('public status omits tokens, targets, lease data and recovery diagnostics', async () => {
 		const f = await fixture();
 		await f.enable();

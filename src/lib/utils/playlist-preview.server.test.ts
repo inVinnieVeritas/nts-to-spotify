@@ -64,6 +64,49 @@ describe('Spotify playlist preview comparison', () => {
 			).toBe(changed);
 		}
 	});
+	it('accepts the observed Amanda slash encoding while keeping raw state and target fingerprints distinct', () => {
+		const description =
+			'A comprehensive archive of tracks played on Crossed Wires w/ Amanda Siegel on NTS Radio, covering broadcasts from 26 May 2017 through 2 October 2026. Some tracks unavailable on Spotify may be missing.';
+		const encoded = description.replaceAll('/', '&#x2F;');
+		expect(description).toHaveLength(200);
+		expect(encoded).toHaveLength(205);
+		const state = current([uri(1)], { description: encoded });
+		expect(compareSpotifyPlaylist(state, target([uri(1)], { description }))).toMatchObject({
+			descriptionChanged: false,
+			synchronized: true
+		});
+		expect(fingerprintSpotifyPlaylist(state)).not.toBe(
+			fingerprintSpotifyPlaylist({ ...state, description })
+		);
+		expect(fingerprintSpotifyPlaylistPreview(state, target([uri(1)], { description }))).not.toBe(
+			fingerprintSpotifyPlaylistPreview(state, target([uri(1)], { description: encoded }))
+		);
+	});
+	it.each([
+		["Show w/ Jim O'Rourke", "Show w/ Jim O'Rourke", true],
+		["Show w/ Jim O'Rourke", 'Show w/ Jim O&#x27;Rourke', true],
+		["Show w/ Jim O'Rourke", "Show w&#x2F; Jim O'Rourke", true],
+		["Show w/ Jim O'Rourke", 'Show w&#x2F; Jim O&#x27;Rourke', true],
+		['Literal &#x2F; text', 'Literal &#x2F; text', true],
+		['Literal &#x2F; text', 'Literal / text', false],
+		['Show w/ Amanda', 'Show w&amp;#x2F; Amanda', false],
+		['Show w/ Amanda', 'Show w&#47; Amanda', false],
+		['Show w/ Amanda', 'Show w&#x2f; Amanda', false],
+		['Show w/ Amanda', 'Show w&#x2F; Amanda ', false],
+		['Show w/ Amanda', 'Show w&#x2F; Amanda external edit', false],
+		['Show w/ Amanda', 'Show w&#x2F;\u00a0Amanda', false],
+		['Already &#x2F; plus /', 'Already &#x2F; plus &#x2F;', true]
+	])(
+		'compares only observed one-pass slash/apostrophe representations (%s)',
+		(requested, actual, matches) => {
+			expect(
+				compareSpotifyPlaylist(
+					current([uri(1)], { description: actual }),
+					target([uri(1)], { description: requested })
+				).synchronized
+			).toBe(matches);
+		}
+	);
 	it('does not infer description equivalence from escaped text or strip metadata', () => {
 		const plain = 'Jim O\'Rourke & guests <archive> "quoted"';
 		for (const encoded of [

@@ -52,9 +52,12 @@ Channeling must remain manual and its copied third-party playlist must remain un
 
 ## Recovering acknowledged partial manual synchronization
 
-A settlement rejection now includes only fixed mismatch field names: `snapshot`, `title`,
-`description`, `visibility`, or (during explicit recovery) `tracks`. Neither the UI nor the
-response exposes the differing values. A mismatch is not proof of propagation delay or an external edit.
+A settlement rejection includes fixed mismatch field names: `snapshot`, `title`,
+`description`, `visibility`, or (during explicit recovery) `tracks`. After ownership verification,
+a description mismatch also returns the bounded requested and observed description strings.
+The UI renders these as plain text with JSON/non-ASCII escapes so invisible differences can be
+diagnosed. Tokens, raw exceptions and other upstream fields are not exposed. A mismatch is not
+proof of propagation delay or an external edit.
 Automatic synchronization and ordinary settlement keep exact snapshot checks. Explicit manual
 acknowledged-prefix recovery can adopt a different currently observed snapshot only after reading
 the complete exact ordered prefix and matching metadata, then re-reading metadata to ensure the
@@ -62,8 +65,10 @@ snapshot and raw fields stayed unchanged throughout pagination. The server marks
 response; the client persists its snapshot through the existing revision CAS before any append.
 This read-only recovery is unavailable to background requests. No mismatching tracks, extra items,
 changed settings, or unstable reads are accepted. Description-to-target comparison accepts only
-the requested text or that same text with ASCII apostrophes represented as `&#x27;`, as confirmed
-by a read-only Spotify response. This is a one-pass encoding comparison, not HTML decoding or
+the requested text or that same text with ASCII apostrophes represented as `&#x27;`, slashes as
+`&#x2F;`, or both, as confirmed by read-only Spotify responses. Amanda's returned description
+was exactly 205 characters instead of the requested 200 because `w/` became `w&#x2F;`.
+This is a one-pass encoding comparison, not HTML decoding or
 stripping: literal entity text, double encoding and other description differences remain distinct.
 The original requested description is still sent unchanged. Raw read-to-read metadata checks and
 external-change fingerprints are not normalized. An unexpected upstream representation remains
