@@ -45,6 +45,15 @@ const episode = (
 });
 
 describe('catalogue review CSV rows', () => {
+	it('omits dismissed tracks from the review CSV and queue count until restored', () => {
+		const rejected = track({ checked: false, dismissed: true });
+		const episodes = [episode('Reviewed episode', '2026-01-02T12:00:00.000Z', [rejected])];
+		expect(getCatalogReviewCsvRows('Show', episodes)).toEqual([]);
+		expect(getCatalogReviewTrackCount(episodes)).toBe(0);
+		rejected.dismissed = false;
+		expect(getCatalogReviewCsvRows('Show', episodes)).toHaveLength(1);
+		expect(getCatalogReviewTrackCount(episodes)).toBe(1);
+	});
 	it('uses the visible review classifier and preserves episode, track, and duplicate occurrence order', () => {
 		const primary = match('primary');
 		const alternative = match('alternative', 'Chosen Artist', 'Chosen Title');

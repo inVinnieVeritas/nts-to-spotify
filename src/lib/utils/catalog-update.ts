@@ -94,7 +94,6 @@ export const reconcileSavedCatalogWithNTS = (
 	const addedCount = currentEpisodes.filter(
 		({ episodeAlias }) => !savedAliases.has(episodeAlias)
 	).length;
-	if (addedCount === 0) return { progress, addedCount };
 
 	const restoredCurrent = reconcileEpisodes(currentEpisodes, progress).map((episode) => {
 		const saved = progress.episodes[episode.episodeAlias];
@@ -118,6 +117,12 @@ export const reconcileSavedCatalogWithNTS = (
 		mergedEpisodes,
 		restoreCatalogPlaylistOrder(progress)
 	);
+	if (
+		addedCount === 0 &&
+		generatedText.title === progress.playlist.title &&
+		generatedText.description === progress.playlist.description
+	)
+		return { progress, addedCount };
 
 	return {
 		addedCount,
@@ -125,9 +130,10 @@ export const reconcileSavedCatalogWithNTS = (
 			JSON.stringify({
 				...progress,
 				updatedAt: now,
-				episodes: Object.fromEntries(
-					mergedEpisodes.map((episode) => [episode.episodeAlias, episode])
-				),
+				episodes:
+					addedCount === 0
+						? progress.episodes
+						: Object.fromEntries(mergedEpisodes.map((episode) => [episode.episodeAlias, episode])),
 				playlist: { ...progress.playlist, ...generatedText }
 			})
 		) as CatalogProgress

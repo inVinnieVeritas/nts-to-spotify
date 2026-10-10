@@ -22,6 +22,11 @@ Channeling must remain manual and its copied third-party playlist must remain un
   have a server-side creation registry. Historical app-created links predate that registry: the owner
   must explicitly confirm their origin, and a read-only exact comparison must pass. Ownership alone is
   not proof of historical creation. This is an explicit migration attestation, never automatic adoption.
+- Failed enable requests report the specific blocker instead of one catch-all reconnect/synchronize
+  message. The UI distinguishes active work, the separate five-minute manual-action hold, saved Spotify
+  cooldowns, missing cloud links, unfinished or uncertain writes, playlist differences, authorization,
+  access failures and cloud conflicts. Known waits include a countdown; failed requests retain the
+  saved switch state. Unknown failures are sanitized without exposing credentials or upstream bodies.
 - An exclusive Firestore lease coordinates hosted scans, worker writes and hosted/manual playlist calls.
   Manifest-only revision checks fence catalogue changes before every mutation without loading every
   episode repeatedly. Immutable operation IDs, revision CAS and dispatch-before-write persistence use
@@ -47,16 +52,34 @@ Channeling must remain manual and its copied third-party playlist must remain un
 
 ## Recovering acknowledged partial manual synchronization
 
-A settlement rejection now includes only fixed mismatch field names: `snapshot`, `title`,
-`description`, `visibility`, or (during explicit recovery) `tracks`. Neither the UI nor the
-response exposes the differing values. A mismatch is not proof of propagation delay or an external edit.
-Metadata and snapshot fingerprints remain exact. Description-to-target comparison accepts only
-the requested text or that same text with ASCII apostrophes represented as `&#x27;`, as confirmed
-by a read-only Spotify response. This is a one-pass encoding comparison, not HTML decoding or
+A settlement rejection includes fixed mismatch field names: `snapshot`, `title`,
+`description`, `visibility`, or (during explicit recovery) `tracks`. After ownership verification,
+a description mismatch also returns the bounded requested and observed description strings.
+The UI renders these as plain text with JSON/non-ASCII escapes so invisible differences can be
+diagnosed. Tokens, raw exceptions and other upstream fields are not exposed. A mismatch is not
+proof of propagation delay or an external edit.
+Automatic synchronization and ordinary settlement keep exact snapshot checks. Explicit manual
+acknowledged-prefix recovery can adopt a different currently observed snapshot only after reading
+the complete exact ordered prefix and matching metadata, then re-reading metadata to ensure the
+snapshot and raw fields stayed unchanged throughout pagination. The server marks this verified
+response; the client persists its snapshot through the existing revision CAS before any append.
+This read-only recovery is unavailable to background requests. No mismatching tracks, extra items,
+changed settings, or unstable reads are accepted. Description-to-target comparison accepts only
+the requested text or that same text with ASCII apostrophes represented as `&#x27;`, slashes as
+`&#x2F;`, or both, as confirmed by read-only Spotify responses. Amanda's returned description
+was exactly 205 characters instead of the requested 200 because `w/` became `w&#x2F;`.
+This is a one-pass encoding comparison, not HTML decoding or
 stripping: literal entity text, double encoding and other description differences remain distinct.
 The original requested description is still sent unchanged. Raw read-to-read metadata checks and
 external-change fingerprints are not normalized. An unexpected upstream representation remains
 blocked until its cause is established.
+
+An acknowledged operation paused in `settling` also offers **Verify and resume Spotify
+synchronization** after its countdown. This explicit manual action verifies the exact prefix
+before continuing and again after each new acknowledged batch, even if another pause occurs.
+Resume does not replace the target or recover dispatching/uncertain outcomes. Background
+updates still cannot request snapshot adoption. Settlement keeps three probes per batch, spaced
+five seconds apart as requested by the endpoint, before persisting another user-action countdown.
 
 For a saved, non-ambiguous acknowledged prefix (for example 100 of 257):
 
@@ -64,10 +87,10 @@ For a saved, non-ambiguous acknowledged prefix (for example 100 of 257):
    Keep its playlist link and reviewed choices; do not forget the link or clear synchronization records.
 2. Wait for any displayed lease/cooldown deadline. Compare with Spotify explicitly.
 3. If incomplete, use **Verify and resume Spotify synchronization**. It requires the unchanged target,
-   operation/revision lease, exact acknowledged snapshot, metadata, and complete ordered prefix before
+   operation/revision lease, matching metadata, stable observed snapshot, and complete ordered prefix before
    appending 100 and 57 remaining tracks. It does not repeat the first replacement or create a playlist.
-4. If verification still fails, stop and record the fixed mismatch names. A different snapshot or
-   genuine metadata/content difference still blocks writes; do not keep restarting Apply.
+4. If verification still fails, stop and record the fixed mismatch names. A genuine metadata/content
+   difference or changing snapshot still blocks writes; do not keep restarting Apply.
 5. Compare again after completion; it should report exact synchronization. A completely synchronized
    fresh preview already needs no mutation.
 
@@ -75,6 +98,25 @@ Dispatching/uncertain records and hosted uncertainty fences remain blocked. This
 resolve an ambiguous accepted write or prove exactly-once delivery. If the browser has lost its
 acknowledged record, the app cannot infer that acknowledgement solely from 100 matching playlist items.
 No migration clears records or changes progress/backup versions.
+
+If scanning a new episode, changing review choices or changing settings has changed the target of
+an acknowledged operation paused in settlement or stopped at the external-change gate,
+**Start fresh synchronization** offers
+a separate manual replacement. Finish scanning first. This action reads a fresh owned-playlist preview
+and shows the current counts in an explicit replacement confirmation before changing the local record.
+Cancellation, a failed/invalid preview, or a changed catalogue/record during the preview leaves the old
+operation intact. Confirmation prepares a new operation ID at position zero for the current target;
+the existing IndexedDB revision/lease CAS must claim it before any Spotify write. The existing server
+preview fingerprint then checks that the observed Spotify state and target still match before the first
+replacement batch; later batches retain ordinary exact settlement and append checks. This action keeps
+the linked playlist and review choices but replaces Spotify contents and metadata with current settings,
+so direct Spotify edits can be removed. It does not reinterpret the old acknowledged prefix as belonging
+to the new selection. Uncertain/dispatching work, foreign leases and hosted uncertainty fences remain
+blocked. Existing same-target Verify and resume behavior is unchanged.
+
+For a settling record, the new operation must also pass the existing retry/lease deadlines.
+Only a new operation ID at position zero with replacement required may supersede it; changing the
+target within the old operation remains rejected by the revision/lease CAS.
 
 If final hosted read verification fails, the acknowledged result is retained but the pending manual
 target still fences automatic writes. After exact synchronization, explicitly re-enable automation
@@ -135,6 +177,32 @@ deliver the notification. The homepage offers opt-in registration, up to ten nam
 of any device, and a persistent last-100-event history. Subscription capabilities are encrypted and
 never returned by the history API. Chrome/FCM and Firefox push endpoints are allowlisted; arbitrary
 endpoints/private addresses are not accepted. Safari is not currently supported.
+
+The registration control checks this browser's permission and local subscription against the saved
+server device ID. It shows an **Enabled** badge and **Notifications are enabled on this device** only when all three match,
+including after reload. A saved device entry on its own is not evidence that the current browser
+is registered. Removing the current device makes the enable action available again; blocked browser
+permission directs the user to the site's browser settings. Each device has a distinct **Remove**
+button. Removal uses an inline **Confirm removal** / **Cancel** prompt rather than a browser dialog;
+cancelling sends no request and confirmed removal updates the device list and current-device state.
+
+Notification, scan, and playlist settings use spaced cards with normal-case text, status badges,
+and native disabled buttons. Longer delivery and automation explanations are expandable; current
+status, next eligible scan, last-run results, and Spotify authorization remain visible.
+
+**Send test notification** sends only to the current registered device through the real encrypted
+Web Push path. It requires the permitted hosted session and same-origin JSON request. A persistent
+installation-wide 30-second CAS cooldown bounds concurrent and repeated tests, including failed sends.
+Expired subscriptions are removed; other network errors are sanitized and never automatically retried.
+The test does not create a catalogue event, consume event-history capacity, or claim real catalogue
+alerts. It changes no scan or playlist settings. The UI reports push-service acceptance, not proof of
+phone delivery. Tapping the test opens the protected homepage. The notification worker activates its
+updated script before a test dispatch, with a bounded wait and no application-page caching.
+
+To check delivery after deploying the updated image, reload the homepage in Pixel Chrome, confirm the
+registered status, click **Send test notification**, then check Android's notification shade and tap
+that notification. Repeat on the PC if desired after at least 30 seconds. Actual phone/browser delivery
+still needs this live acceptance check; mocked tests cannot establish it.
 
 Stable per-episode event IDs distinguish discovery from matches-ready. Up to 10,000 event IDs are
 remembered even after rolling off the visible history (capacity exhaustion fails closed rather than

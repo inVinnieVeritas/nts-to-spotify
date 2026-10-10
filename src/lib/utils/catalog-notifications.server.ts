@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import webpush, { type PushSubscription } from 'web-push';
 import { ScheduleStore } from './catalog-schedule-store.server';
@@ -77,6 +77,15 @@ export const notificationEventId = (
 	show: string,
 	episode: string
 ) => hash(JSON.stringify([kind, show, episode]));
+type TestCooldown = { until: number };
+const isTestCooldown = (value: unknown): value is TestCooldown =>
+	!!value &&
+	typeof value === 'object' &&
+	Number.isSafeInteger((value as TestCooldown).until) &&
+	(value as TestCooldown).until >= 0;
+export type NotificationTestResult =
+	| { status: 'accepted' | 'expired' | 'failed' | 'not-registered' | 'unconfigured' }
+	| { status: 'rate-limited'; retryAfterSeconds: number };
 export class CatalogueNotifications {
 	constructor(
 		private store = new ScheduleStore(),
@@ -141,6 +150,69 @@ export class CatalogueNotifications {
 			h.devices = h.devices.filter((d) => d.id !== id);
 		});
 	}
+	async test(id: unknown, signal: AbortSignal): Promise<NotificationTestResult> {
+		if (!isHash(id)) throw new Error('Invalid device');
+		if (!env.NTS_PUSH_PRIVATE_KEY || !env.NTS_PUSH_PUBLIC_KEY) return { status: 'unconfigured' };
+		const history = (await this.store.getAutomation('notification-history', isHistory))?.value;
+		const device = history?.devices.find((d) => d.id === id);
+		if (!device) return { status: 'not-registered' };
+		if (signal.aborted) return { status: 'failed' };
+		// Persist a global cooldown before dispatch, including failed/ambiguous sends.
+		// CAS also bounds concurrent clicks and requests from multiple devices.
+		for (let attempt = 0; ; attempt++) {
+			const stored = await this.store.getAutomation('notification-test-cooldown', isTestCooldown);
+			const now = this.now();
+			if (stored && stored.value.until > now)
+				return {
+					status: 'rate-limited',
+					retryAfterSeconds: Math.ceil((stored.value.until - now) / 1000)
+				};
+			try {
+				await this.store.putAutomation(
+					'notification-test-cooldown',
+					{ until: now + 30000 },
+					stored?.version ?? null
+				);
+				break;
+			} catch (cause) {
+				if (!(cause instanceof CloudProgressError) || cause.kind !== 'conflict' || attempt >= 3)
+					throw cause;
+			}
+		}
+		// Recheck removal after the claim. A remove cannot cancel an accepted upstream push.
+		const current = (await this.store.getAutomation('notification-history', isHistory))?.value;
+		if (!current?.devices.some((d) => d.id === id)) return { status: 'not-registered' };
+		if (signal.aborted) return { status: 'failed' };
+		try {
+			const subscription: unknown = JSON.parse(
+				decryptPlaylistAuthorization(device.encrypted, PURPOSE)
+			);
+			if (!isPushSubscription(subscription)) throw new Error('Invalid device');
+			await this.send(subscription, JSON.stringify({ id: hash(randomUUID()), kind: 'test' }), {
+				timeout: 10000,
+				TTL: 300,
+				urgency: 'normal',
+				vapidDetails: {
+					subject: 'https://nts2spotify.vincentvanderveken.com',
+					publicKey: env.NTS_PUSH_PUBLIC_KEY,
+					privateKey: env.NTS_PUSH_PRIVATE_KEY
+				}
+			});
+			return { status: 'accepted' };
+		} catch (cause) {
+			const status =
+				cause && typeof cause === 'object'
+					? (cause as { statusCode?: unknown }).statusCode
+					: undefined;
+			if (status === 404 || status === 410) {
+				await this.remove(id);
+				return { status: 'expired' };
+			}
+			// Web-push errors contain subscription capabilities: never serialize or log them.
+			return { status: 'failed' };
+		}
+	}
+
 	async publish(kind: CatalogueNotification['kind'], show: string, episodes: string[]) {
 		if (!isValidNTSSlug(show) || episodes.length > 5000 || !episodes.every(isValidNTSSlug))
 			throw new Error('Invalid notification');

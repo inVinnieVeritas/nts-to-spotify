@@ -233,6 +233,6 @@ describe('catalogue scan-session lifecycle', () => {
 		expect(component).toContain('<details class="scan-history">');
 		expect(component).toContain('Scan history ({scanTiming.history.length})');
 		expect(component).toContain('client-observed');
-		expect(component).toContain('not guaranteed server');
+		expect(component.replace(/\s+/g, ' ')).toContain('not guaranteed server');
 	});
 });

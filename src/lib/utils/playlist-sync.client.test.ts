@@ -20,6 +20,9 @@ import {
 	playlistSyncRecordStamp,
 	playlistSyncFeedback,
 	canRecoverAcknowledgedPlaylistSync,
+	canVerifyAcknowledgedPlaylistSync,
+	canRestartAcknowledgedPlaylistSync,
+	prepareAcknowledgedPlaylistRestart,
 	playlistSettlementDiagnostic,
 	type CatalogPlaylistSyncRecord,
 	type PlaylistSyncTarget
@@ -66,7 +69,217 @@ const prefix = {
 };
 type Body = Record<string, unknown>;
 
+describe('explicit fresh synchronization after acknowledged work stopped', () => {
+	it.each(['blocked', 'settling'] as const)(
+		'replaces the first batch for a changed target from %s, rather than reusing the old acknowledged prefix',
+		async (phase) => {
+			const old = await state(1538, {
+				...prefix,
+				phase,
+				reason: phase === 'blocked' ? 'external-change' : 'settling',
+				...(phase === 'settling' ? { settleUntil: NOW + 30_000 } : {})
+			});
+			const nextTarget = { ...target(1559), tracks: target(1559).tracks.reverse() };
+			const next = await prepareAcknowledgedPlaylistRestart(
+				old,
+				nextTarget,
+				'owner_1234567890',
+				NOW
+			);
+			const api = upstream(1559, target(1538).tracks.slice(0, 100));
+			const outcome = await runPlaylistSyncBatches({
+				record: next,
+				target: nextTarget,
+				previewFingerprint: 'b'.repeat(64),
+				request: api.request,
+				persist: async () => undefined,
+				now: () => NOW,
+				delay: async () => undefined
+			});
+			expect(outcome.type).toBe('completed');
+			expect(outcome.record.confirmedPosition).toBe(1559);
+			expect(api.requests[0]).toMatchObject({
+				operation: 'apply-batch',
+				tracks: nextTarget.tracks
+			});
+			expect(api.requests.filter((r) => r.operation === 'append')).toHaveLength(15);
+			expect(api.items()).toEqual(nextTarget.tracks);
+		}
+	);
+	it('creates a new zero-position operation for a changed target without mutating the old acknowledgement', async () => {
+		const old = await state(1538, {
+			...prefix,
+			phase: 'blocked',
+			reason: 'external-change',
+			revision: 7
+		});
+		const saved = structuredClone(old);
+		const nextTarget = { ...target(1559), name: 'New archive title', description: 'New dates' };
+		const next = await prepareAcknowledgedPlaylistRestart(old, nextTarget, 'owner_1234567890', NOW);
+		expect(old).toEqual(saved);
+		expect(next).toMatchObject({
+			revision: 7,
+			playlistId: ID,
+			totalTrackCount: 1559,
+			confirmedPosition: 0,
+			phase: 'interrupted',
+			mode: 'updated',
+			restartRequired: true
+		});
+		expect(next.operationId).not.toBe(old.operationId);
+		expect(next.targetFingerprint).toBe(await fingerprintPlaylistSyncTarget(ID, nextTarget));
+		expect(next.snapshotId).toBeUndefined();
+		expect(next.reason).toBeUndefined();
+		expect(isCatalogPlaylistSyncRecord(next, 'amanda', NOW)).toBe(true);
+	});
+
+	it.each([
+		{ phase: 'blocked', reason: 'uncertain' },
+		{
+			phase: 'uncertain',
+			reason: 'uncertain',
+			dispatchStartedAt: NOW,
+			quarantineUntil: NOW + PLAYLIST_SYNC_QUARANTINE_MS
+		},
+		{
+			phase: 'dispatching',
+			reason: undefined,
+			dispatchStartedAt: NOW,
+			quarantineUntil: NOW + PLAYLIST_SYNC_QUARANTINE_MS
+		},
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, retryUntil: NOW + 5_000 },
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, confirmedPosition: 0 },
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, restartRequired: true },
+		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, snapshotId: undefined },
+		{ phase: 'ready', reason: undefined },
+		{ phase: 'blocked', reason: 'external-change', confirmedPosition: 0 },
+		{ phase: 'blocked', reason: 'external-change', snapshotId: undefined },
+		{
+			phase: 'blocked',
+			reason: 'external-change',
+			leaseOwner: 'other_owner_12345678',
+			leaseUntil: NOW + PLAYLIST_SYNC_LEASE_MS
+		}
+	] as Partial<CatalogPlaylistSyncRecord>[])(
+		'refuses unsafe or active state: %j',
+		async (change) => {
+			const old = await state(181, {
+				...prefix,
+				phase: 'blocked',
+				reason: 'external-change',
+				...change
+			});
+			expect(canRestartAcknowledgedPlaylistSync(old, 'owner_1234567890', NOW)).toBe(false);
+			await expect(
+				prepareAcknowledgedPlaylistRestart(old, target(200), 'owner_1234567890', NOW)
+			).rejects.toThrow();
+		}
+	);
+});
+
 describe('acknowledged prefix recovery', () => {
+	it('allows separate manual verification or confirmed replacement of an acknowledged settling prefix', async () => {
+		const record = await state(1559, {
+			...prefix,
+			confirmedPosition: 300,
+			phase: 'settling',
+			reason: 'settling',
+			settleUntil: NOW + 30_000
+		});
+		expect(canVerifyAcknowledgedPlaylistSync(record)).toBe(true);
+		expect(canRestartAcknowledgedPlaylistSync(record, 'owner_1234567890', NOW)).toBe(true);
+		for (const invalid of [
+			{ ...record, phase: 'uncertain' as const, reason: 'uncertain' as const },
+			{ ...record, phase: 'dispatching' as const },
+			{ ...record, phase: 'blocked' as const, reason: 'uncertain' as const },
+			{ ...record, confirmedPosition: 0 },
+			{ ...record, restartRequired: true },
+			{ ...record, snapshotId: undefined }
+		])
+			expect(canVerifyAcknowledgedPlaylistSync(invalid)).toBe(false);
+	});
+	it('persists the read-verified snapshot before appending only the remaining 57 tracks at 200/257', async () => {
+		const record = await state(257, {
+			...prefix,
+			confirmedPosition: 200,
+			phase: 'blocked',
+			reason: 'external-change'
+		});
+		const http = upstream(257, target(257).tracks.slice(0, 200));
+		let saved = record;
+		const outcome = await runPlaylistSyncBatches({
+			record,
+			target: target(257),
+			recoverAcknowledgedPrefix: true,
+			now: () => NOW,
+			delay: async () => undefined,
+			persist: async (next) => {
+				saved = structuredClone(next);
+			},
+			request: async (raw) => {
+				const body = raw as Body;
+				if (body.operation === 'settle' && body.expectedSnapshotId === 's1') {
+					expect(body.recoverSnapshot).toBe(true);
+					expect(body.expectedTracks).toEqual(target(257).tracks.slice(0, 200));
+					return result({
+						mode: 'settled',
+						playlistId: ID,
+						snapshotId: 'read-verified',
+						acknowledgedPrefixVerified: true
+					});
+				}
+				if (body.operation === 'append') {
+					expect(saved.snapshotId).toBe('read-verified');
+					expect(body.expectedSnapshotId).toBe('read-verified');
+				}
+				return http.request(raw);
+			}
+		});
+		expect(outcome.type).toBe('completed');
+		expect(http.items()).toEqual(target(257).tracks);
+		expect(http.requests.filter((r) => r.operation === 'append').map((r) => r.tracks)).toEqual([
+			target(257).tracks.slice(200)
+		]);
+		expect(http.requests.some((r) => ['apply-batch', 'create'].includes(String(r.operation)))).toBe(
+			false
+		);
+		expect(http.requests.find((r) => r.operation === 'settle')?.expectedTracks).toEqual(
+			target(257).tracks
+		);
+	});
+	it.each([false, true])(
+		'refuses a changed snapshot without explicit recovery and server proof (proof %s)',
+		async (proof) => {
+			const request = vi.fn(async () =>
+				result({
+					mode: 'settled',
+					playlistId: ID,
+					snapshotId: 'different',
+					acknowledgedPrefixVerified: proof
+				})
+			);
+			const outcome = await run(await state(257, prefix), request);
+			expect(outcome.type).toBe('interrupted');
+			expect(outcome.record.snapshotId).toBe('s1');
+			expect(request.mock.calls).toHaveLength(1);
+		}
+	);
+	it('refuses explicit recovery when a changed snapshot lacks the server prefix proof', async () => {
+		const request = vi.fn(async () =>
+			result({ mode: 'settled', playlistId: ID, snapshotId: 'different' })
+		);
+		const outcome = await runPlaylistSyncBatches({
+			record: await state(257, { ...prefix, phase: 'blocked', reason: 'external-change' }),
+			target: target(257),
+			recoverAcknowledgedPrefix: true,
+			request,
+			persist: async () => undefined,
+			now: () => NOW
+		});
+		expect(outcome.type).toBe('interrupted');
+		expect(outcome.record.snapshotId).toBe('s1');
+		expect(request.mock.calls).toHaveLength(1);
+	});
 	it('revalidates a blocked prefix read-only before appending, without resetting its identity or position', async () => {
 		const record = await state(257, { ...prefix, phase: 'blocked', reason: 'external-change' });
 		const http = upstream(257, target(257).tracks.slice(0, 100));
@@ -188,6 +401,38 @@ describe('acknowledged prefix recovery', () => {
 			Array(6).fill('tracks')
 		])
 			expect(playlistSettlementDiagnostic({ mismatches })).toBe('');
+	});
+	it('makes HTML entities and invisible description differences visible without interpreting them', () => {
+		const diagnostic = playlistSettlementDiagnostic({
+			mismatches: ['description'],
+			descriptionDiagnostic: {
+				requested: 'Crossed Wires w/ Amanda Siegel',
+				observed: 'Crossed Wires w&#x2F; Amanda\u00a0Siegel\n'
+			}
+		});
+		expect(diagnostic).toContain('No further tracks were sent.');
+		expect(diagnostic).toContain('requested (30 characters): "Crossed Wires w/ Amanda Siegel"');
+		expect(diagnostic).toContain('"Crossed Wires w&#x2F; Amanda\\u00a0Siegel\\n"');
+		expect(diagnostic).not.toContain('\u00a0');
+	});
+	it.each([
+		null,
+		{ requested: 'Description' },
+		{ requested: 5, observed: 'Description' },
+		{ requested: 'a'.repeat(301), observed: 'Description' },
+		{ requested: 'Description', observed: 'a'.repeat(301) }
+	])('ignores malformed or oversized description diagnostics (%j)', (descriptionDiagnostic) => {
+		expect(
+			playlistSettlementDiagnostic({ mismatches: ['description'], descriptionDiagnostic })
+		).toBe('Spotify has not confirmed these fields: description. No further tracks were sent.');
+	});
+	it('does not display description details for a different mismatch', () => {
+		expect(
+			playlistSettlementDiagnostic({
+				mismatches: ['snapshot'],
+				descriptionDiagnostic: { requested: 'Archive', observed: 'Other archive' }
+			})
+		).toBe('Spotify has not confirmed these fields: snapshot. No further tracks were sent.');
 	});
 });
 
@@ -466,6 +711,30 @@ describe('resumable playlist synchronization', () => {
 		expect(api.items()).toEqual(target(181).tracks);
 		expect(api.requests.filter((b) => b.operation === 'apply-batch')).toHaveLength(1);
 		expect(api.requests.filter((b) => b.operation === 'append')).toHaveLength(1);
+	});
+	it('honors the five-second settlement interval so ten-second propagation can settle within three probes', async () => {
+		const api = upstream(181);
+		let clock = NOW;
+		const delay = vi.fn(async (ms: number) => {
+			clock += ms;
+		});
+		const outcome = await run(
+			await state(),
+			async (raw) => {
+				if ((raw as Body).operation === 'settle' && clock < NOW + 10_000)
+					return result(
+						{ error: 'playlist_settling', retryAfterSeconds: 5, mismatches: ['snapshot'] },
+						409
+					);
+				return api.request(raw);
+			},
+			{ now: () => clock, delay }
+		);
+		expect(outcome.type).toBe('completed');
+		expect(delay.mock.calls.map(([ms]) => ms)).toEqual([5000, 5000]);
+		expect(api.items()).toEqual(target(181).tracks);
+		expect(api.requests.filter((r) => r.operation === 'apply-batch')).toHaveLength(1);
+		expect(api.requests.filter((r) => r.operation === 'append')).toHaveLength(1);
 	});
 	it('offers a bounded countdown after three stale reads, then immediate Resume makes no request', async () => {
 		const api = upstream(181);

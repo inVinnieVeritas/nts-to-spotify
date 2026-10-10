@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import Button from './button.svelte';
+	import Icon from './icon/icon.svelte';
 	import {
 		isAutomaticPlaylistPublicState,
 		automaticPlaylistStatusText,
+		automaticPlaylistSaveFeedback,
 		type AutomaticPlaylistPublicState
 	} from '$lib/utils/catalog-playlist-automation';
 	import { formatCooldownDuration } from '$lib/utils/catalog-scan';
@@ -17,15 +18,19 @@
 	let connected = false;
 	let state: AutomaticPlaylistPublicState | null = null;
 	let message = '';
+	let actionRetryUntil = 0;
 	let now = Date.now();
 	let timer: ReturnType<typeof setInterval>;
 	let generation = 0;
+	let settingsLoaded = false;
 	async function load(show: string) {
 		const ticket = ++generation;
 		loadedShow = show;
 		state = null;
 		message = '';
+		actionRetryUntil = 0;
 		visible = false;
+		settingsLoaded = false;
 		if (location.origin !== 'https://nts2spotify.vincentvanderveken.com') return;
 		try {
 			const responses = await Promise.all([
@@ -44,6 +49,7 @@
 			if (settings.automation !== null && !isAutomaticPlaylistPublicState(settings.automation))
 				throw new Error();
 			state = settings.automation;
+			settingsLoaded = true;
 			visible = true;
 		} catch {
 			if (mounted && ticket === generation && show === showAlias) {
@@ -78,6 +84,7 @@
 		busy = true;
 		const show = showAlias;
 		message = '';
+		actionRetryUntil = 0;
 		try {
 			const authorization = operation === 'connect' || operation === 'disconnect';
 			const response = await fetch(
@@ -94,7 +101,16 @@
 					)
 				}
 			);
-			if (!response.ok) throw new Error();
+			if (!response.ok) {
+				const body = await response.json().catch(() => null);
+				const feedback = automaticPlaylistSaveFeedback(body);
+				if (show === showAlias) {
+					message = feedback.message;
+					actionRetryUntil = feedback.retryUntil;
+					if (body?.error === 'spotify_authentication') connected = false;
+				}
+				return;
+			}
 			if (show === showAlias) {
 				await load(show);
 				message = 'Settings saved.';
@@ -102,7 +118,7 @@
 		} catch {
 			if (show === showAlias)
 				message =
-					'Could not save. Reconnect Spotify if needed, save cloud progress, and manually synchronize the app-created linked playlist before enabling.';
+					'Could not reach the server to save playlist settings. Check your connection and try again.';
 		} finally {
 			busy = false;
 		}
@@ -120,53 +136,109 @@
 </script>
 
 {#if visible}
-	<section class="cloud-progress font-small-beast" aria-label="Automatic Spotify playlist updates">
-		<h3>Automatically update Spotify playlist</h3>
-		<p>
-			Off by default. Only your existing app-created linked playlist can be updated. Confident new
-			matches are selected; uncertain matches stay available for review. Your saved manual choices
-			are preserved.
-		</p>
-		<p>Background Spotify authorization: {connected ? 'connected' : 'disconnected'}.</p>
-		<Button
-			size="sm"
-			variant="outline"
-			disabled={busy}
-			on:click={() => action(connected ? 'disconnect' : 'connect')}
-			>{connected ? 'Disconnect background Spotify' : 'Authorize background Spotify'}</Button
-		>
-		<Button
-			size="sm"
-			variant="outline"
-			disabled={busy || scanning || (!state?.enabled && (!connected || !cloudConnected))}
-			on:click={() => action(state?.enabled ? 'disable' : 'enable')}
-			>{state?.enabled
-				? 'Pause automatic playlist updates'
-				: 'Enable automatic playlist updates'}</Button
-		>
-		<Button size="sm" variant="outline" disabled={busy} on:click={() => load(showAlias)}
-			>Refresh playlist status</Button
-		>
-		<div aria-live="polite" role="status">
-			{#if state}<p>{automaticPlaylistStatusText(state)}</p>
-				{#if state.lastUpdatedAt}<p>
-						Last automatic update: {new Date(state.lastUpdatedAt).toLocaleString()} · {state.added} tracks
-						added.
-					</p>{/if}
-				<p>{state.awaitingReview} track occurrences awaiting review.</p>
-				{#if state.retryUntil > now}<p>
-						{formatCooldownDuration(Math.ceil((state.retryUntil - now) / 1000))} remaining.
-					</p>{/if}
-			{:else}<p>Automatic playlist updates are off for this catalogue.</p>{/if}
-			{#if message}<p>{message}</p>{/if}
+	<section class="settings-card" aria-labelledby="playlist-automation-heading">
+		<div class="settings-heading">
+			<h3 id="playlist-automation-heading">Automatic playlist updates</h3>
+			{#if settingsLoaded}
+				<button
+					type="button"
+					class="automation-switch"
+					role="switch"
+					aria-label="Automatic playlist updates"
+					aria-checked={Boolean(state?.enabled)}
+					aria-busy={busy}
+					disabled={busy || scanning || (!state?.enabled && (!connected || !cloudConnected))}
+					on:click={() => action(state?.enabled ? 'disable' : 'enable')}
+				>
+					<span class="switch-rail" aria-hidden="true">
+						<span class="switch-label">{state?.enabled ? 'On' : 'Off'}</span>
+						<span class="switch-thumb"></span>
+					</span>
+				</button>
+			{:else}<span class="status-badge">Unavailable</span>{/if}
 		</div>
-		<p>
-			Disconnect removes the server's saved authorization, not Spotify playlists. To revoke the app
-			itself, use <a
-				href="https://www.spotify.com/account/apps/"
-				target="_blank"
-				rel="noopener noreferrer">Spotify account apps</a
-			>. Reauthorization is required when Spotify expires or revokes the refresh token.
-		</p>
+		<div class="automation-description">
+			<span class="automation-icon spotify-icon" aria-hidden="true"><Icon icon="spotify" /></span>
+			<p class="settings-description">
+				Keep your linked Spotify playlist up to date with confident matches. Uncertain matches stay
+				available for review.
+			</p>
+		</div>
+		<dl class="settings-summary">
+			<div>
+				<dt>Background Spotify authorization</dt>
+				<dd>
+					<span class="status-badge" class:active={connected}
+						>{connected ? 'Connected' : 'Disconnected'}</span
+					>
+				</dd>
+			</div>
+		</dl>
+		<div class="settings-actions">
+			{#if !connected}<button
+					type="button"
+					class="control-button"
+					disabled={busy}
+					on:click={() => action('connect')}>Authorize background Spotify</button
+				>{/if}
+			<button type="button" class="control-button" disabled={busy} on:click={() => load(showAlias)}
+				>Refresh status</button
+			>
+		</div>
+		<div aria-live="polite" role="status">
+			{#if state}
+				<p class="settings-note">{automaticPlaylistStatusText(state)}</p>
+				<dl class="settings-summary two-column">
+					{#if state.lastUpdatedAt}<div>
+							<dt>Last automatic update</dt>
+							<dd>{new Date(state.lastUpdatedAt).toLocaleString()}</dd>
+						</div>
+						<div>
+							<dt>Tracks added in last update</dt>
+							<dd>{state.added}</dd>
+						</div>{/if}
+					<div>
+						<dt>Track occurrences awaiting review</dt>
+						<dd>{state.awaitingReview}</dd>
+					</div>
+				</dl>
+				{#if state.retryUntil > now}<p class="settings-feedback">
+						Waiting: {formatCooldownDuration(Math.ceil((state.retryUntil - now) / 1000))} remaining.
+					</p>{/if}
+			{:else if settingsLoaded}<p class="settings-note">
+					Automatic playlist updates are off for this catalogue.
+				</p>{/if}
+			{#if busy}<p class="settings-feedback">Saving playlist settings…</p>
+			{:else if message}<p class="settings-feedback">
+					{message}
+					{#if actionRetryUntil > now}
+						Try again in {formatCooldownDuration(Math.ceil((actionRetryUntil - now) / 1000))}.
+					{/if}
+				</p>{/if}
+		</div>
+		<details class="settings-details">
+			<summary>Playlist safeguards and Spotify access</summary>
+			<p>
+				Off by default. Only your existing app-created linked playlist can be updated. Automatic
+				updates replace its contents with your selected tracks; external edits pause automation.
+				Your saved manual choices are preserved.
+			</p>
+			<p>
+				Disconnect removes the server's saved authorization for all catalogues, not Spotify
+				playlists. To revoke the app itself, use <a
+					href="https://www.spotify.com/account/apps/"
+					target="_blank"
+					rel="noopener noreferrer">Spotify account apps</a
+				>. Reauthorization is required when Spotify expires or revokes the refresh token.
+			</p>
+			{#if connected}<div class="settings-actions">
+					<button
+						type="button"
+						class="control-button danger"
+						disabled={busy}
+						on:click={() => action('disconnect')}>Disconnect background Spotify</button
+					>
+				</div>{/if}
+		</details>
 	</section>
 {/if}

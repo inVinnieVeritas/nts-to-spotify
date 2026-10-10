@@ -22,6 +22,7 @@ import {
 	playlistSyncRecordStamp,
 	createPlaylistSyncPreviewGuard,
 	requestPlaylistJson,
+	prepareAcknowledgedPlaylistRestart,
 	type CatalogPlaylistSyncRecord
 } from './playlist-sync.client';
 import {
@@ -139,6 +140,102 @@ const memoryFactory = () => {
 };
 
 describe('catalogue playlist synchronization persistence', () => {
+	it.each(['blocked', 'settling'] as const)(
+		'claims a new operation for an explicitly restarted acknowledged %s, and rejects a stale restart',
+		async (phase) => {
+			const { factory } = memoryFactory();
+			const options = { factory, timeoutMs: 100 };
+			const owner = 'document_owner_12345';
+			const old: CatalogPlaylistSyncRecord = {
+				...syncRecord(),
+				phase,
+				reason: phase === 'blocked' ? 'external-change' : 'settling',
+				...(phase === 'settling' ? { settleUntil: 30_001 } : {})
+			};
+			await saveCatalogPlaylistSync(old, options);
+			const target = {
+				name: 'New episode selection',
+				description: 'New dates',
+				public: true,
+				tracks: Array.from(
+					{ length: 1559 },
+					(_, i) => `spotify:track:${String(i).padStart(22, '0')}`
+				)
+			};
+			const next = await prepareAcknowledgedPlaylistRestart(old, target, owner, 100);
+			if (phase === 'settling') {
+				const changedWithinOld = {
+					...old,
+					targetFingerprint: next.targetFingerprint,
+					totalTrackCount: next.totalTrackCount
+				};
+				expect(
+					(
+						await claimCatalogPlaylistSyncLease(
+							changedWithinOld,
+							owner,
+							100,
+							PLAYLIST_SYNC_LEASE_MS,
+							options
+						)
+					).acquired
+				).toBe(false);
+			}
+			const claimed = await claimCatalogPlaylistSyncLease(
+				next,
+				owner,
+				100,
+				PLAYLIST_SYNC_LEASE_MS,
+				options
+			);
+			expect(claimed).toMatchObject({
+				acquired: true,
+				record: {
+					revision: 1,
+					phase: 'interrupted',
+					confirmedPosition: 0,
+					restartRequired: true,
+					playlistId: PLAYLIST_ID
+				}
+			});
+			expect(
+				(await claimCatalogPlaylistSyncLease(next, owner, 101, PLAYLIST_SYNC_LEASE_MS, options))
+					.acquired
+			).toBe(false);
+			expect(await loadCatalogPlaylistSync('show', options)).toMatchObject({
+				operationId: next.operationId,
+				revision: 1,
+				targetFingerprint: next.targetFingerprint
+			});
+		}
+	);
+
+	it('rejects a prepared restart if another tab has since persisted an uncertain outcome', async () => {
+		const { factory } = memoryFactory();
+		const options = { factory, timeoutMs: 100 };
+		const owner = 'document_owner_12345';
+		const old: CatalogPlaylistSyncRecord = {
+			...syncRecord(),
+			phase: 'blocked',
+			reason: 'external-change'
+		};
+		await saveCatalogPlaylistSync(old, options);
+		const next = await prepareAcknowledgedPlaylistRestart(
+			old,
+			{ name: 'Changed', description: '', public: true, tracks: [] },
+			owner,
+			100
+		);
+		await saveCatalogPlaylistSync({ ...old, revision: 1, reason: 'uncertain' }, options);
+		expect(
+			(await claimCatalogPlaylistSyncLease(next, owner, 101, PLAYLIST_SYNC_LEASE_MS, options))
+				.acquired
+		).toBe(false);
+		expect(await loadCatalogPlaylistSync('show', options)).toMatchObject({
+			reason: 'uncertain',
+			operationId: old.operationId
+		});
+	});
 	it('updates one linked playlist after scanning only newly reconciled episodes', async () => {
 		const { factory } = memoryFactory();
 		const options = { factory, timeoutMs: 100 };
