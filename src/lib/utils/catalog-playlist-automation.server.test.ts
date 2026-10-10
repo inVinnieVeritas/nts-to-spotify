@@ -572,7 +572,7 @@ describe('opt-in automatic linked playlist updates', () => {
 		expect((await f.state()).status).toBe('unchanged');
 	});
 	it.each([false, true])(
-		'handles a changed description for a hosted manual 257-track target without assuming encoding (escaped=%s)',
+		'completes a hosted manual 257-track target with plain or observed escaped descriptions (escaped=%s)',
 		async (escaped) => {
 			const f = await fixture();
 			await f.enable();
@@ -632,15 +632,6 @@ describe('opt-in automatic linked playlist updates', () => {
 				persist: async () => undefined,
 				delay: async () => undefined
 			});
-			if (escaped) {
-				expect(outcome.record.phase).toBe('settling');
-				expect(outcome.record.confirmedPosition).toBe(100);
-				expect(outcome.settlementDiagnostic).toContain('description');
-				expect(f.items).toEqual(target.tracks.slice(0, 100));
-				expect(f.writes().filter((r) => r.url.endsWith('/items'))).toHaveLength(1);
-				expect(f.progress).toEqual(reviewed);
-				return;
-			}
 			expect(outcome.type).toBe('completed');
 			expect(f.items).toEqual(target.tracks);
 			expect(f.progress).toEqual(reviewed);
@@ -783,7 +774,11 @@ describe('opt-in automatic linked playlist updates', () => {
 			description: 'Crossed Wires w/ Amanda Siegel',
 			encoded: 'Crossed Wires w&#x2F; Amanda Siegel'
 		},
-		{ description: "Show w/ Jim O'Rourke", encoded: 'Show w&#x2F; Jim O&#x27;Rourke' }
+		{ description: "Show w/ Jim O'Rourke", encoded: 'Show w&#x2F; Jim O&#x27;Rourke' },
+		{
+			description: 'Channeling w/ Ivan Smagghe & Nathan Gregory Wilkins',
+			encoded: 'Channeling w&#x2F; Ivan Smagghe &amp; Nathan Gregory Wilkins'
+		}
 	])(
 		'verifies automatic updates against observed encoded reads using raw baselines ($description)',
 		async ({ description, encoded }) => {
@@ -811,7 +806,10 @@ describe('opt-in automatic linked playlist updates', () => {
 					const metadata = await response.json();
 					return Response.json({
 						...metadata,
-						description: metadata.description.replaceAll("'", '&#x27;').replaceAll('/', '&#x2F;')
+						description: metadata.description
+							.replaceAll('&', '&amp;')
+							.replaceAll("'", '&#x27;')
+							.replaceAll('/', '&#x2F;')
 					});
 				}
 				return response;

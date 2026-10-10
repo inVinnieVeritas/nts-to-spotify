@@ -530,31 +530,49 @@ describe('/api/spotify/playlist synchronization', () => {
 		expect(JSON.parse(String(writes[0][1]?.body)).uris).toEqual(target.tracks.slice(200));
 	});
 	it.each([
-		{ phase: 'settling' as const, position: 100, verify: false },
-		{ phase: 'blocked' as const, position: 100, verify: true },
-		{ phase: 'settling' as const, position: 300, verify: true }
+		{
+			phase: 'settling' as const,
+			position: 100,
+			verify: false,
+			total: 1559,
+			alias: 'amanda-siegel'
+		},
+		{ phase: 'blocked' as const, position: 100, verify: true, total: 1559, alias: 'amanda-siegel' },
+		{
+			phase: 'settling' as const,
+			position: 300,
+			verify: true,
+			total: 1559,
+			alias: 'amanda-siegel'
+		},
+		{ phase: 'settling' as const, position: 100, verify: false, total: 2815, alias: 'channeling' },
+		{ phase: 'blocked' as const, position: 100, verify: true, total: 2815, alias: 'channeling' }
 	])(
-		'resumes Amanda from $position/1559 ($phase, explicit verification $verify)',
-		async ({ phase, position, verify }) => {
+		'resumes $alias from $position/$total ($phase, explicit verification $verify)',
+		async ({ phase, position, verify, total, alias }) => {
 			const target = {
 				name: CURRENT_PLAYLIST.name,
 				description:
-					'A comprehensive archive of tracks played on Crossed Wires w/ Amanda Siegel on NTS Radio, covering broadcasts from 26 May 2017 through 2 October 2026. Some tracks unavailable on Spotify may be missing.',
+					alias === 'channeling'
+						? 'A comprehensive archive of tracks played on Channeling w/ Ivan Smagghe & Nathan Gregory Wilkins on NTS Radio, covering broadcasts from 7 January 2014 through 6 October 2026. Some tracks unavailable on Spotify may be missing.'
+						: 'A comprehensive archive of tracks played on Crossed Wires w/ Amanda Siegel on NTS Radio, covering broadcasts from 26 May 2017 through 2 October 2026. Some tracks unavailable on Spotify may be missing.',
 				public: CURRENT_PLAYLIST.public,
-				tracks: Array.from({ length: 1559 }, (_, i) => trackUri(i))
+				tracks: Array.from({ length: total }, (_, i) => trackUri(i))
 			};
-			const encodedDescription = target.description.replaceAll('/', '&#x2F;');
+			const encodedDescription = target.description
+				.replaceAll('&', '&amp;')
+				.replaceAll('/', '&#x2F;');
 			const items = target.tracks.slice(0, position);
 			let snapshot = 'observed-' + position;
 			const clock = Date.now();
 			let saved: CatalogPlaylistSyncRecord = {
 				version: 1,
 				revision: 0,
-				catalogueAlias: 'amanda-siegel',
+				catalogueAlias: alias,
 				operationId: 'amanda_recovery_1234567890',
 				playlistId: PLAYLIST_ID,
 				targetFingerprint: await fingerprintPlaylistSyncTarget(PLAYLIST_ID, target),
-				totalTrackCount: 1559,
+				totalTrackCount: total,
 				confirmedPosition: position,
 				phase,
 				reason: phase === 'blocked' ? 'external-change' : 'settling',
@@ -601,18 +619,18 @@ describe('/api/spotify/playlist synchronization', () => {
 				}
 			});
 			expect(outcome.type).toBe('completed');
-			expect(saved.confirmedPosition).toBe(1559);
+			expect(saved.confirmedPosition).toBe(total);
 			expect(saved.operationId).toBe('amanda_recovery_1234567890');
 			expect(items).toEqual(target.tracks);
 			const writes = fetcher.mock.calls.filter(([, init]) => init?.method);
-			const expectedBatches = Math.ceil((1559 - position) / 100);
+			const expectedBatches = Math.ceil((total - position) / 100);
 			expect(writes).toHaveLength(expectedBatches);
 			expect(
 				writes.every(([url, init]) => String(url).endsWith('/items') && init?.method === 'POST')
 			).toBe(true);
 			expect(writes.map(([, init]) => JSON.parse(String(init?.body)).uris.length)).toEqual([
 				...Array(expectedBatches - 1).fill(100),
-				59
+				total % 100
 			]);
 			const preview = await POST({
 				fetch: fetcher,
@@ -629,6 +647,14 @@ describe('/api/spotify/playlist synchronization', () => {
 		["Jim O'Rourke", 'Jim O&#x27;Rourke', true],
 		['Crossed Wires w/ Amanda Siegel', 'Crossed Wires w&#x2F; Amanda Siegel', true],
 		["Show w/ Jim O'Rourke", 'Show w&#x2F; Jim O&#x27;Rourke', true],
+		[
+			'Channeling w/ Ivan Smagghe & Nathan Gregory Wilkins',
+			'Channeling w&#x2F; Ivan Smagghe &amp; Nathan Gregory Wilkins',
+			true
+		],
+		["Show w/ Jim O'Rourke & guests", 'Show w&#x2F; Jim O&#x27;Rourke &amp; guests', true],
+		['A & B', 'A &amp;amp; B', false],
+		['A & B', 'A &amp; B external edit', false],
 		['Crossed Wires w/ Amanda Siegel', 'Crossed Wires w&amp;#x2F; Amanda Siegel', false],
 		['Literal &#x2F; text', 'Literal / text', false],
 		['Literal &#x27; text', 'Literal &#x27; text', true],
@@ -693,7 +719,8 @@ describe('/api/spotify/playlist synchronization', () => {
 	);
 	it.each([
 		{ plain: "Jim O'Rourke", encoded: 'Jim O&#x27;Rourke' },
-		{ plain: 'Crossed Wires w/ Amanda Siegel', encoded: 'Crossed Wires w&#x2F; Amanda Siegel' }
+		{ plain: 'Crossed Wires w/ Amanda Siegel', encoded: 'Crossed Wires w&#x2F; Amanda Siegel' },
+		{ plain: 'Channeling w/ Ivan & Nathan', encoded: 'Channeling w&#x2F; Ivan &amp; Nathan' }
 	])(
 		'keeps the raw description fence across recovery pagination ($plain)',
 		async ({ plain, encoded }) => {

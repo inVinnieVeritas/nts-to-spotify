@@ -29,7 +29,7 @@ const target = (tracks: string[], overrides: Record<string, unknown> = {}) => ({
 });
 
 describe('Spotify playlist preview comparison', () => {
-	it('accepts only the observed one-pass apostrophe representation, keeping raw fingerprints', () => {
+	it('accepts observed one-pass encodings while keeping raw fingerprints', () => {
 		const description =
 			"A comprehensive archive of tracks played on Jim O'Rourke on NTS Radio, covering broadcasts from 20 January 2022 through 6 August 2026. Some tracks unavailable on Spotify may be missing.";
 		const encoded = description.replaceAll("'", '&#x27;');
@@ -47,13 +47,13 @@ describe('Spotify playlist preview comparison', () => {
 		for (const [actual, expected, changed] of [
 			['Literal &#x27; text', 'Literal &#x27; text', false],
 			["Literal ' text", 'Literal &#x27; text', true],
-			['Literal &amp;#x27; text', 'Literal &#x27; text', true],
+			['Literal &amp;#x27; text', 'Literal &#x27; text', false],
 			[encoded.replaceAll('&#x27;', '&amp;#x27;'), description, true],
 			[encoded + ' External edit', description, true],
 			[encoded + ' ', description, true],
 			['Jim O&#39;Rourke', "Jim O'Rourke", true],
 			['<b>Archive</b>', 'Archive', true],
-			['A &amp; B', 'A & B', true],
+			['A &amp; B', 'A & B', false],
 			['Already &#x27; plus &#x27;', "Already &#x27; plus '", false]
 		] as const) {
 			expect(
@@ -63,6 +63,58 @@ describe('Spotify playlist preview comparison', () => {
 				).descriptionChanged
 			).toBe(changed);
 		}
+	});
+	it('accepts the exact Channeling diagnostic with combined slash and ampersand encoding', () => {
+		const description =
+			'A comprehensive archive of tracks played on Channeling w/ Ivan Smagghe & Nathan Gregory Wilkins on NTS Radio, covering broadcasts from 7 January 2014 through 6 October 2026. Some tracks unavailable on Spotify may be missing.';
+		const encoded =
+			'A comprehensive archive of tracks played on Channeling w&#x2F; Ivan Smagghe &amp; Nathan Gregory Wilkins on NTS Radio, covering broadcasts from 7 January 2014 through 6 October 2026. Some tracks unavailable on Spotify may be missing.';
+		expect(description).toHaveLength(224);
+		expect(encoded).toHaveLength(233);
+		const state = current([uri(1)], { description: encoded });
+		expect(compareSpotifyPlaylist(state, target([uri(1)], { description }))).toMatchObject({
+			descriptionChanged: false,
+			synchronized: true
+		});
+		expect(fingerprintSpotifyPlaylist(state)).not.toBe(
+			fingerprintSpotifyPlaylist({ ...state, description })
+		);
+		expect(fingerprintSpotifyPlaylistPreview(state, target([uri(1)], { description }))).not.toBe(
+			fingerprintSpotifyPlaylistPreview(state, target([uri(1)], { description: encoded }))
+		);
+	});
+	it('accepts all combinations of observed encodings without decoding literals or accepting edits', () => {
+		const description = "Show w/ Jim O'Rourke & guests";
+		for (const ampersand of [false, true])
+			for (const slash of [false, true])
+				for (const apostrophe of [false, true]) {
+					let encoded = description;
+					if (ampersand) encoded = encoded.replaceAll('&', '&amp;');
+					if (slash) encoded = encoded.replaceAll('/', '&#x2F;');
+					if (apostrophe) encoded = encoded.replaceAll("'", '&#x27;');
+					expect(
+						compareSpotifyPlaylist(
+							current([uri(1)], { description: encoded }),
+							target([uri(1)], { description })
+						).synchronized
+					).toBe(true);
+				}
+		for (const [requested, actual, matches] of [
+			['A & B', 'A &amp;amp; B', false],
+			['A & B', 'A &#38; B', false],
+			['A & B', 'A &amp; B external edit', false],
+			['A & B', 'A &amp; B ', false],
+			['Literal &amp; plus &', 'Literal &amp; plus &amp;', false],
+			['Literal &amp; plus &', 'Literal &amp;amp; plus &amp;', true],
+			['Literal &#x2F; plus / &', 'Literal &amp;#x2F; plus &#x2F; &amp;', true],
+			['Literal &#x2F; plus / &', 'Literal / plus / &', false]
+		] as const)
+			expect(
+				compareSpotifyPlaylist(
+					current([uri(1)], { description: actual }),
+					target([uri(1)], { description: requested })
+				).synchronized
+			).toBe(matches);
 	});
 	it('accepts the observed Amanda slash encoding while keeping raw state and target fingerprints distinct', () => {
 		const description =
