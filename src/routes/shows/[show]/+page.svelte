@@ -27,6 +27,7 @@
 	} from '$lib/utils/catalog-backup';
 	import {
 		cloudSyncAvailable,
+		cloudProgressExtendsLocal,
 		CloudSyncError,
 		forgetCloudCopy,
 		loadCloudCopy,
@@ -198,6 +199,9 @@
 	let cloudVersion: string | null = null;
 	let cloudBusy = false;
 	let cloudTimer: ReturnType<typeof setTimeout> | undefined;
+	let cloudRefreshTimer: ReturnType<typeof setInterval> | undefined;
+	let lastCloudCheckAt = 0;
+	let localProgressRevision = 0;
 	let bridgeConnected = false;
 	let activeShowAlias = data.showAlias;
 	let activeShowName = data.name;
@@ -338,6 +342,7 @@
 		);
 
 	const persistProgress = (waitForSave = false) => {
+		localProgressRevision += 1;
 		if (!restored || !persistenceAvailable || progressReplacementAlias === activeShowAlias) {
 			return Promise.resolve();
 		}
@@ -353,12 +358,23 @@
 		showAlias: string,
 		generation: number
 	) => {
-		if (!data.user || !cloudSyncAvailable(data.user.id)) return;
+		if (!data.user || !cloudSyncAvailable(data.user.id) || cloudBusy || cloudState === 'checking')
+			return;
+		const revision = localProgressRevision;
+		const previousState = cloudState;
+		const previousVersion = cloudVersion;
+		const view = currentProgressSnapshot();
+		const current = () =>
+			!destroyed &&
+			shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration) &&
+			revision === localProgressRevision &&
+			!scanning &&
+			!progressTransferBusy;
+		lastCloudCheckAt = Date.now();
 		cloudState = 'checking';
 		try {
 			const remote = await loadCloudCopy(showAlias);
-			if (!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration))
-				return;
+			if (!current()) return;
 			cloudCopy = remote;
 			cloudVersion = remote?.version ?? null;
 			if (!remote) {
@@ -366,35 +382,54 @@
 				return;
 			}
 			if (!local) {
-				await useCloudCopy(false);
+				await useCloudCopy(false, remote, current);
 				return;
 			}
-			const [localSignature, remoteSignature] = await Promise.all([
+			const [localSignature, remoteSignature, viewSignature] = await Promise.all([
 				progressSignature(local),
-				progressSignature(remote.progress)
+				progressSignature(remote.progress),
+				progressSignature(view)
 			]);
-			if (!shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration))
-				return;
+			if (!current()) return;
 			const marker = readCloudMarker(showAlias);
 			if (localSignature === remoteSignature) {
 				cloudState = 'active';
 				await rememberCloudCopy(local, remote.version);
+				if (current() && viewSignature !== remoteSignature) queueCloudSave();
 			} else if (marker?.version === remote.version) {
 				cloudState = 'active';
-				if (marker.signature !== localSignature) cloudWriter.enqueue(local);
-			} else if (marker?.signature === localSignature) {
-				// Only the cloud changed since this browser's last confirmed save.
-				await useCloudCopy(false);
+				if (viewSignature !== remoteSignature) cloudWriter.enqueue(view);
+			} else if (
+				(marker?.signature === localSignature && viewSignature === localSignature) ||
+				cloudProgressExtendsLocal(view, remote.progress)
+			) {
+				// Remote-only changes or strictly additive scan results can refresh safely.
+				if (!playlistSyncRecord || playlistSyncRecord.phase === 'completed')
+					await useCloudCopy(false, remote, current);
+				else cloudState = 'conflict';
 			} else {
 				cloudState = 'conflict';
 			}
 		} catch {
 			if (shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration))
 				cloudState = 'unavailable';
+		} finally {
+			if (
+				shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration) &&
+				cloudState === 'checking'
+			) {
+				cloudVersion = previousVersion;
+				cloudState = previousState;
+				if (cloudState === 'active') queueCloudSave();
+			}
 		}
 	};
 
-	const useCloudCopy = async (confirmReplacement = true) => {
+	const useCloudCopy = async (
+		confirmReplacement = true,
+		verifiedCopy?: CloudCopy,
+		current: () => boolean = () => true
+	) => {
 		if (cloudBusy || !cloudCopy || scanning) return;
 		if (
 			confirmReplacement &&
@@ -406,19 +441,63 @@
 		cloudBusy = true;
 		try {
 			const alias = activeShowAlias;
+			const revision = localProgressRevision;
+			const canApply = () =>
+				current() && alias === activeShowAlias && !destroyed && revision === localProgressRevision;
 			if (cloudTimer) clearTimeout(cloudTimer);
 			cloudWriter.discardPending();
 			await cloudWriter.flush();
-			const latest = await loadCloudCopy(alias);
-			if (alias !== activeShowAlias || !latest) return;
+			await snapshotWriter.flush();
+			const latest = verifiedCopy ?? (await loadCloudCopy(alias));
+			if (!canApply() || !latest) return;
 			await saveCatalogProgress(latest.progress);
+			if (!canApply()) return;
 			await deleteCatalogPlaylistSync(alias);
 			await rememberCloudCopy(latest.progress, latest.version);
-			await initializeShow(data);
+			if (!canApply()) return;
+			const appliedGeneration = await initializeShow(data);
+			if (appliedGeneration !== showGeneration || alias !== activeShowAlias || destroyed) return;
+			cloudCopy = latest;
+			cloudVersion = latest.version;
+			cloudState = 'active';
+			if (
+				(await progressSignature(currentProgressSnapshot())) !==
+				(await progressSignature(latest.progress))
+			)
+				queueCloudSave();
 		} catch {
 			cloudState = 'unavailable';
 		} finally {
 			cloudBusy = false;
+		}
+	};
+
+	const refreshCloudProgress = async () => {
+		if (
+			!data.user ||
+			!cloudSyncAvailable(data.user.id) ||
+			document.visibilityState === 'hidden' ||
+			!restored ||
+			scanning ||
+			cloudBusy ||
+			progressTransferBusy ||
+			!persistenceAvailable ||
+			cloudState === 'checking' ||
+			Date.now() - lastCloudCheckAt < 30_000 ||
+			(playlistSyncRecord && playlistSyncRecord.phase !== 'completed')
+		)
+			return;
+		const alias = activeShowAlias;
+		const generation = showGeneration;
+		try {
+			await cloudWriter.flush();
+			await snapshotWriter.flush();
+			const local = await loadCatalogProgress(alias);
+			if (!destroyed && alias === activeShowAlias && generation === showGeneration)
+				await initializeCloud(local, alias, generation);
+		} catch {
+			if (!destroyed && alias === activeShowAlias && generation === showGeneration)
+				cloudState = 'unavailable';
 		}
 	};
 
@@ -493,6 +572,7 @@
 		}
 	};
 	const applyPlaylistLinkState = (state: CatalogPlaylistLinkState) => {
+		localProgressRevision += 1;
 		linkedPlaylistId = state.linkedPlaylistId;
 		playlistCreationPending = state.creationPending;
 		if (state.public !== undefined) publicPlaylist = state.public;
@@ -1348,6 +1428,7 @@
 			shouldApplyCatalogRestoration(showAlias, generation, activeShowAlias, showGeneration)
 		)
 			void initializeCloud(localSaved, showAlias, generation);
+		return generation;
 	};
 
 	onMount(() => {
@@ -1363,6 +1444,9 @@
 			await initializeCloud(await loadCatalogProgress(alias), alias, generation);
 		};
 		window.addEventListener('nts-cloud-connected', handleBridgeConnected);
+		window.addEventListener('focus', refreshCloudProgress);
+		document.addEventListener('visibilitychange', refreshCloudProgress);
+		cloudRefreshTimer = setInterval(() => void refreshCloudProgress(), 60_000);
 		unsubscribeGlobalCooldown = globalCooldownController.subscribe(applyGlobalCooldown);
 		void initializeShow(data);
 		cooldownTimer = setInterval(() => {
@@ -1372,7 +1456,11 @@
 				if (cloudState === 'active') cloudState = 'unavailable';
 			}
 		}, 1000);
-		return () => window.removeEventListener('nts-cloud-connected', handleBridgeConnected);
+		return () => {
+			window.removeEventListener('nts-cloud-connected', handleBridgeConnected);
+			window.removeEventListener('focus', refreshCloudProgress);
+			document.removeEventListener('visibilitychange', refreshCloudProgress);
+		};
 	});
 
 	$: if (mounted && data.showAlias !== activeShowAlias) void initializeShow(data);
@@ -1382,6 +1470,7 @@
 		if (cloudTimer) clearTimeout(cloudTimer);
 		showGeneration += 1;
 		if (cooldownTimer) clearInterval(cooldownTimer);
+		if (cloudRefreshTimer) clearInterval(cloudRefreshTimer);
 		unsubscribeGlobalCooldown?.();
 		globalCooldownController.destroy();
 		for (const episode of episodes) {
@@ -1922,12 +2011,22 @@
 	{#key activeShowAlias}
 		<ImportToSpotify
 			catalogueMode
-			disabled={!scanComplete || scanning}
-			comparisonDisabled={scanning || !restored}
+			disabledReason={cloudState === 'conflict'
+				? 'Resolve the cloud progress conflict before updating Spotify.'
+				: cloudBusy || cloudState === 'checking'
+					? 'Checking the latest cloud progress before updating Spotify.'
+					: ''}
+			disabled={!scanComplete ||
+				scanning ||
+				cloudBusy ||
+				cloudState === 'checking' ||
+				cloudState === 'conflict'}
+			comparisonDisabled={scanning || !restored || cloudBusy || cloudState === 'checking'}
 			creationPending={playlistCreationPending}
 			showAlias={activeShowAlias}
 			syncRecord={playlistSyncRecord}
 			onSyncRecordChange={(record) => {
+				localProgressRevision += 1;
 				if (!record || record.catalogueAlias === activeShowAlias) playlistSyncRecord = record;
 			}}
 			prepareCatalogueCreation={preparePlaylistCreation}

@@ -100,7 +100,14 @@ https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule
 For one show, **Pause automatic scans** on its hosted page. If a manual scan finds an active
 background episode, it pauses without consuming Spotify searches. Wait for that episode's
 lease to be released before trying again. Cloud conflicts continue to require an explicit choice.
-An already open browser is not live-refreshed by the worker; load the new cloud copy before editing.
+The browser checks cloud progress when opening a catalogue, returning to its tab, and once a minute
+while the tab is visible (at most one check per 30 seconds). It automatically adopts completed
+background work when existing reviewed episodes and playlist choices are preserved, including when
+an old or missing sync marker previously caused a false conflict. Generated coverage dates may advance.
+Real differences in reviews, selections or playlist settings still require an explicit choice.
+Refresh is deferred during local scans, backup transfers and unfinished playlist synchronizations;
+late responses cannot replace edits made while a check was running. Refreshes do not send tracks
+to Spotify or start a scan. Local edits still use the normal version-checked cloud save.
 
 Schedules are managed on the hosted site. Local Vite retains the working cloud bridge and can
 load background results, but local matching does not acquire the hosted Firestore lease. **Pause

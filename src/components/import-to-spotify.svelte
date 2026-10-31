@@ -51,6 +51,7 @@
 	} from '$lib/utils/catalog-cloud-bridge.client';
 
 	export let disabled = false;
+	export let disabledReason = '';
 	export let comparisonDisabled = false;
 	export let catalogueMode = false;
 	export let showAlias = '';
@@ -892,8 +893,8 @@
 				<p class="font-small-beast">Comparison only; Spotify has not been changed.</p>
 				{#if catalogueMode && disabled}
 					<p class="font-small-beast">
-						Comparing tracks selected so far. Finish scanning before applying a playlist update.
-						Linking does not restore scan progress or review choices.
+						{disabledReason ||
+							'Comparing tracks selected so far. Finish scanning before applying a playlist update. Linking does not restore scan progress or review choices.'}
 					</p>
 				{/if}
 				{#if preview.synchronized}
