@@ -57,7 +57,9 @@ export const createSavedCatalogCard = (progress: CatalogProgress): SavedCatalogC
 	const counts = getCatalogSummaryCounts(episodes);
 	const selectedOccurrences = episodes.flatMap(({ tracks }) =>
 		tracks
-			.filter(({ checked, selectedMatch }) => checked && selectedMatch !== null)
+			.filter(
+				({ checked, selectedMatch, dismissed }) => !dismissed && checked && selectedMatch !== null
+			)
 			.map(({ selectedMatch }) => selectedMatch as string)
 	);
 	const uniqueSelected = uniqueSpotifyUris(selectedOccurrences);

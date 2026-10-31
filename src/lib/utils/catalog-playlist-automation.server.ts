@@ -15,6 +15,7 @@ import {
 	automaticPlaylistTarget,
 	automaticReviewCount,
 	isAutomaticPlaylistPublicState,
+	type AutomaticPlaylistSaveErrorCode,
 	type AutomaticPlaylistPublicState
 } from './catalog-playlist-automation';
 import {
@@ -100,6 +101,17 @@ const id = (show: string) => `playlist-${show}`;
 const registryId = (playlist: string) =>
 	`owned-${createHash('sha256').update(playlist).digest('hex')}`;
 
+export class AutomaticPlaylistConfigurationError extends Error {
+	constructor(
+		readonly code: AutomaticPlaylistSaveErrorCode,
+		readonly status = 409,
+		readonly retryUntil = 0
+	) {
+		super(code);
+		this.name = 'AutomaticPlaylistConfigurationError';
+	}
+}
+
 export class AutomaticPlaylistService {
 	constructor(
 		readonly store = new ScheduleStore(),
@@ -159,23 +171,41 @@ export class AutomaticPlaylistService {
 			return;
 		}
 		const claim = await this.store.acquire('playlist', this.now());
-		if (!claim.lease) throw new Error('Playlist automation busy');
+		if (!claim.lease)
+			throw new AutomaticPlaylistConfigurationError(
+				claim.cooldownUntil ? 'spotify_rate_limited' : 'playlist_busy',
+				claim.cooldownUntil ? 429 : 409,
+				claim.cooldownUntil ?? 0
+			);
 		try {
 			if (old?.value.sync && old.value.sync.phase !== 'completed')
-				throw new Error('Playlist operation requires review');
+				throw new AutomaticPlaylistConfigurationError(
+					['dispatching', 'uncertain'].includes(old.value.sync.phase) ||
+						old.value.sync.reason === 'uncertain'
+						? 'playlist_sync_uncertain'
+						: 'playlist_sync_incomplete'
+				);
 			const copy = await this.load(show);
-			const playlistId = copy?.progress.playlist.linkedPlaylistId;
-			if (!copy || !isSpotifyPlaylistId(playlistId) || copy.progress.playlist.creationPending)
-				throw new Error('Linked playlist required');
+			if (!copy) throw new AutomaticPlaylistConfigurationError('save_cloud_progress_first');
+			const playlistId = copy.progress.playlist.linkedPlaylistId;
+			if (!isSpotifyPlaylistId(playlistId) || copy.progress.playlist.creationPending)
+				throw new AutomaticPlaylistConfigurationError('linked_playlist_required');
 			const registry = await this.store.getAutomation(registryId(playlistId), isRegistry);
 			if (registry?.value.automaticShow && registry.value.automaticShow !== show) {
 				const other = await this.get(registry.value.automaticShow);
 				if (other?.value.enabled || other?.value.sync)
-					throw new Error('Playlist already managed by another catalogue');
+					throw new AutomaticPlaylistConfigurationError('playlist_managed_elsewhere');
 			}
-			if (registry?.value.uncertain || (registry?.value.manualUntil ?? 0) > this.now())
-				throw new Error('Playlist operation requires review');
-			if (!registry && !confirmLegacy) throw new Error('App-created confirmation required');
+			if (registry?.value.uncertain)
+				throw new AutomaticPlaylistConfigurationError('playlist_sync_uncertain');
+			if ((registry?.value.manualUntil ?? 0) > this.now())
+				throw new AutomaticPlaylistConfigurationError(
+					'playlist_manual_wait',
+					409,
+					registry!.value.manualUntil
+				);
+			if (!registry && !confirmLegacy)
+				throw new AutomaticPlaylistConfigurationError('app_created_confirmation_required');
 			const authorization = await this.auth.token(signal);
 			const target = automaticPlaylistTarget(copy.progress);
 			const preview = await this.execute(
@@ -183,12 +213,34 @@ export class AutomaticPlaylistService {
 				authorization.accessToken,
 				signal
 			);
-			if (
-				!preview.response.ok ||
-				preview.body.synchronized !== true ||
-				!hash(preview.body.stateFingerprint)
-			)
-				throw new Error('Synchronize linked playlist first');
+			if (!preview.response.ok) {
+				if (preview.response.status === 429)
+					throw new AutomaticPlaylistConfigurationError(
+						'spotify_rate_limited',
+						429,
+						isSafeRetryAfterSeconds(preview.body.retryAfterSeconds, this.now())
+							? this.now() + preview.body.retryAfterSeconds * 1000
+							: 0
+					);
+				const errors = {
+					spotify_authentication: 'spotify_authentication',
+					playlist_not_owned: 'playlist_not_owned',
+					playlist_not_found: 'playlist_not_found',
+					playlist_inaccessible: 'playlist_inaccessible',
+					invalid_request: 'playlist_settings_invalid'
+				} as const;
+				const code = preview.body.error;
+				throw new AutomaticPlaylistConfigurationError(
+					typeof code === 'string' && Object.hasOwn(errors, code)
+						? errors[code as keyof typeof errors]
+						: 'spotify_unavailable',
+					[400, 401, 403, 404].includes(preview.response.status) ? preview.response.status : 503
+				);
+			}
+			if (preview.body.synchronized !== true)
+				throw new AutomaticPlaylistConfigurationError('playlist_sync_required');
+			if (!hash(preview.body.stateFingerprint))
+				throw new AutomaticPlaylistConfigurationError('spotify_unavailable', 503);
 			await this.auth.assertGeneration(authorization.generation);
 			const latest = await this.load(show);
 			if (latest?.version !== copy.version) throw new CloudProgressError('conflict');

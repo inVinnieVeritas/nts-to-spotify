@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { notificationDeviceState, prepareNotificationWorker } from './catalog-notifications.client';
 import { Script } from 'node:vm';
 describe('notification-only service worker', () => {
 	it('deduplicates concurrent messages locally without fetching or persisting catalogue progress', async () => {
@@ -49,5 +51,71 @@ describe('notification-only service worker', () => {
 			waitUntil: () => {}
 		});
 		expect(open).toHaveBeenCalledWith('/shows/dimension-door');
+		push({ id: 'b'.repeat(64), kind: 'test' });
+		push({ id: 'b'.repeat(64), kind: 'test' });
+		await Promise.all(tasks);
+		expect(notifications).toHaveBeenCalledTimes(2);
+		expect(notifications.mock.calls[1][1]).toMatchObject({
+			body: 'Test notification received. Notifications work on this device.',
+			data: { test: true }
+		});
+		handlers.get('notificationclick')!({
+			notification: { close: () => {}, data: { test: true } },
+			waitUntil: () => {}
+		});
+		expect(open).toHaveBeenLastCalledWith('/');
+	});
+});
+
+describe('this browser registration state', () => {
+	const endpoint = 'https://fcm.googleapis.com/fcm/send/pixel-fixture';
+	const id = createHash('sha256').update(endpoint).digest('hex');
+	it('requires permission, the local subscription and its exact saved device ID', async () => {
+		expect(await notificationDeviceState('granted', endpoint, [{ id }])).toEqual({
+			status: 'registered',
+			id
+		});
+		expect(await notificationDeviceState('granted', endpoint, [{ id: 'b'.repeat(64) }])).toEqual({
+			status: 'unregistered',
+			id: null
+		});
+		expect(await notificationDeviceState('granted', null, [{ id }])).toEqual({
+			status: 'unregistered',
+			id: null
+		});
+		expect(await notificationDeviceState('default', endpoint, [{ id }])).toEqual({
+			status: 'unregistered',
+			id: null
+		});
+		expect(await notificationDeviceState('denied', endpoint, [{ id }])).toEqual({
+			status: 'blocked',
+			id: null
+		});
+	});
+	it('waits for the newly installed notification worker instead of using the old active worker', async () => {
+		const worker = new EventTarget() as EventTarget & { state: string };
+		worker.state = 'installing';
+		const registration = { installing: worker, waiting: null, active: { state: 'activated' } };
+		const register = vi.fn(async () => registration);
+		vi.stubGlobal('navigator', { serviceWorker: { register } });
+		try {
+			let finished = false;
+			const pending = prepareNotificationWorker().then((value) => {
+				finished = true;
+				return value;
+			});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(finished).toBe(false);
+			worker.state = 'activated';
+			worker.dispatchEvent(new Event('statechange'));
+			expect(await pending).toBe(registration);
+			expect(register).toHaveBeenCalledWith('/notifications-worker.js', {
+				scope: '/',
+				updateViaCache: 'none'
+			});
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 });

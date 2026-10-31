@@ -21,7 +21,7 @@ type PlaylistLinkResult =
 export const verifyAndSaveExistingPlaylist = async (options: {
 	value: string;
 	verify: (playlistId: string) => Promise<{ response: Response; body: unknown }>;
-	persist: (playlistId: string) => Promise<boolean>;
+	persist: (playlistId: string, isPublic: boolean) => Promise<boolean>;
 	isCurrent: () => boolean;
 }): Promise<PlaylistLinkResult> => {
 	const playlistId = parseExistingSpotifyPlaylistId(options.value);
@@ -35,11 +35,12 @@ export const verifyAndSaveExistingPlaylist = async (options: {
 		typeof body !== 'object' ||
 		Array.isArray(body) ||
 		(body as Record<string, unknown>).mode !== 'verified' ||
-		(body as Record<string, unknown>).playlistId !== playlistId
+		(body as Record<string, unknown>).playlistId !== playlistId ||
+		typeof (body as Record<string, unknown>).public !== 'boolean'
 	) {
 		return { status: 'invalid-response' };
 	}
-	const saved = await options.persist(playlistId);
+	const saved = await options.persist(playlistId, (body as { public: boolean }).public);
 	if (!options.isCurrent()) return { status: 'cancelled' };
 	return saved ? { status: 'linked', playlistId } : { status: 'save-failed' };
 };

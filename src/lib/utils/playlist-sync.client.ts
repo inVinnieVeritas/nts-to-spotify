@@ -86,8 +86,22 @@ export const canRecoverAcknowledgedPlaylistSync = (record: CatalogPlaylistSyncRe
 		!record.restartRequired
 	);
 
+// A manual Resume can verify an acknowledged settling prefix without first
+// waiting for it to become blocked. This is separate from fresh replacement
+// eligibility and is never used to recover an ambiguous dispatch.
+export const canVerifyAcknowledgedPlaylistSync = (record: CatalogPlaylistSyncRecord | undefined) =>
+	canRecoverAcknowledgedPlaylistSync(record) ||
+	Boolean(
+		record?.phase === 'settling' &&
+		record.reason === 'settling' &&
+		record.playlistId &&
+		record.snapshotId &&
+		record.confirmedPosition > 0 &&
+		!record.restartRequired
+	);
+
 export const playlistSettlementDiagnostic = (body: unknown): string => {
-	const value = body as { mismatches?: unknown } | null;
+	const value = body as { mismatches?: unknown; descriptionDiagnostic?: unknown } | null;
 	const allowed = ['snapshot', 'title', 'description', 'visibility', 'tracks'];
 	if (
 		!Array.isArray(value?.mismatches) ||
@@ -97,9 +111,26 @@ export const playlistSettlementDiagnostic = (body: unknown): string => {
 		return '';
 	const mismatches = value.mismatches as string[];
 	const fields = allowed.filter((field) => mismatches.includes(field));
-	return fields.length
-		? `Spotify has not confirmed these fields: ${fields.join(', ')}. No further tracks were sent.`
-		: '';
+	if (!fields.length) return '';
+	const message = `Spotify has not confirmed these fields: ${fields.join(', ')}. No further tracks were sent.`;
+	const details = value?.descriptionDiagnostic as
+		{ requested?: unknown; observed?: unknown } | undefined;
+	if (
+		!fields.includes('description') ||
+		typeof details?.requested !== 'string' ||
+		typeof details.observed !== 'string' ||
+		details.requested.length > 300 ||
+		details.observed.length > 300
+	)
+		return message;
+	// Render bounded playlist text as text, never HTML. Escape non-ASCII code
+	// units as well as JSON controls so invisible differences remain copyable.
+	const exactText = (text: string) =>
+		JSON.stringify(text).replace(
+			/[^\x20-\x7e]/g,
+			(character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+		);
+	return `${message} Description diagnostic — requested (${details.requested.length} characters): ${exactText(details.requested)}; Spotify returned (${details.observed.length} characters): ${exactText(details.observed)}.`;
 };
 
 // A preview is an observation, not a mutation acknowledgement. Keep its display
@@ -703,6 +734,44 @@ export const playlistSyncEligibility = (
 	};
 };
 
+// Acknowledged, stopped work may be superseded only by an explicit new manual
+// operation. This never authorizes appending the old prefix to a changed target.
+export const canRestartAcknowledgedPlaylistSync = (
+	record: CatalogPlaylistSyncRecord | undefined,
+	owner: string,
+	now = Date.now()
+) =>
+	canVerifyAcknowledgedPlaylistSync(record) &&
+	!playlistSyncEligibility(record, owner, now).disabled;
+
+export const prepareAcknowledgedPlaylistRestart = async (
+	record: CatalogPlaylistSyncRecord,
+	target: PlaylistSyncTarget,
+	owner: string,
+	now = Date.now()
+): Promise<CatalogPlaylistSyncRecord> => {
+	if (
+		!isCatalogPlaylistSyncRecord(record, record.catalogueAlias, now) ||
+		!canRestartAcknowledgedPlaylistSync(record, owner, now)
+	)
+		throw new Error('Playlist synchronization cannot be restarted');
+	return {
+		version: CATALOG_PLAYLIST_SYNC_VERSION,
+		revision: record.revision,
+		catalogueAlias: record.catalogueAlias,
+		operationId: createPlaylistSyncOperationId(),
+		playlistId: record.playlistId!,
+		targetFingerprint: await fingerprintPlaylistSyncTarget(record.playlistId!, target),
+		totalTrackCount: target.tracks.length,
+		confirmedPosition: 0,
+		phase: 'interrupted',
+		mode: 'updated',
+		startedAt: now,
+		updatedAt: now,
+		restartRequired: true
+	};
+};
+
 export const runPlaylistSyncBatches = async (input: {
 	record: CatalogPlaylistSyncRecord;
 	target: PlaylistSyncTarget;
@@ -834,7 +903,7 @@ export const runPlaylistSyncBatches = async (input: {
 		}
 	}
 	if (input.recoverAcknowledgedPrefix) {
-		if (!canRecoverAcknowledgedPlaylistSync(record))
+		if (!canVerifyAcknowledgedPlaylistSync(record))
 			throw new Error('Invalid acknowledged recovery');
 		await save({
 			...record,
@@ -861,7 +930,7 @@ export const runPlaylistSyncBatches = async (input: {
 		});
 	}
 
-	// Three read-only probes per action. Further attempts require a user click
+	// Three read-only probes per batch. Further attempts require a user click
 	// after a persisted deadline; no unbounded poll or replacement loop.
 	// Recheck on every re-entry, including after another settlement interruption.
 	// The check is not an in-memory permission that disappears across reloads.
@@ -891,6 +960,9 @@ export const runPlaylistSyncBatches = async (input: {
 					public: input.target.public,
 					...(verifyAcknowledgedPrefix
 						? { expectedTracks: input.target.tracks.slice(0, record.confirmedPosition) }
+						: {}),
+					...(input.recoverAcknowledgedPrefix && verifyAcknowledgedPrefix
+						? { recoverSnapshot: true }
 						: {})
 				},
 				input.signal
@@ -900,11 +972,19 @@ export const runPlaylistSyncBatches = async (input: {
 				if (
 					value?.mode !== 'settled' ||
 					value.playlistId !== playlistId ||
-					value.snapshotId !== record.snapshotId
+					typeof value.snapshotId !== 'string' ||
+					!SAFE_SNAPSHOT.test(value.snapshotId) ||
+					(value.snapshotId !== record.snapshotId &&
+						!(
+							input.recoverAcknowledgedPrefix &&
+							verifyAcknowledgedPrefix &&
+							value.acknowledgedPrefixVerified === true
+						))
 				)
 					return stop('blocked', 'unavailable', 'invalid_response');
 				await save({
 					...record,
+					snapshotId: value.snapshotId as string,
 					phase: 'ready',
 					reason: undefined,
 					retryUntil: undefined,
@@ -926,7 +1006,7 @@ export const runPlaylistSyncBatches = async (input: {
 					...(await stop('blocked', 'external-change', 'playlist_state_unverified')),
 					settlementDiagnostic: diagnostic
 				};
-			if (attempt < 2) await delay(1000, input.signal);
+			if (attempt < 2) await delay(5000, input.signal);
 		}
 		return {
 			...(await stop('settling', 'settling', 'playlist_settling', now() + 5_000)),
@@ -1011,6 +1091,9 @@ export const runPlaylistSyncBatches = async (input: {
 			});
 			mutationOutstanding = false;
 			first = false;
+			// Explicit recovery needs a new content proof after each acknowledged batch.
+			// Ordinary synchronization retains its lightweight, exact-snapshot settlement.
+			verifyAcknowledgedPrefix = Boolean(input.recoverAcknowledgedPrefix);
 			const waiting = await settle();
 			if (waiting) return waiting;
 		}

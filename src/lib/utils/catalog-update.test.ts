@@ -40,7 +40,8 @@ const savedEpisode = (
 						confident: false,
 						fallback: true,
 						selectedMatch: 'spotify:track:0123456789ABCDEFGHIJKL',
-						checked: false
+						checked: false,
+						dismissed: true
 					}
 				]
 			: [],
@@ -83,6 +84,40 @@ describe('saved catalogue update reconciliation', () => {
 
 		expect(result).toEqual({ progress: saved, addedCount: 0 });
 		expect(result.progress).toBe(saved);
+	});
+
+	it('repairs generated metadata with no new episodes while preserving all saved reviews and linkage', () => {
+		const oldest = episode('oldest', '2022-01-20T00:00:00.000Z');
+		const august = episode('august', '2026-08-06T00:00:00.000Z');
+		const october = episode('october', '2026-10-01T00:00:00.000Z');
+		const episodes = [oldest, august, october];
+		const stale = createGeneratedPlaylistText('Test Show', [oldest, august], 'latest-first');
+		const saved = progress(
+			episodes.map((item) => savedEpisode(item)),
+			{
+				title: stale.title,
+				description: stale.description,
+				public: true,
+				order: 'latest-first',
+				linkedPlaylistId: PLAYLIST_ID
+			}
+		);
+		const repaired = reconcileSavedCatalogWithNTS(saved, catalog(episodes), 20);
+		expect(repaired.addedCount).toBe(0);
+		expect(repaired.progress.updatedAt).toBe(20);
+		const current = createGeneratedPlaylistText('Test Show', episodes, 'latest-first');
+		expect(repaired.progress.playlist).toMatchObject({
+			title: current.title,
+			description: current.description,
+			public: true,
+			order: 'latest-first',
+			linkedPlaylistId: PLAYLIST_ID
+		});
+		expect(repaired.progress.episodes).toEqual(saved.episodes);
+		expect(repaired.progress.retry).toEqual(saved.retry);
+		expect(reconcileSavedCatalogWithNTS(repaired.progress, catalog(episodes)).progress).toBe(
+			repaired.progress
+		);
 	});
 
 	it('adds one or multiple genuinely new aliases as pending without changing reviewed state', () => {

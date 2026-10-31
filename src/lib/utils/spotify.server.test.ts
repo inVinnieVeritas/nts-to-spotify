@@ -454,6 +454,28 @@ describe('Spotify server-session search cache', () => {
 		});
 		expect(request).toHaveBeenCalledOnce();
 	});
+	it('selects a title/artist-equivalent primary result ahead of an Edit on fresh and cached searches', async () => {
+		const request = vi.fn(async () =>
+			searchResponse([
+				spotifyItem('Track [Edit]'),
+				{
+					...spotifyItem('TRACK'),
+					uri: 'spotify:track:ZYXWVUTSRQPONMLKJIHGFE',
+					external_urls: { spotify: 'https://open.spotify.com/track/ZYXWVUTSRQPONMLKJIHGFE' }
+				}
+			])
+		) as Fetcher;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const result = await searchSpotifyTrack(
+				{ artist: 'Artist', title: 'Track' },
+				'token',
+				request
+			);
+			expect(result.matches.map(({ title }) => title)).toEqual(['TRACK', 'Track [Edit]']);
+			expect(result.confident).toBe(true);
+		}
+		expect(request).toHaveBeenCalledOnce();
+	});
 	afterEach(() => {
 		vi.useRealTimers();
 	});

@@ -85,18 +85,19 @@ export async function runScheduledScan(deps: ScheduleWorkerDependencies) {
 					}
 					const latestEpisodesBeforeDiscovery = copy.progress.episodes;
 					const reconciled = reconcileSavedCatalogWithNTS(copy.progress, catalog, now());
-					if (reconciled.addedCount) {
+					if (reconciled.progress !== copy.progress) {
 						if (scope.aborted || !(await store.owns(acquired, now())))
 							throw new CloudProgressError('conflict');
 						copy.version = await deps.save(schedule.showAlias, reconciled.progress, copy.version);
 						copy.progress = reconciled.progress;
-						await deps.notify?.(
-							'new-episodes',
-							schedule.showAlias,
-							Object.keys(copy.progress.episodes).filter(
-								(alias) => !Object.hasOwn(latestEpisodesBeforeDiscovery, alias)
-							)
-						);
+						if (reconciled.addedCount)
+							await deps.notify?.(
+								'new-episodes',
+								schedule.showAlias,
+								Object.keys(copy.progress.episodes).filter(
+									(alias) => !Object.hasOwn(latestEpisodesBeforeDiscovery, alias)
+								)
+							);
 					}
 					schedule.nextCheckAt = now() + SCHEDULE_INTERVALS[schedule.frequency];
 				}

@@ -72,6 +72,64 @@ afterEach(async () => {
 });
 
 describe('Spotify persistent search integration', () => {
+	it('reprioritizes a stored primary candidate list without a Spotify request or a cache rewrite', async () => {
+		const storage = storageSpy();
+		const edit = {
+			artist: 'Artist',
+			title: 'Track [Edit]',
+			uri: `spotify:track:${TRACK_ID}`,
+			href: `https://open.spotify.com/track/${TRACK_ID}`
+		};
+		const exact = {
+			...edit,
+			title: 'Track',
+			uri: 'spotify:track:ZYXWVUTSRQPONMLKJIHGFE',
+			href: 'https://open.spotify.com/track/ZYXWVUTSRQPONMLKJIHGFE'
+		};
+		const stored = {
+			artist: 'Artist',
+			title: 'Track',
+			matches: [edit, exact],
+			fallback: false,
+			confident: false
+		};
+		storage.get.mockResolvedValue(stored);
+		setSpotifyMatchCacheStorageForTests(storage);
+		const request = vi.fn(async () => {
+			throw new Error('Spotify must not be called');
+		}) as Fetcher;
+		const result = await searchSpotifyTrack({ artist: 'Artist', title: 'Track' }, 'token', request);
+		expect(result.matches).toEqual([exact, edit]);
+		expect(result.confident).toBe(true);
+		expect(stored.matches).toEqual([edit, exact]);
+		expect(request).not.toHaveBeenCalled();
+		expect(storage.set).not.toHaveBeenCalled();
+	});
+	it('keeps a title-only fallback unchecked even when its title matches exactly', async () => {
+		const storage = storageSpy();
+		storage.get.mockResolvedValue({
+			artist: 'Artist',
+			title: 'Track',
+			matches: [
+				{
+					artist: 'Artist',
+					title: 'Track',
+					uri: `spotify:track:${TRACK_ID}`,
+					href: `https://open.spotify.com/track/${TRACK_ID}`
+				}
+			],
+			fallback: true,
+			confident: false
+		});
+		setSpotifyMatchCacheStorageForTests(storage);
+		const request = vi.fn(async () => {
+			throw new Error('Spotify must not be called');
+		}) as Fetcher;
+		expect(
+			(await searchSpotifyTrack({ artist: 'Artist', title: 'Track' }, 'token', request)).confident
+		).toBe(false);
+		expect(request).not.toHaveBeenCalled();
+	});
 	it('uses a durable result after a restart with zero Spotify dispatches and separated metrics', async () => {
 		const directory = join(await createTemporaryDirectory(), 'cache');
 		const firstCache = new FileSpotifyMatchCache({ directory });

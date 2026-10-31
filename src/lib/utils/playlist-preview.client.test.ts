@@ -35,7 +35,7 @@ const payload = {
 
 describe('link an existing playlist', () => {
 	const verified = (
-		body: unknown = { mode: 'verified', playlistId: PLAYLIST_ID },
+		body: unknown = { mode: 'verified', playlistId: PLAYLIST_ID, public: true },
 		status = 200
 	) => ({
 		response: new Response(null, { status }),
@@ -69,14 +69,25 @@ describe('link an existing playlist', () => {
 				calls.push(`verify:${id}`);
 				return verified();
 			},
-			persist: async (id) => {
-				calls.push(`persist:${id}`);
+			persist: async (id, isPublic) => {
+				calls.push(`persist:${id}:${isPublic}`);
 				return true;
 			},
 			isCurrent: () => true
 		});
 		expect(result).toEqual({ status: 'linked', playlistId: PLAYLIST_ID });
-		expect(calls).toEqual([`verify:${PLAYLIST_ID}`, `persist:${PLAYLIST_ID}`]);
+		expect(calls).toEqual([`verify:${PLAYLIST_ID}`, `persist:${PLAYLIST_ID}:true`]);
+	});
+
+	it('preserves private visibility too when linking', async () => {
+		const persist = vi.fn(async () => true);
+		await verifyAndSaveExistingPlaylist({
+			value: PLAYLIST_ID,
+			verify: async () => verified({ mode: 'verified', playlistId: PLAYLIST_ID, public: false }),
+			persist,
+			isCurrent: () => true
+		});
+		expect(persist).toHaveBeenCalledWith(PLAYLIST_ID, false);
 	});
 
 	it.each([
@@ -84,6 +95,8 @@ describe('link an existing playlist', () => {
 		[429, { error: 'spotify_rate_limited', retryAfterSeconds: 120 }, 'rejected'],
 		[200, { mode: 'verified', playlistId: 'another-playlist' }, 'invalid-response'],
 		[200, { mode: 'created', playlistId: PLAYLIST_ID }, 'invalid-response'],
+		[200, { mode: 'verified', playlistId: PLAYLIST_ID }, 'invalid-response'],
+		[200, { mode: 'verified', playlistId: PLAYLIST_ID, public: null }, 'invalid-response'],
 		[200, null, 'invalid-response']
 	])('does not save an unverified link (%s, %j)', async (status, body, outcome) => {
 		const persist = vi.fn(async () => true);

@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import type webpush from 'web-push';
+import { env } from '$env/dynamic/private';
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('$env/dynamic/private', () => ({
 	env: {
@@ -22,7 +25,11 @@ const sub = (n = 1) => ({
 });
 function fixture() {
 	const f = fakeFirestore();
-	const send = vi.fn(async () => ({ statusCode: 201, body: '', headers: {} }));
+	const send = vi.fn<typeof webpush.sendNotification>(async () => ({
+		statusCode: 201,
+		body: '',
+		headers: {}
+	}));
 	return { ...f, send, service: new CatalogueNotifications(new ScheduleStore(f.request), send) };
 }
 describe('free browser push and durable notification history', () => {
@@ -101,5 +108,84 @@ describe('free browser push and durable notification history', () => {
 		expect(f.send).not.toHaveBeenCalled();
 		await f.service.deliver(new AbortController().signal);
 		expect(f.send).toHaveBeenCalledTimes(10);
+	});
+	it('sends a test only to the selected registered device without changing catalogue history', async () => {
+		const f = fixture();
+		await f.service.subscribe(sub(1), 'Pixel');
+		await f.service.subscribe(sub(2), 'PC');
+		await f.service.publish('new-episodes', 'dimension-door', ['episode-1']);
+		const before = await f.service.publicHistory();
+		const id = createHash('sha256').update(sub(1).endpoint).digest('hex');
+		expect(await f.service.test(id, new AbortController().signal)).toEqual({ status: 'accepted' });
+		expect(f.send).toHaveBeenCalledOnce();
+		expect(f.send.mock.calls[0][0]).toEqual(sub(1));
+		expect(JSON.parse(String(f.send.mock.calls[0][1]))).toEqual({
+			id: expect.stringMatching(/^[a-f0-9]{64}$/),
+			kind: 'test'
+		});
+		expect(await f.service.publicHistory()).toEqual(before);
+		// A test must not claim or suppress the real event on either device.
+		await f.service.deliver(new AbortController().signal);
+		expect(f.send).toHaveBeenCalledTimes(3);
+	});
+	it('claims a persistent cooldown atomically across concurrent tests and allows a later test', async () => {
+		const f = fixture();
+		await f.service.subscribe(sub(), 'Pixel');
+		const id = (await f.service.publicHistory()).devices[0].id;
+		let now = 100000;
+		const service = new CatalogueNotifications(new ScheduleStore(f.request), f.send, () => now);
+		const results = await Promise.all([
+			service.test(id, new AbortController().signal),
+			service.test(id, new AbortController().signal)
+		]);
+		expect(results.map((r) => r.status).sort()).toEqual(['accepted', 'rate-limited']);
+		expect(f.send).toHaveBeenCalledOnce();
+		expect(await service.test(id, new AbortController().signal)).toEqual({
+			status: 'rate-limited',
+			retryAfterSeconds: 30
+		});
+		now += 30000;
+		expect(await service.test(id, new AbortController().signal)).toEqual({ status: 'accepted' });
+		expect(f.send).toHaveBeenCalledTimes(2);
+		expect(f.send.mock.calls[0][1]).not.toEqual(f.send.mock.calls[1][1]);
+	});
+	it('blocks unregistered, invalid, unconfigured and cancelled tests before sending', async () => {
+		const f = fixture();
+		expect(await f.service.test('a'.repeat(64), new AbortController().signal)).toEqual({
+			status: 'not-registered'
+		});
+		await expect(f.service.test('bad', new AbortController().signal)).rejects.toThrow();
+		await f.service.subscribe(sub(), 'Pixel');
+		const id = (await f.service.publicHistory()).devices[0].id;
+		const stopped = new AbortController();
+		stopped.abort();
+		expect(await f.service.test(id, stopped.signal)).toEqual({ status: 'failed' });
+		const privateKey = env.NTS_PUSH_PRIVATE_KEY;
+		try {
+			env.NTS_PUSH_PRIVATE_KEY = '';
+			expect(await f.service.test(id, new AbortController().signal)).toEqual({
+				status: 'unconfigured'
+			});
+		} finally {
+			env.NTS_PUSH_PRIVATE_KEY = privateKey;
+		}
+		expect(f.send).not.toHaveBeenCalled();
+	});
+	it('sanitizes test failures, never retries ambiguous sends and removes expired subscriptions', async () => {
+		const f = fixture();
+		await f.service.subscribe(sub(), 'Pixel');
+		const id = (await f.service.publicHistory()).devices[0].id;
+		f.send.mockRejectedValueOnce({ statusCode: 500, body: 'private capability' });
+		expect(await f.service.test(id, new AbortController().signal)).toEqual({ status: 'failed' });
+		expect((await f.service.test(id, new AbortController().signal)).status).toBe('rate-limited');
+		expect(f.send).toHaveBeenCalledOnce();
+		const later = new CatalogueNotifications(
+			new ScheduleStore(f.request),
+			f.send,
+			() => Date.now() + 60000
+		);
+		f.send.mockRejectedValueOnce({ statusCode: 410, body: 'private capability' });
+		expect(await later.test(id, new AbortController().signal)).toEqual({ status: 'expired' });
+		expect((await f.service.publicHistory()).devices).toEqual([]);
 	});
 });

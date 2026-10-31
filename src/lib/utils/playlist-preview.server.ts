@@ -69,11 +69,23 @@ const retainedSequence = (
 const arraysEqual = <T>(left: readonly T[], right: readonly T[]) =>
 	left.length === right.length && left.every((value, index) => value === right[index]);
 
-// Spotify has been observed returning ASCII apostrophes as &#x27;. Compare the
-// read value to that single representation of the requested text; never decode
-// either string, strip HTML, or normalize raw fingerprints/read-to-read fences.
-export const spotifyPlaylistDescriptionMatches = (actual: string, requested: string): boolean =>
-	actual === requested || actual === requested.replaceAll("'", '&#x27;');
+// Spotify has been observed returning apostrophes as &#x27;, slashes as &#x2F;
+// and ampersands as &amp;. Compare only one-pass representations of requested text;
+// never decode literal entities, strip HTML, or normalize raw read-to-read fences.
+export const spotifyPlaylistDescriptionMatches = (actual: string, requested: string): boolean => {
+	// Encode source ampersands first so newly emitted entities are never re-escaped.
+	for (const text of [requested, requested.replaceAll('&', '&amp;')]) {
+		const slashEncoded = text.replaceAll('/', '&#x2F;');
+		if (
+			actual === text ||
+			actual === text.replaceAll("'", '&#x27;') ||
+			actual === slashEncoded ||
+			actual === slashEncoded.replaceAll("'", '&#x27;')
+		)
+			return true;
+	}
+	return false;
+};
 
 export const compareSpotifyPlaylist = (
 	current: SpotifyPlaylistState,

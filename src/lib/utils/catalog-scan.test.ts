@@ -539,8 +539,45 @@ describe('catalogue review filters', () => {
 			'primary-review': 1,
 			'fallback-review': 1,
 			'no-candidates': 1,
-			'part-mismatches': 1
+			'part-mismatches': 1,
+			dismissed: 0
 		});
+	});
+	it('hides dismissed occurrences from every normal filter and playlist export', () => {
+		const dismissed = filteredTrack('Wrong artist', {
+			dismissed: true,
+			checked: true,
+			selectedMatch: candidate.uri
+		});
+		const completed = completedEpisode([dismissed]);
+		expect(getCatalogReviewFilterCounts([completed])).toEqual({
+			all: 0,
+			selected: 0,
+			'primary-review': 0,
+			'fallback-review': 0,
+			'no-candidates': 0,
+			'part-mismatches': 0,
+			dismissed: 1
+		});
+		expect(getCatalogEpisodeReviewTracks(completed, 'all')).toEqual([]);
+		expect(getCatalogEpisodeReviewTracks(completed, 'dismissed')).toEqual([dismissed]);
+		expect(getCatalogExportUris([completed])).toEqual([]);
+		dismissed.dismissed = false;
+		dismissed.checked = false;
+		expect(getCatalogReviewFilterCounts([completed])).toMatchObject({
+			all: 1,
+			selected: 0,
+			dismissed: 0
+		});
+		expect(getCatalogExportUris([completed])).toEqual([]);
+	});
+	it('keeps a dismissed saved occurrence restorable while hiding empty pending episodes from that filter', () => {
+		const dismissed = filteredTrack('Wrong artist', { dismissed: true });
+		const pending = { ...completedEpisode([dismissed]), status: 'pending' as const };
+		expect(getCatalogReviewFilterCounts([pending]).dismissed).toBe(1);
+		expect(getCatalogEpisodeReviewTracks(pending, 'dismissed')).toEqual([dismissed]);
+		expect(shouldShowCatalogEpisodeForReview(pending, 'dismissed')).toBe(true);
+		expect(shouldShowCatalogEpisodeForReview({ ...pending, tracks: [] }, 'dismissed')).toBe(false);
 	});
 
 	it('does not classify a selected title-equivalent remaster as primary review', () => {
@@ -958,6 +995,69 @@ describe('generated playlist text chronology', () => {
 			description:
 				"A comprehensive archive of tracks played on Jim O'Rourke on NTS Radio, covering broadcasts from 20 January 2022 through 3 September 2026. Some tracks unavailable on Spotify may be missing."
 		});
+	});
+
+	it('repairs stale generated dates even when the saved catalogue already includes newer episodes', () => {
+		const olderEpisodes = [episode('oldest', '2022-01-20'), episode('august', '2026-08-06')];
+		const allEpisodes = [...olderEpisodes, episode('october', '2026-10-01')];
+		const stale = createGeneratedPlaylistText("Jim O'Rourke", olderEpisodes, 'latest-first');
+		const current = createGeneratedPlaylistText("Jim O'Rourke", allEpisodes, 'latest-first');
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				stale,
+				"Jim O'Rourke",
+				allEpisodes,
+				allEpisodes,
+				'latest-first'
+			)
+		).toEqual({
+			title: "JIM O'ROURKE — NTS FULL ARCHIVE · 01.10.26→20.01.22",
+			description: current.description
+		});
+		const legacy = createLegacyGeneratedPlaylistText("Jim O'Rourke", olderEpisodes, 'oldest-first');
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				legacy,
+				"Jim O'Rourke",
+				allEpisodes,
+				allEpisodes,
+				'latest-first'
+			)
+		).toEqual({
+			title: current.title,
+			description: current.description
+		});
+	});
+
+	it('preserves edits and unknown date ranges while repairing each generated field independently', () => {
+		const olderEpisodes = [episode('oldest', '2022-01-20'), episode('august', '2026-08-06')];
+		const allEpisodes = [...olderEpisodes, episode('october', '2026-10-01')];
+		const stale = createGeneratedPlaylistText('Test Show', olderEpisodes, 'latest-first');
+		const current = createGeneratedPlaylistText('Test Show', allEpisodes, 'latest-first');
+		for (const title of [
+			`${stale.title} · my favourites`,
+			'TEST SHOW — NTS FULL ARCHIVE · 07.08.26→20.01.22',
+			'OTHER SHOW — NTS FULL ARCHIVE · 06.08.26→20.01.22'
+		])
+			expect(
+				updateGeneratedPlaylistTextForCatalog(
+					{ title, description: stale.description },
+					'Test Show',
+					allEpisodes,
+					allEpisodes,
+					'latest-first'
+				)
+			).toEqual({ title, description: current.description });
+		const description = `${stale.description} Curated by me.`;
+		expect(
+			updateGeneratedPlaylistTextForCatalog(
+				{ title: stale.title, description },
+				'Test Show',
+				allEpisodes,
+				allEpisodes,
+				'latest-first'
+			)
+		).toEqual({ title: current.title, description });
 	});
 
 	it('preserves a custom name while updating a generated description', () => {

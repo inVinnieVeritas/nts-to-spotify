@@ -1,5 +1,6 @@
 import { createCatalogBackup } from './catalog-backup';
 import type { CatalogProgress } from './catalog-scan';
+import { isCatalogProgressCompatible, updateGeneratedPlaylistTextForCatalog } from './catalog-scan';
 import {
 	bridgeRequest,
 	isLocalCloudBridge,
@@ -47,6 +48,61 @@ export async function progressSignature(progress: CatalogProgress) {
 	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
 	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
+
+// A missing/old marker need not be a conflict when the cloud only extends saved work.
+// Keep the exact reviewed tracks and playlist choices; dates may advance automatically.
+export const cloudProgressExtendsLocal = (
+	local: CatalogProgress,
+	remote: CatalogProgress,
+	now = Date.now()
+) => {
+	if (
+		!isCatalogProgressCompatible(local) ||
+		!isCatalogProgressCompatible(remote) ||
+		local.showAlias !== remote.showAlias ||
+		local.matcherVersion !== remote.matcherVersion ||
+		(local.retry?.cooldownUntil ?? 0) > Math.max(now, remote.retry?.cooldownUntil ?? 0)
+	)
+		return false;
+	const left = createCatalogBackup(local).progress;
+	const right = createCatalogBackup(remote).progress;
+	const showName = right.display?.showName || left.display?.showName;
+	if (
+		left.display?.showName &&
+		right.display?.showName &&
+		left.display.showName !== right.display.showName
+	)
+		return false;
+	const allEpisodes = [...Object.values(left.episodes), ...Object.values(right.episodes)];
+	const playlistChoices = (progress: CatalogProgress) => {
+		const playlist = progress.playlist;
+		const text = showName
+			? updateGeneratedPlaylistTextForCatalog(
+					playlist,
+					showName,
+					Object.values(progress.episodes),
+					allEpisodes,
+					playlist.order ?? 'latest-first'
+				)
+			: playlist;
+		return [
+			text.title,
+			text.description,
+			playlist.public,
+			playlist.order ?? 'latest-first',
+			playlist.linkedPlaylistId ?? null,
+			playlist.creationPending ?? false
+		];
+	};
+	if (JSON.stringify(playlistChoices(left)) !== JSON.stringify(playlistChoices(right)))
+		return false;
+	return Object.entries(left.episodes).every(([alias, episode]) => {
+		const newer = right.episodes[alias];
+		if (!newer) return false;
+		if (episode.status === 'pending' && episode.tracks.length === 0) return true;
+		return JSON.stringify(episode) === JSON.stringify(newer);
+	});
+};
 
 export const readCloudMarker = (showAlias: string) => {
 	try {

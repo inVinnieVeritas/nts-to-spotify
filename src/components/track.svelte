@@ -11,6 +11,8 @@
 	export let matches: undefined | Match[] = undefined;
 	export let selectedMatch: URI | null = null;
 	export let checked = false;
+	export let dismissible = false;
+	export let dismissed = false;
 	export let partMismatchReason = '';
 	const dispatch = createEventDispatcher<{ reviewchange: void }>();
 
@@ -20,7 +22,14 @@
 	$: hasNoMatch = matches && matches.length === 0;
 
 	const selectMatch = (uri: URI) => {
+		if (dismissed) return;
 		selectedMatch = uri;
+		dispatch('reviewchange');
+	};
+	const toggleDismissed = () => {
+		checked = false;
+		dismissed = !dismissed;
+		expanded = false;
 		dispatch('reviewchange');
 	};
 </script>
@@ -53,7 +62,7 @@
 			<Checkbox
 				bind:checked
 				on:change={() => dispatch('reviewchange')}
-				disabled={matches === undefined || hasNoMatch}
+				disabled={dismissed || matches === undefined || hasNoMatch}
 			/>
 		</div>
 	</div>
@@ -62,8 +71,25 @@
 			<strong>{PART_MISMATCH_WARNING_PREFIX}</strong>{partMismatchReason}
 		</p>
 	{/if}
+	{#if dismissible && matches !== undefined}
+		<div class="review-actions">
+			<Button
+				size="sm"
+				variant="outline"
+				icon={dismissed ? 'history' : 'x-circle'}
+				aria-label={`${dismissed ? 'Restore' : 'Dismiss'} ${original.artist} - ${original.title}`}
+				on:click={toggleDismissed}
+			>
+				{dismissed ? 'Restore to review' : 'Dismiss'}
+			</Button>
+			{#if dismissed}<span class="font-small-beast">Dismissed · excluded from playlist</span>{/if}
+		</div>
+	{/if}
 	{#if expanded}
 		<div class="matches" transition:slide={{ duration: 300 }} data-theme="dark">
+			<p class="candidate-help font-small-beast">
+				Choose a candidate here; use the track checkbox to include it in your playlist.
+			</p>
 			{#each matches || [] as match}
 				<div class="row">
 					<Song
@@ -75,9 +101,11 @@
 					/>
 					<div class="right">
 						{#if selectedMatch === match.uri}
-							<Button disabled>Selected</Button>
+							<Button disabled>Current match</Button>
 						{:else}
-							<Button variant="outline" on:click={() => selectMatch(match.uri)}>Select</Button>
+							<Button variant="outline" disabled={dismissed} on:click={() => selectMatch(match.uri)}
+								>Choose match</Button
+							>
 						{/if}
 					</div>
 				</div>
@@ -137,5 +165,18 @@
 
 	.matches {
 		padding: 16px 0;
+	}
+	.review-actions,
+	.candidate-help {
+		padding: 0 24px 12px;
+		@media (--md) {
+			padding-inline: 40px;
+		}
+	}
+	.review-actions {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 8px;
 	}
 </style>

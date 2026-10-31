@@ -61,3 +61,14 @@ export const isConfidentSpotifyMatch = (track: BasicTrack, match: Match) => {
 					(artist.includes(requestedArtist) || requestedArtist.includes(artist)))
 		);
 };
+
+// Keep Spotify's relative order within each group, but never put a different
+// edition ahead of a title/artist-equivalent candidate from the same search.
+export const prioritizeConfidentSpotifyMatches = (track: BasicTrack, matches: Match[]) => {
+	const confident: Match[] = [];
+	const review: Match[] = [];
+	for (const match of matches) {
+		(isConfidentSpotifyMatch(track, match) ? confident : review).push(match);
+	}
+	return [...confident, ...review];
+};

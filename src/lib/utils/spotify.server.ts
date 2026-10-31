@@ -16,7 +16,7 @@ import {
 	createSpotifyPersistentCacheIdentity,
 	type SpotifyMatchCacheStorage
 } from './spotify-match-cache.server';
-import { isConfidentSpotifyMatch } from './spotify-match';
+import { isConfidentSpotifyMatch, prioritizeConfidentSpotifyMatches } from './spotify-match';
 
 const SEARCH_TIMEOUT_MS = 20_000;
 export const SPOTIFY_SEARCH_INTERVAL_MS = 2_000;
@@ -827,7 +827,16 @@ export const searchSpotifyTrack = async (
 		},
 		signal
 	);
-	return { ...result, artist: track.artist, title: track.title };
+	const matches = result.fallback
+		? result.matches
+		: prioritizeConfidentSpotifyMatches(track, result.matches);
+	return {
+		...result,
+		artist: track.artist,
+		title: track.title,
+		matches,
+		confident: !result.fallback && matches.length > 0 && isConfidentSpotifyMatch(track, matches[0])
+	};
 };
 
 export const resetSpotifyServerSessionForTests = () => {

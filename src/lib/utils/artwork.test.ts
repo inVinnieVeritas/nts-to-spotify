@@ -9,6 +9,10 @@ describe('official artwork origins', () => {
 		expect(
 			parseOfficialNTSArtworkUrl('https://media.ntslive.co.uk/resize/1600x0/example.png')
 		).toBe('https://media.ntslive.co.uk/resize/1600x0/example.png');
+		for (const hostname of ['media2.ntslive.co.uk', 'media3.ntslive.co.uk']) {
+			const url = `https://${hostname}/resize/800x800/example.jpeg`;
+			expect(parseOfficialNTSArtworkUrl(url)).toBe(url);
+		}
 		expect(parseOfficialSpotifyArtworkUrl('https://i.scdn.co/image/ab67616d00001e02')).toBe(
 			'https://i.scdn.co/image/ab67616d00001e02'
 		);
@@ -19,6 +23,11 @@ describe('official artwork origins', () => {
 		'https://user:pass@media.ntslive.co.uk/crop/770x770/example.jpg',
 		'https://media.ntslive.co.uk:8443/crop/770x770/example.jpg',
 		'https://media.ntslive.co.uk.evil.test/crop/770x770/example.jpg',
+		'https://media2.ntslive.co.uk.evil.test/resize/800x800/example.jpg',
+		'https://media20.ntslive.co.uk/resize/800x800/example.jpg',
+		'https://media3.ntslive.co.uk:8443/resize/800x800/example.jpg',
+		'https://user:pass@media2.ntslive.co.uk/resize/800x800/example.jpg',
+		'https://media2.ntslive.co.uk/resize/800x800/example.jpg?redirect=https://example.com',
 		'https://127.0.0.1/crop/770x770/example.jpg',
 		'https://192.168.1.2/crop/770x770/example.jpg',
 		'https://example.com/crop/770x770/example.jpg',

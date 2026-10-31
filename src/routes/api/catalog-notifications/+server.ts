@@ -21,6 +21,10 @@ export async function POST(event: RequestEvent) {
 		const b = JSON.parse(text);
 		const service = new CatalogueNotifications();
 		if (b.operation === 'subscribe') await service.subscribe(b.subscription, b.label);
+		else if (b.operation === 'test')
+			return json(await service.test(b.id, event.request.signal), {
+				headers: { 'Cache-Control': 'no-store' }
+			});
 		else if (b.operation === 'remove') await service.remove(b.id);
 		else return json({ error: 'invalid_request' }, { status: 400 });
 		return json({ saved: true });

@@ -89,6 +89,21 @@ describe('cloud progress', () => {
 		}) as unknown as typeof fetch;
 
 		const original = progress();
+		original.episodes['episode-one'] = {
+			...original.episodes['episode-one'],
+			tracks: [
+				{
+					artist: 'Eiger Drums Propaganda',
+					title: 'Thunderstrike',
+					matches: [],
+					confident: false,
+					fallback: true,
+					checked: false,
+					selectedMatch: null,
+					dismissed: true
+				}
+			]
+		};
 		const firstVersion = await saveCloudProgress('channeling', original, null, request);
 		expect(commits[0].writes).toHaveLength(3);
 		expect(commits[0].writes[0].update?.fields.payload.stringValue).toMatch(/^gz:/);

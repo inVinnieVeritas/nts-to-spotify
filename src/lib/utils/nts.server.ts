@@ -51,6 +51,21 @@ const getCover = (media?: NTSMedia) =>
 		.map(parseOfficialNTSArtworkUrl)
 		.find((cover): cover is string => Boolean(cover)) || '';
 
+// Artwork needs only show metadata, never episode pages or Spotify matching.
+export const getNTSShowArtwork = async (
+	showAlias: string,
+	request: Fetcher = fetch
+): Promise<string> => {
+	const show = await fetchWithTimeout(
+		request,
+		`${apiBase}/${showAlias}`,
+		{},
+		NTS_TIMEOUT_MS,
+		consumeJson<ShowResponse>('Unable to load NTS show artwork')
+	);
+	return getCover(show.media);
+};
+
 const mapEpisode = (episode: NTSEpisode): NTSEpisodeSummary => ({
 	episodeAlias: episode.episode_alias,
 	name: episode.name,

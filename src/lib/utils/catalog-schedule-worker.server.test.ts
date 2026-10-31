@@ -11,7 +11,11 @@ import {
 	type ScheduleWorkerDependencies
 } from './catalog-schedule-worker.server';
 import { SpotifyRateLimitError } from './spotify.server';
-import type { CatalogProgress, EpisodeState } from './catalog-scan';
+import {
+	createGeneratedPlaylistText,
+	type CatalogProgress,
+	type EpisodeState
+} from './catalog-scan';
 import type { CatalogSchedule } from './catalog-schedule';
 
 const episode = (index: number): EpisodeState => ({
@@ -92,6 +96,30 @@ async function fixture(count = 2) {
 	};
 }
 describe('unattended catalogue batches', () => {
+	it('saves repaired date metadata without discovering new episodes or issuing a new-episode notification', async () => {
+		const f = await fixture(2);
+		const copy = (await f.load())!;
+		for (const item of Object.values(copy.progress.episodes)) item.status = 'done';
+		const episodes = Object.values(copy.progress.episodes);
+		const stale = createGeneratedPlaylistText('Channeling', [episodes[0]], 'latest-first');
+		copy.progress.playlist.title = stale.title;
+		copy.progress.playlist.description = stale.description;
+		await f.deps.save('channeling', copy.progress, copy.version);
+		f.deps.notify = vi.fn(async () => {});
+		await runScheduledScan(f.deps);
+		const repaired = (await f.load())!.progress;
+		const expected = createGeneratedPlaylistText('Channeling', episodes, 'latest-first');
+		expect(repaired.playlist.title).toBe(expected.title);
+		expect(repaired.playlist.description).toBe(expected.description);
+		expect(repaired.episodes).toEqual(copy.progress.episodes);
+		expect(f.deps.match).not.toHaveBeenCalled();
+		expect(f.deps.notify).not.toHaveBeenCalledWith(
+			'new-episodes',
+			expect.anything(),
+			expect.anything()
+		);
+	});
+
 	it('runs the playlist boundary only after saved matching releases the scan lease', async () => {
 		const f = await fixture(1);
 		const notifications = vi.fn(async () => {});

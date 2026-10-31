@@ -309,6 +309,88 @@ describe('opt-in automatic linked playlist updates', () => {
 		delete f.progress.playlist.linkedPlaylistId;
 		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toThrow();
 	});
+	it('distinguishes active work from a durable Spotify cooldown before any Spotify reads', async () => {
+		const f = await fixture();
+		f.requests.length = 0;
+		const claim = await f.store.acquire('scheduled');
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'playlist_busy', status: 409, retryUntil: 0 }
+		);
+		await f.store.release(claim.lease!.id);
+		await f.store.cooldown(60, 'rate-limited');
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'spotify_rate_limited', status: 429, retryUntil: expect.any(Number) }
+		);
+		expect(f.requests).toEqual([]);
+		expect(await f.service.get('dimension-door')).toBeNull();
+	});
+	it('reports the manual-action hold and enables read-only after it expires', async () => {
+		const f = await fixture();
+		const retryUntil = Date.now() + 5 * 60_000;
+		await f.store.putAutomation(
+			'owned-' + createHash('sha256').update(playlistId).digest('hex'),
+			{ appCreated: true, manualUntil: retryUntil, uncertain: false },
+			null
+		);
+		f.requests.length = 0;
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'playlist_manual_wait', status: 409, retryUntil }
+		);
+		expect(f.requests).toEqual([]);
+		f.advance(5 * 60_000 + 1);
+		await f.service.configure('dimension-door', true, true, f.signal);
+		expect((await f.state()).enabled).toBe(true);
+		expect(f.writes()).toEqual([]);
+	});
+	it('distinguishes missing cloud progress, linkage and mismatched Spotify contents', async () => {
+		const f = await fixture();
+		vi.spyOn(f.service, 'load').mockResolvedValueOnce(null);
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'save_cloud_progress_first' }
+		);
+		f.progress.playlist.creationPending = true;
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'linked_playlist_required' }
+		);
+		delete f.progress.playlist.creationPending;
+		f.external();
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'playlist_sync_required' }
+		);
+		expect(f.writes()).toEqual([]);
+		expect(await f.service.get('dimension-door')).toBeNull();
+	});
+	it.each([
+		[401, 'spotify_authentication'],
+		[403, 'playlist_inaccessible'],
+		[404, 'playlist_not_found'],
+		[503, 'spotify_unavailable']
+	])('preserves the reason for a read-only Spotify preview failure (%s)', async (status, code) => {
+		const f = await fixture();
+		f.setOverride((url) =>
+			url.includes('/playlists/') ? new Response(null, { status }) : undefined
+		);
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code, status }
+		);
+		expect(f.writes()).toEqual([]);
+		expect(await f.service.get('dimension-door')).toBeNull();
+	});
+	it('reports a preview 429 and preserves its shared retry deadline', async () => {
+		const f = await fixture();
+		f.setOverride((url) =>
+			url.includes('/playlists/')
+				? new Response(null, { status: 429, headers: { 'Retry-After': '60' } })
+				: undefined
+		);
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{ code: 'spotify_rate_limited', status: 429, retryUntil: expect.any(Number) }
+		);
+		const claim = await f.store.acquire('playlist');
+		expect(claim.lease).toBeUndefined();
+		expect(claim.cooldownUntil).toBeGreaterThan(Date.now());
+		expect(f.writes()).toEqual([]);
+	});
 	it('uses the same playlist, newest first, deduplication, and preserves uncertain/manual choices', async () => {
 		const f = await fixture();
 		await f.enable();
@@ -490,7 +572,7 @@ describe('opt-in automatic linked playlist updates', () => {
 		expect((await f.state()).status).toBe('unchanged');
 	});
 	it.each([false, true])(
-		'handles a changed description for a hosted manual 257-track target without assuming encoding (escaped=%s)',
+		'completes a hosted manual 257-track target with plain or observed escaped descriptions (escaped=%s)',
 		async (escaped) => {
 			const f = await fixture();
 			await f.enable();
@@ -550,15 +632,6 @@ describe('opt-in automatic linked playlist updates', () => {
 				persist: async () => undefined,
 				delay: async () => undefined
 			});
-			if (escaped) {
-				expect(outcome.record.phase).toBe('settling');
-				expect(outcome.record.confirmedPosition).toBe(100);
-				expect(outcome.settlementDiagnostic).toContain('description');
-				expect(f.items).toEqual(target.tracks.slice(0, 100));
-				expect(f.writes().filter((r) => r.url.endsWith('/items'))).toHaveLength(1);
-				expect(f.progress).toEqual(reviewed);
-				return;
-			}
 			expect(outcome.type).toBe('completed');
 			expect(f.items).toEqual(target.tracks);
 			expect(f.progress).toEqual(reviewed);
@@ -695,62 +768,79 @@ describe('opt-in automatic linked playlist updates', () => {
 			).toBe(true);
 		}
 	);
-	it('verifies automatic updates against apostrophe-encoded reads using raw observed baselines', async () => {
-		const f = await fixture();
-		f.progress.playlist.description = "Jim O'Rourke archive";
-		f.setOverride((url) =>
-			url.includes('snapshot_id,name,description,public')
-				? Response.json({
-						id: playlistId,
-						owner: { id: 'owner' },
-						snapshot_id: 'initial',
-						name: f.progress.playlist.title,
-						description: 'Jim O&#x27;Rourke archive',
-						public: false
-					})
-				: undefined
-		);
-		await f.enable();
-		f.setOverride(undefined);
-		f.change();
-		// Preserve the fixture's real changing snapshot while encoding only description reads.
-		const upstream: typeof fetch = async (input, init) => {
-			const response = await f.request(input, init);
-			if (String(input).includes('snapshot_id,name,description,public')) {
-				const metadata = await response.json();
-				return Response.json({
-					...metadata,
-					description: metadata.description.replaceAll("'", '&#x27;')
-				});
-			}
-			return response;
-		};
-		const service = new AutomaticPlaylistService(
-			f.store,
-			upstream,
-			f.auth,
-			Date.now,
-			async () => ({ progress: structuredClone(f.progress), version: 'updated' }),
-			async () => {},
-			async () => 'updated'
-		);
-		const reviewed = structuredClone(f.progress);
-		await service.run('dimension-door', f.signal);
-		expect((await f.state()).status).toBe('updated');
-		expect(f.items).toEqual(automaticPlaylistTarget(f.progress).tracks);
-		expect(f.progress).toEqual(reviewed);
-		expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
-		expect(f.writes().find((r) => r.url.endsWith('/' + playlistId))?.body).toMatchObject({
-			description: "Jim O'Rourke archive"
-		});
-		const exact = await service.execute(
-			{ operation: 'preview', playlistId, ...automaticPlaylistTarget(f.progress) },
-			'dummy-access',
-			f.signal
-		);
-		expect(exact.body.synchronized).toBe(true);
-		expect((await f.state()).baseline).toBe(exact.body.stateFingerprint);
-	});
+	it.each([
+		{ description: "Jim O'Rourke archive", encoded: 'Jim O&#x27;Rourke archive' },
+		{
+			description: 'Crossed Wires w/ Amanda Siegel',
+			encoded: 'Crossed Wires w&#x2F; Amanda Siegel'
+		},
+		{ description: "Show w/ Jim O'Rourke", encoded: 'Show w&#x2F; Jim O&#x27;Rourke' },
+		{
+			description: 'Channeling w/ Ivan Smagghe & Nathan Gregory Wilkins',
+			encoded: 'Channeling w&#x2F; Ivan Smagghe &amp; Nathan Gregory Wilkins'
+		}
+	])(
+		'verifies automatic updates against observed encoded reads using raw baselines ($description)',
+		async ({ description, encoded }) => {
+			const f = await fixture();
+			f.progress.playlist.description = description;
+			f.setOverride((url) =>
+				url.includes('snapshot_id,name,description,public')
+					? Response.json({
+							id: playlistId,
+							owner: { id: 'owner' },
+							snapshot_id: 'initial',
+							name: f.progress.playlist.title,
+							description: encoded,
+							public: false
+						})
+					: undefined
+			);
+			await f.enable();
+			f.setOverride(undefined);
+			f.change();
+			// Preserve the real changing snapshot while encoding only description reads.
+			const upstream: typeof fetch = async (input, init) => {
+				const response = await f.request(input, init);
+				if (String(input).includes('snapshot_id,name,description,public')) {
+					const metadata = await response.json();
+					return Response.json({
+						...metadata,
+						description: metadata.description
+							.replaceAll('&', '&amp;')
+							.replaceAll("'", '&#x27;')
+							.replaceAll('/', '&#x2F;')
+					});
+				}
+				return response;
+			};
+			const service = new AutomaticPlaylistService(
+				f.store,
+				upstream,
+				f.auth,
+				Date.now,
+				async () => ({ progress: structuredClone(f.progress), version: 'updated' }),
+				async () => {},
+				async () => 'updated'
+			);
+			const reviewed = structuredClone(f.progress);
+			await service.run('dimension-door', f.signal);
+			expect((await f.state()).status).toBe('updated');
+			expect(f.items).toEqual(automaticPlaylistTarget(f.progress).tracks);
+			expect(f.progress).toEqual(reviewed);
+			expect(f.requests.some((r) => r.url.endsWith('/me/playlists'))).toBe(false);
+			expect(f.writes().find((r) => r.url.endsWith('/' + playlistId))?.body).toMatchObject({
+				description
+			});
+			const exact = await service.execute(
+				{ operation: 'preview', playlistId, ...automaticPlaylistTarget(f.progress) },
+				'dummy-access',
+				f.signal
+			);
+			expect(exact.body.synchronized).toBe(true);
+			expect((await f.state()).baseline).toBe(exact.body.stateFingerprint);
+		}
+	);
 	it('public status omits tokens, targets, lease data and recovery diagnostics', async () => {
 		const f = await fixture();
 		await f.enable();
@@ -874,7 +964,11 @@ describe('opt-in automatic linked playlist updates', () => {
 		expect((await f.state()).sync?.phase).toBe('uncertain');
 		f.setOverride(undefined);
 		f.requests.length = 0;
-		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toThrow();
+		await expect(f.service.configure('dimension-door', true, true, f.signal)).rejects.toMatchObject(
+			{
+				code: 'playlist_sync_uncertain'
+			}
+		);
 		expect(f.writes()).toEqual([]);
 	});
 });
