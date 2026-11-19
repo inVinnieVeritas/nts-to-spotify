@@ -21,8 +21,8 @@ import {
 	playlistSyncFeedback,
 	canRecoverAcknowledgedPlaylistSync,
 	canVerifyAcknowledgedPlaylistSync,
-	canRestartAcknowledgedPlaylistSync,
-	prepareAcknowledgedPlaylistRestart,
+	canStartFreshPlaylistSync,
+	prepareFreshPlaylistSync,
 	playlistSettlementDiagnostic,
 	type CatalogPlaylistSyncRecord,
 	type PlaylistSyncTarget
@@ -80,12 +80,7 @@ describe('explicit fresh synchronization after acknowledged work stopped', () =>
 				...(phase === 'settling' ? { settleUntil: NOW + 30_000 } : {})
 			});
 			const nextTarget = { ...target(1559), tracks: target(1559).tracks.reverse() };
-			const next = await prepareAcknowledgedPlaylistRestart(
-				old,
-				nextTarget,
-				'owner_1234567890',
-				NOW
-			);
+			const next = await prepareFreshPlaylistSync(old, nextTarget, 'owner_1234567890', NOW);
 			const api = upstream(1559, target(1538).tracks.slice(0, 100));
 			const outcome = await runPlaylistSyncBatches({
 				record: next,
@@ -115,7 +110,7 @@ describe('explicit fresh synchronization after acknowledged work stopped', () =>
 		});
 		const saved = structuredClone(old);
 		const nextTarget = { ...target(1559), name: 'New archive title', description: 'New dates' };
-		const next = await prepareAcknowledgedPlaylistRestart(old, nextTarget, 'owner_1234567890', NOW);
+		const next = await prepareFreshPlaylistSync(old, nextTarget, 'owner_1234567890', NOW);
 		expect(old).toEqual(saved);
 		expect(next).toMatchObject({
 			revision: 7,
@@ -152,6 +147,13 @@ describe('explicit fresh synchronization after acknowledged work stopped', () =>
 		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, restartRequired: true },
 		{ phase: 'settling', reason: 'settling', settleUntil: NOW + 30_000, snapshotId: undefined },
 		{ phase: 'ready', reason: undefined },
+		{ phase: 'interrupted', reason: 'uncertain' },
+		{
+			phase: 'interrupted',
+			reason: 'unavailable',
+			leaseOwner: 'other_owner_12345678',
+			leaseUntil: NOW + PLAYLIST_SYNC_LEASE_MS
+		},
 		{ phase: 'blocked', reason: 'external-change', confirmedPosition: 0 },
 		{ phase: 'blocked', reason: 'external-change', snapshotId: undefined },
 		{
@@ -169,9 +171,9 @@ describe('explicit fresh synchronization after acknowledged work stopped', () =>
 				reason: 'external-change',
 				...change
 			});
-			expect(canRestartAcknowledgedPlaylistSync(old, 'owner_1234567890', NOW)).toBe(false);
+			expect(canStartFreshPlaylistSync(old, 'owner_1234567890', NOW)).toBe(false);
 			await expect(
-				prepareAcknowledgedPlaylistRestart(old, target(200), 'owner_1234567890', NOW)
+				prepareFreshPlaylistSync(old, target(200), 'owner_1234567890', NOW)
 			).rejects.toThrow();
 		}
 	);
@@ -187,7 +189,7 @@ describe('acknowledged prefix recovery', () => {
 			settleUntil: NOW + 30_000
 		});
 		expect(canVerifyAcknowledgedPlaylistSync(record)).toBe(true);
-		expect(canRestartAcknowledgedPlaylistSync(record, 'owner_1234567890', NOW)).toBe(true);
+		expect(canStartFreshPlaylistSync(record, 'owner_1234567890', NOW)).toBe(true);
 		for (const invalid of [
 			{ ...record, phase: 'uncertain' as const, reason: 'uncertain' as const },
 			{ ...record, phase: 'dispatching' as const },

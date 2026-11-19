@@ -21,8 +21,8 @@
 		CATALOG_PLAYLIST_SYNC_VERSION,
 		canRecoverAcknowledgedPlaylistSync,
 		canVerifyAcknowledgedPlaylistSync,
-		canRestartAcknowledgedPlaylistSync,
-		prepareAcknowledgedPlaylistRestart,
+		canStartFreshPlaylistSync,
+		prepareFreshPlaylistSync,
 		PLAYLIST_SYNC_LEASE_MS,
 		createPlaylistSyncOperationId,
 		fingerprintPlaylistSyncTarget,
@@ -177,6 +177,12 @@
 		catalogueMode && linkedPlaylistId && !resumableSync && (!preview || preview.synchronized)
 	);
 	$: synchronizedComparison = Boolean(comparing && preview?.synchronized);
+	$: freshSyncAvailable = Boolean(
+		catalogueMode &&
+		linkedPlaylistId &&
+		linkedPlaylistId === localSyncRecord?.playlistId &&
+		canStartFreshPlaylistSync(localSyncRecord, tabOwner, syncNow)
+	);
 
 	const failureMessage = (payload: unknown) => {
 		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -370,22 +376,13 @@
 		}
 	};
 
-	const synchronizePlaylist = async (restartAcknowledged = false) => {
+	const synchronizePlaylist = async (startFresh = false) => {
 		if (!me || disabled || working || !tabOwner || syncEligibility.disabled) return;
 		const creatingNew = !linkedPlaylistId;
 		if (catalogueMode && creatingNew && creationPending) return;
-		if (
-			!restartAcknowledged &&
-			linkedPlaylistId &&
-			!resumableSync &&
-			(!preview || preview.synchronized)
-		)
+		if (!startFresh && linkedPlaylistId && !resumableSync && (!preview || preview.synchronized))
 			return;
-		if (
-			restartAcknowledged &&
-			(!catalogueMode || !canRestartAcknowledgedPlaylistSync(localSyncRecord, tabOwner, syncNow))
-		)
-			return;
+		if (startFresh && (!freshSyncAvailable || comparisonDisabled)) return;
 		const requestedSignature = inputSignature;
 		const restartStamp = playlistSyncRecordStamp(localSyncRecord);
 
@@ -412,11 +409,13 @@
 			const target = playlistTarget();
 			let restartRecord: CatalogPlaylistSyncRecord | undefined;
 			let restartPreview: ClientSpotifyPlaylistPreview | undefined;
-			if (restartAcknowledged) {
+			if (startFresh) {
 				const oldRecord = localSyncRecord!;
 				const oldStamp = playlistSyncRecordStamp(oldRecord);
 				const current = () =>
 					!disposed &&
+					!disabled &&
+					!comparisonDisabled &&
 					playlistController === controller &&
 					inputSignature === requestedSignature &&
 					playlistSyncRecordStamp(localSyncRecord) === oldStamp;
@@ -438,7 +437,7 @@
 					)
 				)
 					return;
-				restartRecord = await prepareAcknowledgedPlaylistRestart(oldRecord, target, tabOwner);
+				restartRecord = await prepareFreshPlaylistSync(oldRecord, target, tabOwner);
 				if (!current()) return;
 				restartPreview = fresh.parsed;
 			}
@@ -463,7 +462,7 @@
 					!canRecoverAcknowledgedPlaylistSync(localSyncRecord)
 				)
 			) {
-				failure = canRestartAcknowledgedPlaylistSync(localSyncRecord, tabOwner)
+				failure = freshSyncAvailable
 					? 'Your selection or playlist settings changed since this unfinished sync. Use Start fresh synchronization to check Spotify and confirm the current selection.'
 					: 'Restore the synchronization target before continuing. An unfinished operation cannot be replaced with different selections or settings.';
 				return;
@@ -488,8 +487,10 @@
 							...(creatingNew ? {} : { restartRequired: true })
 						});
 			if (
-				restartAcknowledged &&
+				startFresh &&
 				(disposed ||
+					disabled ||
+					comparisonDisabled ||
 					playlistController !== controller ||
 					inputSignature !== requestedSignature ||
 					playlistSyncRecordStamp(localSyncRecord) !== restartStamp)
@@ -641,7 +642,8 @@
 				: 'Spotify playlist synchronization failed. Please try again.';
 		} finally {
 			if (!disposed && playlistController === controller) {
-				if (failure) message = '';
+				if (failure || message === 'Checking Spotify before starting a fresh synchronization…')
+					message = '';
 				playlistController = undefined;
 				working = false;
 			}
@@ -950,7 +952,7 @@
 				>
 			</div>
 		{/if}
-		{#if catalogueMode && canRestartAcknowledgedPlaylistSync(localSyncRecord, tabOwner, syncNow)}
+		{#if freshSyncAvailable}
 			<Button
 				type="button"
 				size="sm"

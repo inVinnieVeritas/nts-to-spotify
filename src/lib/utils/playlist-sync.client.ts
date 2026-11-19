@@ -734,17 +734,20 @@ export const playlistSyncEligibility = (
 	};
 };
 
-// Acknowledged, stopped work may be superseded only by an explicit new manual
-// operation. This never authorizes appending the old prefix to a changed target.
-export const canRestartAcknowledgedPlaylistSync = (
+// Stopped work with no uncertain write can be superseded by a confirmed,
+// fresh preview. The new operation never appends to the old target's prefix.
+export const canStartFreshPlaylistSync = (
 	record: CatalogPlaylistSyncRecord | undefined,
 	owner: string,
 	now = Date.now()
 ) =>
-	canVerifyAcknowledgedPlaylistSync(record) &&
+	(canVerifyAcknowledgedPlaylistSync(record) ||
+		Boolean(
+			record?.playlistId && record.phase === 'interrupted' && record.reason !== 'uncertain'
+		)) &&
 	!playlistSyncEligibility(record, owner, now).disabled;
 
-export const prepareAcknowledgedPlaylistRestart = async (
+export const prepareFreshPlaylistSync = async (
 	record: CatalogPlaylistSyncRecord,
 	target: PlaylistSyncTarget,
 	owner: string,
@@ -752,7 +755,7 @@ export const prepareAcknowledgedPlaylistRestart = async (
 ): Promise<CatalogPlaylistSyncRecord> => {
 	if (
 		!isCatalogPlaylistSyncRecord(record, record.catalogueAlias, now) ||
-		!canRestartAcknowledgedPlaylistSync(record, owner, now)
+		!canStartFreshPlaylistSync(record, owner, now)
 	)
 		throw new Error('Playlist synchronization cannot be restarted');
 	return {

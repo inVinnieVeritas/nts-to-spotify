@@ -22,7 +22,7 @@ import {
 	playlistSyncRecordStamp,
 	createPlaylistSyncPreviewGuard,
 	requestPlaylistJson,
-	prepareAcknowledgedPlaylistRestart,
+	prepareFreshPlaylistSync,
 	type CatalogPlaylistSyncRecord
 } from './playlist-sync.client';
 import {
@@ -140,8 +140,8 @@ const memoryFactory = () => {
 };
 
 describe('catalogue playlist synchronization persistence', () => {
-	it.each(['blocked', 'settling'] as const)(
-		'claims a new operation for an explicitly restarted acknowledged %s, and rejects a stale restart',
+	it.each(['blocked', 'settling', 'interrupted'] as const)(
+		'claims a new operation for an explicitly restarted %s, and rejects a stale restart',
 		async (phase) => {
 			const { factory } = memoryFactory();
 			const options = { factory, timeoutMs: 100 };
@@ -149,7 +149,12 @@ describe('catalogue playlist synchronization persistence', () => {
 			const old: CatalogPlaylistSyncRecord = {
 				...syncRecord(),
 				phase,
-				reason: phase === 'blocked' ? 'external-change' : 'settling',
+				reason:
+					phase === 'blocked'
+						? 'external-change'
+						: phase === 'settling'
+							? 'settling'
+							: 'unavailable',
 				...(phase === 'settling' ? { settleUntil: 30_001 } : {})
 			};
 			await saveCatalogPlaylistSync(old, options);
@@ -162,7 +167,7 @@ describe('catalogue playlist synchronization persistence', () => {
 					(_, i) => `spotify:track:${String(i).padStart(22, '0')}`
 				)
 			};
-			const next = await prepareAcknowledgedPlaylistRestart(old, target, owner, 100);
+			const next = await prepareFreshPlaylistSync(old, target, owner, 100);
 			if (phase === 'settling') {
 				const changedWithinOld = {
 					...old,
@@ -220,7 +225,7 @@ describe('catalogue playlist synchronization persistence', () => {
 			reason: 'external-change'
 		};
 		await saveCatalogPlaylistSync(old, options);
-		const next = await prepareAcknowledgedPlaylistRestart(
+		const next = await prepareFreshPlaylistSync(
 			old,
 			{ name: 'Changed', description: '', public: true, tracks: [] },
 			owner,

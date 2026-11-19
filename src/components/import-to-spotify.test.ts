@@ -143,7 +143,7 @@ describe('fresh synchronization from a reloaded catalogue', () => {
 			settleUntil: 30_001
 		};
 		const { context, request, confirm, claim, run } = setup(record, 224);
-		expect(sync.canRestartAcknowledgedPlaylistSync(record, 'document_owner_12345')).toBe(true);
+		expect(sync.canStartFreshPlaylistSync(record, 'document_owner_12345')).toBe(true);
 		await context.driver.action(false);
 		expect(context.driver.snapshot().failure).toContain('Use Start fresh synchronization');
 		expect(claim).not.toHaveBeenCalled();
@@ -200,6 +200,30 @@ describe('fresh synchronization from a reloaded catalogue', () => {
 			record: { operationId: record.operationId, confirmedPosition: 300 },
 			recoverAcknowledgedPrefix: true
 		});
+	});
+	it('offers a fresh comparison for an interrupted sync with a different selection', async () => {
+		const record: sync.CatalogPlaylistSyncRecord = {
+			...old,
+			phase: 'interrupted',
+			reason: 'unavailable',
+			confirmedPosition: 0,
+			snapshotId: undefined,
+			restartRequired: true
+		};
+		const { context, request, confirm, claim, run } = setup(record, 224);
+		await context.driver.action(false);
+		expect(context.driver.snapshot().failure).toContain('Use Start fresh synchronization');
+		expect(request).not.toHaveBeenCalled();
+		expect(claim).not.toHaveBeenCalled();
+		await context.driver.action(true);
+		expect(request.mock.calls[0][1]).toMatchObject({ operation: 'preview', playlistId });
+		expect(confirm).toHaveBeenCalledWith(expect.stringContaining('224 selected tracks'));
+		expect(run.mock.calls[0][0]).toMatchObject({
+			record: { playlistId, confirmedPosition: 0, restartRequired: true, totalTrackCount: 224 },
+			recoverAcknowledgedPrefix: false,
+			previewFingerprint: 'b'.repeat(64)
+		});
+		expect(claim.mock.calls[0][0].operationId).not.toBe(record.operationId);
 	});
 	it('fetches a fresh preview with no pre-existing preview or resumable operation', async () => {
 		const { context, request, confirm, claim, run } = setup();
