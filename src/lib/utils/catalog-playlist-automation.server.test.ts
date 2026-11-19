@@ -151,6 +151,7 @@ async function fixture() {
 		auth,
 		service,
 		signal,
+		now,
 		get progress() {
 			return progress;
 		},
@@ -326,7 +327,7 @@ describe('opt-in automatic linked playlist updates', () => {
 	});
 	it('reports the manual-action hold and enables read-only after it expires', async () => {
 		const f = await fixture();
-		const retryUntil = Date.now() + 5 * 60_000;
+		const retryUntil = f.now() + 5 * 60_000;
 		await f.store.putAutomation(
 			'owned-' + createHash('sha256').update(playlistId).digest('hex'),
 			{ appCreated: true, manualUntil: retryUntil, uncertain: false },

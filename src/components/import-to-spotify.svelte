@@ -52,6 +52,7 @@
 
 	export let disabled = false;
 	export let disabledReason = '';
+	export let disabledReasonLink = '';
 	export let comparisonDisabled = false;
 	export let catalogueMode = false;
 	export let showAlias = '';
@@ -809,7 +810,12 @@
 	<div class="playlist-actions">
 		{#if message}<p class="font-small-beast" role="status">{message}</p>{/if}
 		{#if failure}<p class="font-small-beast" role="alert">{failure}</p>{/if}
-		{#if catalogueMode && syncFeedback.historicalStatus && !failure && !message}
+		{#if catalogueMode && disabled && disabledReason && !preview && !message}
+			<p class="font-small-beast" role="status">
+				{disabledReason}
+				{#if disabledReasonLink}<a href={disabledReasonLink}>Go to Progress and backups</a>{/if}
+			</p>
+		{:else if catalogueMode && syncFeedback.historicalStatus && !(disabled && disabledReason) && !failure && !message}
 			<p class="font-small-beast" role="status" aria-live="polite">
 				{syncFeedback.historicalStatus}
 			</p>
@@ -895,6 +901,7 @@
 					<p class="font-small-beast">
 						{disabledReason ||
 							'Comparing tracks selected so far. Finish scanning before applying a playlist update. Linking does not restore scan progress or review choices.'}
+						{#if disabledReasonLink}<a href={disabledReasonLink}>Go to Progress and backups</a>{/if}
 					</p>
 				{/if}
 				{#if preview.synchronized}

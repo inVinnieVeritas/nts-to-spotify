@@ -2012,10 +2012,11 @@
 		<ImportToSpotify
 			catalogueMode
 			disabledReason={cloudState === 'conflict'
-				? 'Resolve the cloud progress conflict before updating Spotify.'
+				? 'Spotify sync is paused because this browser and the cloud have different catalogue progress.'
 				: cloudBusy || cloudState === 'checking'
 					? 'Checking the latest cloud progress before updating Spotify.'
 					: ''}
+			disabledReasonLink={cloudState === 'conflict' ? '#catalogue-progress-heading' : ''}
 			disabled={!scanComplete ||
 				scanning ||
 				cloudBusy ||
