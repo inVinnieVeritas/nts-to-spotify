@@ -123,6 +123,15 @@ target still fences automatic writes. After exact synchronization, explicitly re
 only if desired, after the displayed cooldown/lease expires; re-enabling verifies the full state.
 An uncertain registry is never cleared by this recovery path.
 
+For a browser that shows **Manual verification required**, a registered hosted playlist may offer
+**Add missing tracks only** after a fresh comparison. The server requires no unresolved write or
+unfinished automatic operation, and every current entry must be a distinct selected track. It
+appends the missing tracks at the end, preserving the playlist link, existing order and metadata.
+Each batch needs the last acknowledged Spotify snapshot. Recovery reports success only after a
+complete read verifies the resulting sequence. A known conflict or rate limit may allow another
+comparison of the partial result; an unacknowledged write keeps the server block. This action does
+not clear the older browser record or turn automatic updates back on.
+
 For this code-only redeployment, use a clean Cloud Shell checkout of this branch at the fix commit
 reported in the PR. Keep all existing environment, IAM/IAP, secrets and scheduler settings; do not
 regenerate keys, configure a new trigger, or rerun one-time setup. Pin both workloads to one digest:

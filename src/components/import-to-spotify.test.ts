@@ -124,7 +124,9 @@ const setup = (record = old, count = tracks.length) => {
 			},
 			changeTitle() { data = { ...data, title: 'Changed during preview' }; refreshDerivedState(); },
 			action: synchronizePlaylist,
-			snapshot() { return { record: localSyncRecord, failure, working, resumableSync, preview, buttonLabel }; }
+			compare: previewPlaylist,
+			addMissing: addMissingTracks,
+			snapshot() { return { record: localSyncRecord, failure, message, working, resumableSync, preview, buttonLabel, missingTrackRecovery }; }
 		};`,
 		context
 	);
@@ -133,6 +135,35 @@ const setup = (record = old, count = tracks.length) => {
 	context.driver.configure(record);
 	return { context, confirm, request, claim, run };
 };
+
+describe('missing-track recovery', () => {
+	it('uses a fresh comparison and explicit approval to add missing tracks without clearing the old write record', async () => {
+		const record: sync.CatalogPlaylistSyncRecord = { ...old, reason: 'uncertain' };
+		const { context, request, confirm, claim, run } = setup(record, 257);
+		expect(context.driver.snapshot().missingTrackRecovery).toBe(true);
+		await context.driver.addMissing();
+		expect(request).not.toHaveBeenCalled();
+		await context.driver.compare();
+		confirm.mockReturnValueOnce(false);
+		await context.driver.addMissing();
+		expect(request).toHaveBeenCalledTimes(1);
+		expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('157 missing tracks'));
+		request.mockResolvedValueOnce({
+			response: new Response(null),
+			body: { mode: 'missing-added', playlistId, added: 157, totalTrackCount: 257 }
+		} as unknown as Awaited<ReturnType<typeof request>>);
+		await context.driver.addMissing();
+		expect(request.mock.calls[1][1]).toMatchObject({
+			operation: 'add-missing',
+			playlistId,
+			previewFingerprint: 'b'.repeat(64)
+		});
+		expect(context.driver.snapshot().message).toContain('Verified 257 tracks');
+		expect(context.driver.snapshot().record).toEqual(record);
+		expect(claim).not.toHaveBeenCalled();
+		expect(run).not.toHaveBeenCalled();
+	});
+});
 
 describe('fresh synchronization from a reloaded catalogue', () => {
 	it('offers a confirmed fresh 224-track target after a changed-target settling operation, keeping the old record on cancellation', async () => {

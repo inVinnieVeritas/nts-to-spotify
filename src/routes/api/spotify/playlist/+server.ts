@@ -8,6 +8,7 @@ import {
 	uniqueSpotifyUris
 } from '$lib/utils/catalog-scan';
 import {
+	abortableDelay,
 	createAbortError,
 	createAbortScope,
 	isAbortError,
@@ -45,7 +46,7 @@ type PlaylistPreviewRequest = PlaylistTargetRequest & {
 };
 
 type PlaylistApplyBatchRequest = PlaylistTargetRequest & {
-	operation: 'apply-batch';
+	operation: 'apply-batch' | 'add-missing';
 	playlistId: string;
 	previewFingerprint: string;
 };
@@ -274,7 +275,8 @@ export const _parseRequest = async (
 	if (
 		value.operation !== 'create' &&
 		value.operation !== 'preview' &&
-		value.operation !== 'apply-batch'
+		value.operation !== 'apply-batch' &&
+		value.operation !== 'add-missing'
 	) {
 		throw new SpotifyPlaylistFailure('request-rejected');
 	}
@@ -303,8 +305,7 @@ export const _parseRequest = async (
 		!Array.isArray(tracks) ||
 		tracks.length > SPOTIFY_PLAYLIST_MAX_TRACKS ||
 		!tracks.every((track) => canonicalSpotifyTrackUri(track) !== null) ||
-		((value.operation === 'preview' || value.operation === 'apply-batch') &&
-			!isSpotifyPlaylistId(playlistId))
+		!isSpotifyPlaylistId(playlistId)
 	) {
 		throw new SpotifyPlaylistFailure('request-rejected');
 	}
@@ -708,6 +709,82 @@ export const _handlePlaylistRequest = async (
 				stateFingerprint: fingerprintSpotifyPlaylist(current),
 				snapshotId: current.snapshotId,
 				...preview
+			});
+		}
+		if (payload.operation === 'add-missing') {
+			// Recovery must pass the hosted coordinator, including its durable write fence.
+			if (background || !beforeMutation)
+				return json({ error: 'playlist_recovery_unavailable' }, { status: 409 });
+			const playlistId = payload.playlistId;
+			const current = await readOwnedPlaylistState(event, headers, userId, playlistId, signal);
+			if (fingerprintSpotifyPlaylistPreview(current, payload) !== payload.previewFingerprint)
+				throw new SpotifyPlaylistFailure('stale-preview');
+			const observed = new Set(current.items);
+			const wanted = new Set(payload.tracks);
+			if (
+				!current.items.length ||
+				observed.size !== current.items.length ||
+				current.items.some((uri) => uri === null || !wanted.has(uri))
+			)
+				return json({ error: 'playlist_recovery_selection_mismatch' }, { status: 409 });
+			const missing = payload.tracks.filter((uri) => !observed.has(uri));
+			const unchangedMetadata = (state: Pick<typeof current, 'name' | 'description' | 'public'>) =>
+				state.name === current.name &&
+				state.description === current.description &&
+				state.public === current.public;
+			let expectedSnapshotId = current.snapshotId;
+			let previousSnapshotId: string | undefined;
+			const verifySnapshot = async () => {
+				for (let attempt = 0; attempt < 3; attempt += 1) {
+					const snapshot = await readOwnedPlaylistSnapshot(
+						event,
+						headers,
+						userId,
+						playlistId,
+						signal
+					);
+					if (!unchangedMetadata(snapshot)) break;
+					if (snapshot.snapshotId === expectedSnapshotId) return;
+					if (snapshot.snapshotId !== previousSnapshotId || attempt === 2) break;
+					await abortableDelay(1500, signal);
+				}
+				throw new SpotifyPlaylistFailure('stale-sync');
+			};
+			for (let index = 0; index < missing.length; index += 100) {
+				await verifySnapshot();
+				await beforeMutation();
+				mutationStarted = true;
+				previousSnapshotId = expectedSnapshotId;
+				expectedSnapshotId = validatedMutationSnapshot(
+					await requestSpotify(
+						event.fetch,
+						`https://api.spotify.com/v1/playlists/${playlistId}/items`,
+						{
+							method: 'POST',
+							headers,
+							body: JSON.stringify({ uris: missing.slice(index, index + 100) })
+						},
+						signal,
+						{ json: true, notFound: true }
+					)
+				);
+			}
+			await verifySnapshot();
+			const final = await readOwnedPlaylistState(event, headers, userId, playlistId, signal);
+			const expected = [...current.items, ...missing];
+			if (
+				final.snapshotId !== expectedSnapshotId ||
+				!unchangedMetadata(final) ||
+				final.items.length !== expected.length ||
+				final.items.some((uri, index) => uri !== expected[index])
+			)
+				throw new SpotifyPlaylistFailure('stale-sync');
+			await verifySnapshot();
+			return json({
+				mode: 'missing-added',
+				playlistId,
+				added: missing.length,
+				totalTrackCount: expected.length
 			});
 		}
 		if (payload.operation === 'create') {

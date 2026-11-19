@@ -550,6 +550,47 @@ export async function coordinateManualPlaylistRequest(
 			'playlistId' in body
 				? await store.getAutomation(registryId(body.playlistId), isRegistry)
 				: null;
+		if (body.operation === 'add-missing') {
+			if (!old) return json({ error: 'playlist_recovery_unavailable' }, { status: 409 });
+			const automatic = old.value.automaticShow
+				? await store.getAutomation(id(old.value.automaticShow), isAutomaticPlaylistRecord)
+				: null;
+			if (
+				old.value.uncertain ||
+				(automatic?.value.sync && automatic.value.sync.phase !== 'completed')
+			)
+				return json({ error: 'playlist_recovery_blocked' }, { status: 409 });
+			const key = registryId(body.playlistId);
+			const target = {
+				name: body.name,
+				description: body.description,
+				public: body.public,
+				tracks: body.tracks
+			};
+			let version: string | undefined;
+			let fenced: Registry | undefined;
+			const response = (result = await perform(async () => {
+				await store.renew(claim.lease!.id);
+				if (!version) {
+					// Keep automation off this playlist even if recovery ends with different
+					// metadata or ordering. All additions use the same exclusive lease.
+					fenced = { ...old.value, target, uncertain: true, manualUntil: Date.now() + 5 * 60_000 };
+					version = await store.putAutomation(key, fenced, old.version);
+				}
+			}));
+			if (response.status === 429) {
+				const reply = await response
+					.clone()
+					.json()
+					.catch(() => null);
+				if (isSafeRetryAfterSeconds(reply?.retryAfterSeconds))
+					await store.cooldown(reply.retryAfterSeconds, 'rate-limited');
+			}
+			// No automatic retry on a timeout, abort, upstream 5xx, or missing acknowledgement.
+			if (version && fenced && !signal.aborted && response.status < 500)
+				await store.putAutomation(key, { ...fenced, uncertain: false }, version);
+			return response;
+		}
 		if (old && ['apply-batch', 'append'].includes(body.operation)) {
 			const automation = old.value.automaticShow
 				? await store.getAutomation(id(old.value.automaticShow), isAutomaticPlaylistRecord)

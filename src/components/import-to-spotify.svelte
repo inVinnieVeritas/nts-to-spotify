@@ -183,6 +183,15 @@
 		linkedPlaylistId === localSyncRecord?.playlistId &&
 		canStartFreshPlaylistSync(localSyncRecord, tabOwner, syncNow)
 	);
+	$: missingTrackRecovery = Boolean(
+		catalogueMode &&
+		linkedPlaylistId &&
+		linkedPlaylistId === localSyncRecord?.playlistId &&
+		localSyncRecord?.phase === 'blocked' &&
+		localSyncRecord.reason === 'uncertain' &&
+		(localSyncRecord.quarantineUntil ?? 0) <= syncNow &&
+		(localSyncRecord.leaseUntil ?? 0) <= syncNow
+	);
 
 	const failureMessage = (payload: unknown) => {
 		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -198,6 +207,21 @@
 		}
 		if (error === 'playlist_changed_since_preview') {
 			return 'Spotify playlist changed. Preview it again.';
+		}
+		if (error === 'playlist_changed_since_sync') {
+			return 'Spotify’s playlist version changed or has not caught up. No further tracks were added. Compare again before continuing.';
+		}
+		if (error === 'playlist_recovery_blocked') {
+			return 'The server still has an unresolved Spotify write or automatic update. No tracks were sent.';
+		}
+		if (error === 'playlist_recovery_unavailable') {
+			return 'The server cannot verify this playlist’s saved sync status. No tracks were sent.';
+		}
+		if (error === 'playlist_recovery_selection_mismatch') {
+			return 'Spotify’s current entries do not all match this selection. No tracks were sent.';
+		}
+		if (error === 'playlist_busy') {
+			return 'Another catalogue action is using Spotify. Compare again once it finishes.';
 		}
 		if (error === 'spotify_authentication') {
 			return (payload as Record<string, unknown>).incomplete === true
@@ -370,6 +394,78 @@
 		} finally {
 			if (!disposed && playlistController === controller) {
 				if (!current()) message = '';
+				playlistController = undefined;
+				working = false;
+			}
+		}
+	};
+
+	const addMissingTracks = async () => {
+		const compared = preview;
+		const playlistId = linkedPlaylistId;
+		if (
+			!me ||
+			!playlistId ||
+			!missingTrackRecovery ||
+			disabled ||
+			comparisonDisabled ||
+			working ||
+			!compared ||
+			!compared.addedCount ||
+			!compared.retainedCount ||
+			compared.removedCount !== 0 ||
+			compared.inputSignature !== inputSignature ||
+			previewSyncStamp !== playlistSyncRecordStamp(localSyncRecord)
+		)
+			return;
+		if (
+			!window.confirm(
+				`Add ${compared.addedCount.toLocaleString('en-US')} missing tracks to the end of this Spotify playlist? The ${compared.retainedCount.toLocaleString('en-US')} existing tracks, their order, and the playlist details will stay in place.`
+			)
+		)
+			return;
+		const controller = new AbortController();
+		const target = playlistTarget();
+		playlistController = controller;
+		working = true;
+		failure = '';
+		preview = undefined;
+		previewSyncStamp = undefined;
+		message = 'Adding and verifying missing Spotify tracks…';
+		const current = () => !disposed && playlistController === controller;
+		try {
+			const { response, body } = await requestApi(
+				{
+					operation: 'add-missing',
+					playlistId,
+					previewFingerprint: compared.previewFingerprint,
+					...target
+				},
+				controller.signal
+			);
+			if (!current()) return;
+			if (
+				response.ok &&
+				body?.mode === 'missing-added' &&
+				body.playlistId === playlistId &&
+				body.added === compared.addedCount &&
+				body.totalTrackCount === target.tracks.length
+			) {
+				message = `Verified ${target.tracks.length.toLocaleString('en-US')} tracks on Spotify. The original tracks and playlist details were preserved.`;
+			} else {
+				message = '';
+				failure =
+					response.status >= 500 || response.ok
+						? 'Spotify did not confirm the recovery. Check the playlist before sending any further updates.'
+						: failureMessage(body);
+			}
+		} catch {
+			if (!current()) return;
+			message = '';
+			failure =
+				'Spotify did not confirm the recovery. Check the playlist before sending any further updates.';
+		} finally {
+			if (current()) {
 				playlistController = undefined;
 				working = false;
 			}
@@ -817,6 +913,11 @@
 				{disabledReason}
 				{#if disabledReasonLink}<a href={disabledReasonLink}>Go to Progress and backups</a>{/if}
 			</p>
+		{:else if missingTrackRecovery && !failure && !message}
+			<p class="font-small-beast" role="status">
+				The earlier synchronization needs verification. Compare first to see if missing tracks can
+				be added on their own.
+			</p>
 		{:else if catalogueMode && syncFeedback.historicalStatus && !(disabled && disabledReason) && !failure && !message}
 			<p class="font-small-beast" role="status" aria-live="polite">
 				{syncFeedback.historicalStatus}
@@ -917,14 +1018,34 @@
 						<strong>{preview.removedCount}</strong> playlist entries outside the selection
 					</p>
 					<ul class="font-small-beast">
-						<li>Playlist order {preview.orderChanged ? 'will change' : 'is unchanged'}</li>
-						<li>Title {preview.titleChanged ? 'will change' : 'is unchanged'}</li>
-						<li>Description {preview.descriptionChanged ? 'will change' : 'is unchanged'}</li>
-						<li>
-							Public/private visibility {preview.visibilityChanged ? 'will change' : 'is unchanged'}
-						</li>
+						{#if missingTrackRecovery}
+							<li>
+								Recovery adds only missing tracks at the end. It keeps playlist details and existing
+								tracks in place.
+							</li>
+						{:else}
+							<li>Playlist order {preview.orderChanged ? 'will change' : 'is unchanged'}</li>
+							<li>Title {preview.titleChanged ? 'will change' : 'is unchanged'}</li>
+							<li>Description {preview.descriptionChanged ? 'will change' : 'is unchanged'}</li>
+							<li>
+								Public/private visibility {preview.visibilityChanged
+									? 'will change'
+									: 'is unchanged'}
+							</li>
+						{/if}
 					</ul>
-					{#if canRecoverAcknowledgedPlaylistSync(localSyncRecord)}
+					{#if missingTrackRecovery}
+						{#if preview.addedCount > 0 && preview.retainedCount > 0 && preview.removedCount === 0}
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								disabled={working || disabled || comparisonDisabled || !me?.id}
+								on:click={() => runExclusivePlaylistAction(primaryActionGate, addMissingTracks)}
+								>Add missing tracks only</Button
+							>
+						{/if}
+					{:else if canRecoverAcknowledgedPlaylistSync(localSyncRecord)}
 						<p class="font-small-beast">
 							Resume checks the exact acknowledged tracks, their order and playlist settings. If
 							they match and Spotify's current version stays stable during the check, it accepts
@@ -951,6 +1072,16 @@
 					>{synchronizedComparison ? 'Compare again' : 'Dismiss preview'}</Button
 				>
 			</div>
+		{/if}
+		{#if missingTrackRecovery && !preview}
+			<Button
+				type="button"
+				size="sm"
+				variant="outline"
+				disabled={working || comparisonDisabled || !me?.id}
+				on:click={() => runExclusivePlaylistAction(primaryActionGate, previewPlaylist)}
+				>Compare with Spotify playlist</Button
+			>
 		{/if}
 		{#if freshSyncAvailable}
 			<Button

@@ -69,7 +69,7 @@ const episode = (n: number, tracks: ReviewTrack[]): EpisodeState => ({
 	status: 'done',
 	tracks
 });
-async function fixture() {
+async function fixture(initialTracks = [1]) {
 	const fs = fakeFirestore();
 	let clock = Date.now();
 	const now = () => clock;
@@ -79,7 +79,12 @@ async function fixture() {
 		matcherVersion: 1,
 		showAlias: 'dimension-door',
 		updatedAt: clock,
-		episodes: { 'episode-1': episode(1, [track(1)]) },
+		episodes: {
+			'episode-1': episode(
+				1,
+				initialTracks.map((n) => track(n))
+			)
+		},
 		playlist: {
 			title: 'Fixture playlist',
 			description: 'Fixture',
@@ -88,7 +93,7 @@ async function fixture() {
 			linkedPlaylistId: playlistId
 		}
 	};
-	let items = [uri(1)];
+	let items = initialTracks.map(uri);
 	let snapshot = 'initial';
 	let sequence = 0;
 	let stale = 0;
@@ -190,6 +195,97 @@ async function fixture() {
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.useRealTimers();
+});
+
+describe('add only missing Spotify tracks', () => {
+	const key = 'owned-' + createHash('sha256').update(playlistId).digest('hex');
+	const register = (f: Awaited<ReturnType<typeof fixture>>, uncertain = false) =>
+		f.store.putAutomation(key, { appCreated: true, manualUntil: 0, uncertain }, null);
+	const post = (f: Awaited<ReturnType<typeof fixture>>, body: unknown) =>
+		POST({
+			fetch: f.request,
+			request: new Request('https://nts2spotify.vincentvanderveken.com/api/spotify/playlist', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			})
+		} as never);
+	const plan = async (f: Awaited<ReturnType<typeof fixture>>, tracks: string[]) => {
+		const target = {
+			name: 'Keep the Spotify title instead',
+			description: 'Do not write this description',
+			public: true,
+			tracks
+		};
+		const preview = await (await post(f, { operation: 'preview', playlistId, ...target })).json();
+		return {
+			operation: 'add-missing',
+			playlistId,
+			previewFingerprint: preview.previewFingerprint,
+			...target
+		};
+	};
+	it('recovers 2,845 tracks on the original playlist without replacing the 200 entries or writing metadata', async () => {
+		const existing = Array.from({ length: 200 }, (_, i) => 200 - i);
+		const f = await fixture(existing);
+		await register(f);
+		const selected = Array.from({ length: 2845 }, (_, i) => uri(i + 1));
+		const response = await post(f, await plan(f, selected));
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			mode: 'missing-added',
+			playlistId,
+			added: 2645,
+			totalTrackCount: 2845
+		});
+		expect(f.writes()).toHaveLength(27);
+		expect(
+			f
+				.writes()
+				.every(({ method, url }) => method === 'POST' && url.endsWith(`/${playlistId}/items`))
+		).toBe(true);
+		expect(f.items).toEqual([...existing.map(uri), ...selected.slice(200)]);
+	});
+	it('blocks recovery before reaching Spotify when the server still has an uncertain write', async () => {
+		const f = await fixture();
+		await register(f, true);
+		const body = await plan(f, [uri(1), uri(2)]);
+		f.requests.length = 0;
+		const response = await post(f, body);
+		expect(await response.json()).toEqual({ error: 'playlist_recovery_blocked' });
+		expect(response.status).toBe(409);
+		expect(f.requests).toEqual([]);
+	});
+	it('rejects an edit after approval and also rejects a new preview with tracks outside the selection', async () => {
+		const f = await fixture();
+		await register(f);
+		const body = await plan(f, [uri(1), uri(2)]);
+		f.external();
+		const stale = await post(f, body);
+		expect(await stale.json()).toEqual({ error: 'playlist_changed_since_preview' });
+		const outside = await post(f, await plan(f, [uri(1), uri(2)]));
+		expect(await outside.json()).toEqual({ error: 'playlist_recovery_selection_mismatch' });
+		expect(f.writes()).toEqual([]);
+		expect(f.items).toEqual([uri(1), uri(99)]);
+	});
+	it('retains the original tracks and fences further attempts after an unacknowledged append', async () => {
+		const f = await fixture();
+		await register(f);
+		const selected = Array.from({ length: 258 }, (_, i) => uri(i + 1));
+		const body = await plan(f, selected);
+		let writes = 0;
+		f.setOverride((url, init) =>
+			url.endsWith('/items') && init?.method === 'POST' && ++writes === 2
+				? new Response(null, { status: 503 })
+				: undefined
+		);
+		const response = await post(f, body);
+		expect(response.status).toBe(503);
+		expect(f.items).toEqual(selected.slice(0, 101));
+		const retry = await post(f, await plan(f, selected));
+		expect(await retry.json()).toEqual({ error: 'playlist_recovery_blocked' });
+		expect(f.writes()).toHaveLength(2);
+	});
 });
 describe('opt-in automatic linked playlist updates', () => {
 	it('spans scheduled matching, real cloud persistence and the shared Spotify endpoint', async () => {
