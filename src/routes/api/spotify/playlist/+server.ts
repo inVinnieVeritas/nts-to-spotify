@@ -732,20 +732,43 @@ export const _handlePlaylistRequest = async (
 				state.name === current.name &&
 				state.description === current.description &&
 				state.public === current.public;
+			const expected = [...current.items];
+			const isExpectedPrefix = (items: (string | null)[]) =>
+				items.length <= expected.length && items.every((uri, index) => uri === expected[index]);
 			let expectedSnapshotId = current.snapshotId;
 			let previousSnapshotId: string | undefined;
-			const verifySnapshot = async () => {
+			const verifySnapshot = async (verifyContents = false) => {
 				for (let attempt = 0; attempt < 3; attempt += 1) {
-					const snapshot = await readOwnedPlaylistSnapshot(
+					const before = await readOwnedPlaylistSnapshot(
 						event,
 						headers,
 						userId,
 						playlistId,
 						signal
 					);
-					if (!unchangedMetadata(snapshot)) break;
-					if (snapshot.snapshotId === expectedSnapshotId) return;
-					if (snapshot.snapshotId !== previousSnapshotId || attempt === 2) break;
+					if (!unchangedMetadata(before)) break;
+					// Before the first write, the user-approved preview must still match.
+					if (previousSnapshotId === undefined && before.snapshotId !== expectedSnapshotId) break;
+					if (
+						!verifyContents &&
+						before.snapshotId === expectedSnapshotId &&
+						before.snapshotId !== previousSnapshotId
+					)
+						return;
+
+					// Every append so far was acknowledged. A different version can be
+					// used only when stable reads bracket the complete expected sequence.
+					const items = await readPlaylistItems(event, headers, playlistId, signal);
+					const after = await readOwnedPlaylistSnapshot(event, headers, userId, playlistId, signal);
+					if (!unchangedMetadata(after)) break;
+					if (before.snapshotId === after.snapshotId) {
+						if (!isExpectedPrefix(items)) break;
+						if (items.length === expected.length) {
+							expectedSnapshotId = after.snapshotId;
+							return;
+						}
+					}
+					if (attempt === 2) break;
 					await abortableDelay(1500, signal);
 				}
 				throw new SpotifyPlaylistFailure('stale-sync');
@@ -753,6 +776,7 @@ export const _handlePlaylistRequest = async (
 			for (let index = 0; index < missing.length; index += 100) {
 				await verifySnapshot();
 				await beforeMutation();
+				const batch = missing.slice(index, index + 100);
 				mutationStarted = true;
 				previousSnapshotId = expectedSnapshotId;
 				expectedSnapshotId = validatedMutationSnapshot(
@@ -762,24 +786,15 @@ export const _handlePlaylistRequest = async (
 						{
 							method: 'POST',
 							headers,
-							body: JSON.stringify({ uris: missing.slice(index, index + 100) })
+							body: JSON.stringify({ uris: batch })
 						},
 						signal,
 						{ json: true, notFound: true }
 					)
 				);
+				expected.push(...batch);
 			}
-			await verifySnapshot();
-			const final = await readOwnedPlaylistState(event, headers, userId, playlistId, signal);
-			const expected = [...current.items, ...missing];
-			if (
-				final.snapshotId !== expectedSnapshotId ||
-				!unchangedMetadata(final) ||
-				final.items.length !== expected.length ||
-				final.items.some((uri, index) => uri !== expected[index])
-			)
-				throw new SpotifyPlaylistFailure('stale-sync');
-			await verifySnapshot();
+			await verifySnapshot(true);
 			return json({
 				mode: 'missing-added',
 				playlistId,

@@ -201,9 +201,9 @@ describe('add only missing Spotify tracks', () => {
 	const key = 'owned-' + createHash('sha256').update(playlistId).digest('hex');
 	const register = (f: Awaited<ReturnType<typeof fixture>>, uncertain = false) =>
 		f.store.putAutomation(key, { appCreated: true, manualUntil: 0, uncertain }, null);
-	const post = (f: Awaited<ReturnType<typeof fixture>>, body: unknown) =>
+	const post = (f: Awaited<ReturnType<typeof fixture>>, body: unknown, request = f.request) =>
 		POST({
-			fetch: f.request,
+			fetch: request,
 			request: new Request('https://nts2spotify.vincentvanderveken.com/api/spotify/playlist', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -245,6 +245,72 @@ describe('add only missing Spotify tracks', () => {
 				.every(({ method, url }) => method === 'POST' && url.endsWith(`/${playlistId}/items`))
 		).toBe(true);
 		expect(f.items).toEqual([...existing.map(uri), ...selected.slice(200)]);
+	});
+	it('finishes from 400 tracks when the acknowledged version differs from the stable read after every append', async () => {
+		const existing = Array.from({ length: 400 }, (_, i) => 400 - i);
+		const f = await fixture(existing);
+		await register(f);
+		const selected = Array.from({ length: 2845 }, (_, i) => uri(i + 1));
+		const body = await plan(f, selected);
+		const request: typeof fetch = async (input, init) => {
+			const response = await f.request(input, init);
+			if (!String(input).endsWith('/items') || init?.method !== 'POST') return response;
+			const acknowledged = await response.json();
+			return Response.json({ snapshot_id: `acknowledged-${acknowledged.snapshot_id}` });
+		};
+		const response = await post(f, body, request);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ added: 2445, totalTrackCount: 2845 });
+		expect(f.writes()).toHaveLength(25);
+		expect(f.items).toEqual([...existing.map(uri), ...selected.slice(400)]);
+	});
+	it('does not send the next batch until the acknowledged contents are visible', async () => {
+		const f = await fixture([1, 2]);
+		await register(f);
+		const selected = Array.from({ length: 123 }, (_, i) => uri(i + 1));
+		const body = await plan(f, selected);
+		let oldMetadataReads = 0;
+		let observedCurrentVersion = false;
+		const request: typeof fetch = async (input, init) => {
+			const url = String(input);
+			const firstBatchSent = f.writes().length === 1;
+			if (firstBatchSent && url.endsWith('/items') && init?.method === 'POST')
+				expect(observedCurrentVersion).toBe(true);
+			const response = await f.request(input, init);
+			if (firstBatchSent && url.includes('snapshot_id,name,description,public')) {
+				oldMetadataReads += 1;
+				if (oldMetadataReads <= 2)
+					return Response.json({ ...(await response.json()), snapshot_id: 'initial' });
+				observedCurrentVersion = true;
+			}
+			if (firstBatchSent && oldMetadataReads === 1 && url.includes('/items?'))
+				return Response.json({
+					total: 2,
+					items: [uri(1), uri(2)].map((uri) => ({ item: { type: 'track', uri } }))
+				});
+			return response;
+		};
+		const response = await post(f, body, request);
+		expect(response.status).toBe(200);
+		expect(oldMetadataReads).toBeGreaterThanOrEqual(3);
+		expect(f.items).toEqual(selected);
+	});
+	it('does not adopt a settled version with a different order even when the count matches', async () => {
+		const f = await fixture([1, 2]);
+		await register(f);
+		const selected = Array.from({ length: 240 }, (_, i) => uri(i + 1));
+		const body = await plan(f, selected);
+		const request: typeof fetch = async (input, init) => {
+			const response = await f.request(input, init);
+			if (!String(input).endsWith('/items') || init?.method !== 'POST') return response;
+			[f.items[0], f.items[1]] = [f.items[1], f.items[0]];
+			return Response.json({ snapshot_id: 'different-acknowledged-version' });
+		};
+		const response = await post(f, body, request);
+		expect(response.status).toBe(409);
+		expect(await response.json()).toEqual({ error: 'playlist_changed_since_sync' });
+		expect(f.writes()).toHaveLength(1);
+		expect(f.items).toEqual([uri(2), uri(1), ...selected.slice(2, 102)]);
 	});
 	it('blocks recovery before reaching Spotify when the server still has an uncertain write', async () => {
 		const f = await fixture();
